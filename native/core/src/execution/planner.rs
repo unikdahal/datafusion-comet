@@ -1679,25 +1679,24 @@ impl PhysicalPlanner {
                 let (scans, shuffle_scans, child) =
                     self.create_plan(&children[0], inputs, partition_count)?;
 
-                let is_source_row_present =
-                    self.create_expr(merge.is_source_row_present.as_ref().unwrap(), child.schema())?;
-                let is_target_row_present =
-                    self.create_expr(merge.is_target_row_present.as_ref().unwrap(), child.schema())?;
+                let is_source_row_present = self.create_expr(
+                    merge.is_source_row_present.as_ref().unwrap(),
+                    child.schema(),
+                )?;
+                let is_target_row_present = self.create_expr(
+                    merge.is_target_row_present.as_ref().unwrap(),
+                    child.schema(),
+                )?;
 
-                let fields: Vec<Field> = merge
-                    .output_types
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, dt)| Field::new(format!("col_{idx}"), to_arrow_datatype(dt), true))
-                    .collect();
-                let schema = Arc::new(Schema::new(fields));
-
-                let compile_instructions = |instrs: &[spark_operator::MergeInstruction]| -> Result<Vec<MergeInstructionExec>, ExecutionError> {
+                let compile_instructions = |instrs: &[spark_operator::MergeInstruction]| -> Result<
+                    Vec<MergeInstructionExec>,
+                    ExecutionError,
+                > {
                     instrs
                         .iter()
                         .map(|instr| {
-                            let condition =
-                                self.create_expr(instr.condition.as_ref().unwrap(), child.schema())?;
+                            let condition = self
+                                .create_expr(instr.condition.as_ref().unwrap(), child.schema())?;
                             let outputs = instr
                                 .outputs
                                 .iter()
@@ -1714,9 +1713,38 @@ impl PhysicalPlanner {
                 };
 
                 let matched_instructions = compile_instructions(&merge.matched_instructions)?;
-                let not_matched_instructions = compile_instructions(&merge.not_matched_instructions)?;
+                let not_matched_instructions =
+                    compile_instructions(&merge.not_matched_instructions)?;
                 let not_matched_by_source_instructions =
                     compile_instructions(&merge.not_matched_by_source_instructions)?;
+
+                // Derive the output schema from the compiled projection expressions rather than
+                // from Spark's declared `output_types`, mirroring `Expand` above. The two can
+                // disagree -- most plausibly when a Comet scan hands up a dictionary-encoded
+                // string (`Dictionary(Int32, Utf8)`) where Spark declares a plain `Utf8`. Since
+                // `project()` in `merge_rows.rs` builds its `RecordBatch` from the expression
+                // outputs, a schema taken from the proto types would fail
+                // `RecordBatch::try_new_with_options` at runtime with a column/schema type
+                // mismatch. Fall back to the declared types when every instruction is a Discard
+                // and there is therefore no projection to read the types off.
+                let datatypes: Vec<DataType> = match matched_instructions
+                    .iter()
+                    .chain(&not_matched_instructions)
+                    .chain(&not_matched_by_source_instructions)
+                    .find_map(|instr| instr.outputs.first())
+                {
+                    Some(exprs) => exprs
+                        .iter()
+                        .map(|expr| expr.data_type(&child.schema()))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    None => merge.output_types.iter().map(to_arrow_datatype).collect(),
+                };
+                let fields: Vec<Field> = datatypes
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, dt)| Field::new(format!("col_{idx}"), dt.clone(), true))
+                    .collect();
+                let schema = Arc::new(Schema::new(fields));
 
                 let exec = Arc::new(MergeRowsExec::try_new(
                     is_source_row_present,

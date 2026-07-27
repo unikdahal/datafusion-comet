@@ -31,6 +31,8 @@ import org.apache.spark.sql.execution.{QueryExecution, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.util.QueryExecutionListener
 
+import org.apache.comet.CometSparkSessionExtensions.isSpark35Plus
+
 /**
  * State sampled around each test action to check commit-once invariants. `snapshotDelta` is the
  * change in the Iceberg table's snapshot history during `action`; for a single Comet-Iceberg
@@ -460,6 +462,11 @@ class CometIcebergWriteActionSuite
     // matched-UPDATE + not-matched-INSERT upsert (Phase 1 scope: no NOT MATCHED BY SOURCE, no
     // cross-partition Split).
     assumeNativeAcceleration()
+    // Spark 3.4 core has no `MergeRowsExec` at all, so `ShimCometMergeRows.nativeExecs` is empty
+    // there by design, the merge stays on the JVM, and `requiresNativeChildren` then declines the
+    // `IcebergWriteExec` conversion. The 3.4 profile does pull in `iceberg-spark-runtime-3.4` as a
+    // test dep, so `assumeNativeAcceleration` alone would let this run and fail.
+    assume(isSpark35Plus, "MergeRowsExec only exists in Spark 3.5+")
     withIcebergCatalog { warehouseDir =>
       createTable(
         warehouseDir,

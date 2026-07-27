@@ -16,10 +16,12 @@
 // under the License.
 
 use arrow::array::{Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchOptions};
-use arrow::compute::filter_record_batch;
+use arrow::buffer::BooleanBuffer;
 use arrow::compute::kernels::boolean::{and, not};
+use arrow::compute::{filter, filter_record_batch};
 use arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::{
@@ -148,7 +150,9 @@ impl ExecutionPlan for MergeRowsExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
-        let child_stream = self.child.execute(partition, context)?;
+        let reservation = MemoryConsumer::new(format!("CometMergeRowsExec[{partition}]"))
+            .register(&context.runtime_env().memory_pool);
+        let child_stream = self.child.execute(partition, Arc::clone(&context))?;
         Ok(Box::pin(MergeRowsStream {
             is_source_row_present: Arc::clone(&self.is_source_row_present),
             is_target_row_present: Arc::clone(&self.is_target_row_present),
@@ -163,6 +167,7 @@ impl ExecutionPlan for MergeRowsExec {
             // stream polls -- see the field doc on `MergeRowsStream::seen` for why it must not
             // be reset per batch.
             seen: HashSet::new(),
+            reservation,
         }))
     }
 
@@ -191,7 +196,15 @@ pub struct MergeRowsStream {
     /// must still be caught. Mirrors Spark's `MergeRowsExec.BitmapCardinalityValidator`, which is
     /// task-scoped, not batch-scoped.
     seen: HashSet<i64>,
+    /// Pool accounting for [`MergeRowsStream::seen`]. Held for the life of the stream and
+    /// released on drop.
+    reservation: MemoryReservation,
 }
+
+/// Conservative per-entry cost of `seen`. hashbrown stores an 8-byte key plus a 1-byte control
+/// slot at a ~87.5% load factor (~10.3 bytes/element) and doubles its table on growth; 16 bytes
+/// per entry covers both without needing to observe the actual capacity.
+const SEEN_ENTRY_BYTES: usize = 16;
 
 /// Rewrites NULL slots to `false`, producing an all-valid boolean array.
 ///
@@ -246,15 +259,26 @@ fn run_group(
     instructions: &[MergeInstructionExec],
     schema: &SchemaRef,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let mut remaining = group_mask.clone();
+    if instructions.is_empty() || group_mask.true_count() == 0 {
+        return Ok(vec![]);
+    }
+
+    // Narrow to the group's rows *before* evaluating any condition. Spark reaches
+    // `applyInstructions` only after a row has been routed to a group, so a clause condition is
+    // never evaluated against a row belonging to another group. Evaluating over the whole batch
+    // would additionally expose rows the clause was never meant to see -- e.g. a NOT MATCHED
+    // condition `s.a / s.b > 1` evaluated on matched rows, where `s.b` is a real value and may
+    // be 0, raising an ANSI divide-by-zero that Spark would never produce.
+    let group_batch = filter_record_batch(batch, group_mask)?;
+    let mut remaining = BooleanArray::new(BooleanBuffer::new_set(group_batch.num_rows()), None);
     let mut out = Vec::new();
 
     for instr in instructions {
-        let cond = eval_bool(&instr.condition, batch)?;
+        let cond = eval_bool(&instr.condition, &group_batch)?;
         let fire = and(&remaining, &cond)?;
 
         if fire.true_count() > 0 {
-            let filtered = filter_record_batch(batch, &fire)?;
+            let filtered = filter_record_batch(&group_batch, &fire)?;
             for output_exprs in &instr.outputs {
                 out.push(project(&filtered, output_exprs, schema)?);
             }
@@ -274,16 +298,19 @@ fn check_cardinality(
     matched_mask: &BooleanArray,
     row_id_ordinal: usize,
     seen: &mut HashSet<i64>,
+    reservation: &mut MemoryReservation,
 ) -> Result<(), DataFusionError> {
-    let filtered = filter_record_batch(batch, matched_mask)?;
+    // Filter just the row-id column rather than `filter_record_batch` over the whole batch: only
+    // this one column is read, so copying every other column on every poll is pure waste.
+    let filtered = filter(batch.column(row_id_ordinal), matched_mask)?;
     let row_ids = filtered
-        .column(row_id_ordinal)
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or_else(|| {
             DataFusionError::Internal("MergeRows: row id column must be Int64".to_string())
         })?;
 
+    let mut new_entries = 0usize;
     for i in 0..row_ids.len() {
         if row_ids.is_valid(i) {
             let id = row_ids.value(i);
@@ -295,8 +322,16 @@ fn check_cardinality(
                         .to_string(),
                 ));
             }
+            new_entries += 1;
         }
     }
+
+    // `seen` grows for the lifetime of the partition and is unbounded in the number of matched
+    // target rows, so it must be visible to the memory pool -- otherwise a large MERGE grows
+    // native memory with nothing to push back on it. Accounted after the fact (rather than
+    // reserving the batch's row count up front and releasing the remainder) since the overshoot
+    // is bounded by one batch.
+    reservation.try_grow(new_entries * SEEN_ENTRY_BYTES)?;
     Ok(())
 }
 
@@ -313,6 +348,7 @@ fn process_batch(
     // Caller-owned and threaded across every batch of the partition -- must NOT be created
     // fresh per call, or a cardinality violation split across two batches goes undetected.
     seen: &mut HashSet<i64>,
+    reservation: &mut MemoryReservation,
     schema: &SchemaRef,
 ) -> Result<RecordBatch, DataFusionError> {
     let source_present = eval_bool(is_source_row_present, &batch)?;
@@ -323,11 +359,16 @@ fn process_batch(
     let not_matched_by_source_mask = and(&target_present, &not(&source_present)?)?;
 
     if check_cardinality_flag {
-        check_cardinality(&batch, &matched_mask, row_id_ordinal, seen)?;
+        check_cardinality(&batch, &matched_mask, row_id_ordinal, seen, reservation)?;
     }
 
     let mut batches = Vec::new();
-    batches.extend(run_group(&batch, &matched_mask, matched_instructions, schema)?);
+    batches.extend(run_group(
+        &batch,
+        &matched_mask,
+        matched_instructions,
+        schema,
+    )?);
     batches.extend(run_group(
         &batch,
         &not_matched_mask,
@@ -368,6 +409,7 @@ impl Stream for MergeRowsStream {
                 this.check_cardinality,
                 this.row_id_ordinal,
                 &mut this.seen,
+                &mut this.reservation,
                 &this.schema,
             ))),
             other => other,
@@ -386,8 +428,9 @@ mod tests {
     use super::*;
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field, Schema};
-    use datafusion::physical_expr::expressions::{binary, col, lit};
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
     use datafusion::logical_expr::Operator as DFOperator;
+    use datafusion::physical_expr::expressions::{binary, col, lit};
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -414,6 +457,12 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// Pool accounting is not what these tests exercise, so they run against an unbounded pool.
+    fn test_reservation() -> MemoryReservation {
+        let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+        MemoryConsumer::new("test").register(&pool)
     }
 
     fn out_schema() -> SchemaRef {
@@ -453,14 +502,11 @@ mod tests {
             false,
             0,
             &mut HashSet::new(),
+            &mut test_reservation(),
             &out_schema(),
         )
         .unwrap();
-        let vals = out
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
+        let vals = out.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
         let mut got: Vec<i32> = vals.iter().flatten().collect();
         got.sort();
         // row 1 (matched, kept) and row 2 (not-matched, inserted); row 3 discarded.
@@ -494,14 +540,11 @@ mod tests {
             false,
             0,
             &mut HashSet::new(),
+            &mut test_reservation(),
             &out_schema(),
         )
         .unwrap();
-        let vals = out
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
+        let vals = out.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
         assert_eq!(vals.value(0), 2);
     }
 
@@ -549,6 +592,7 @@ mod tests {
             false,
             0,
             &mut HashSet::new(),
+            &mut test_reservation(),
             &out_schema(),
         )
         .unwrap();
@@ -597,6 +641,7 @@ mod tests {
             false,
             0,
             &mut HashSet::new(),
+            &mut test_reservation(),
             &out_schema(),
         )
         .unwrap();
@@ -606,12 +651,85 @@ mod tests {
     }
 
     #[test]
+    fn condition_not_evaluated_outside_its_group() {
+        // Spark reaches `applyInstructions` only after a row is routed to a group, so a NOT
+        // MATCHED condition never sees a matched row. Row 1 is matched with `val = 0`; row 2 is
+        // the only not-matched row. Evaluating the not-matched condition `10 / val > 1` over the
+        // whole batch (the pre-fix behaviour) divides by row 1's zero and fails the query with an
+        // error Spark would never raise.
+        let batch = test_batch(vec![1, 2], vec![0, 5], vec![true, false], vec![true, true]);
+        let div_cond = MergeInstructionExec {
+            condition: binary(
+                binary(
+                    lit(10i32),
+                    DFOperator::Divide,
+                    col("val", &test_schema()).unwrap(),
+                    &test_schema(),
+                )
+                .unwrap(),
+                DFOperator::Gt,
+                lit(1i32),
+                &test_schema(),
+            )
+            .unwrap(),
+            outputs: vec![vec![col("val", &test_schema()).unwrap()]],
+        };
+        // Guard the test's own premise: evaluated over the whole batch this condition really
+        // does fail, so a regression back to batch-wide evaluation cannot slip through silently.
+        assert!(
+            eval_bool(&div_cond.condition, &batch).is_err(),
+            "test is only meaningful if batch-wide evaluation of this condition errors"
+        );
+        let out = process_batch(
+            batch,
+            &col("source_present", &test_schema()).unwrap(),
+            &col("target_present", &test_schema()).unwrap(),
+            &[keep_all()],
+            &[div_cond],
+            &[],
+            false,
+            0,
+            &mut HashSet::new(),
+            &mut test_reservation(),
+            &out_schema(),
+        )
+        .expect("not-matched condition must not be evaluated against the matched row");
+        let vals = out.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+        let mut got: Vec<i32> = vals.iter().flatten().collect();
+        got.sort();
+        // row 1 kept by the matched group; row 2 kept by the not-matched group (10 / 5 > 1).
+        assert_eq!(got, vec![0, 5]);
+    }
+
+    #[test]
+    fn cardinality_state_is_accounted_to_the_memory_pool() {
+        let mut reservation = test_reservation();
+        let batch = test_batch(vec![1, 2], vec![10, 20], vec![true, true], vec![true, true]);
+        let matched_mask = BooleanArray::from(vec![true, true]);
+        check_cardinality(
+            &batch,
+            &matched_mask,
+            0,
+            &mut HashSet::new(),
+            &mut reservation,
+        )
+        .unwrap();
+        assert_eq!(
+            reservation.size(),
+            2 * SEEN_ENTRY_BYTES,
+            "`seen` must be visible to the memory pool so an unbounded MERGE has something \
+             pushing back on it"
+        );
+    }
+
+    #[test]
     fn cardinality_violation_detected() {
         // Same target row_id (1) matched twice -> must error.
         let batch = test_batch(vec![1, 1], vec![10, 20], vec![true, true], vec![true, true]);
         let matched_mask = BooleanArray::from(vec![true, true]);
         let mut seen = HashSet::new();
-        let result = check_cardinality(&batch, &matched_mask, 0, &mut seen);
+        let result =
+            check_cardinality(&batch, &matched_mask, 0, &mut seen, &mut test_reservation());
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -636,6 +754,7 @@ mod tests {
             false,
             0,
             &mut HashSet::new(),
+            &mut test_reservation(),
             &out_schema(),
         )
         .unwrap();
@@ -662,6 +781,7 @@ mod tests {
             true,
             0,
             &mut seen,
+            &mut test_reservation(),
             &out_schema(),
         );
         assert!(
@@ -679,6 +799,7 @@ mod tests {
             true,
             0,
             &mut seen,
+            &mut test_reservation(),
             &out_schema(),
         );
         assert!(
