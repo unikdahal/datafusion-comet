@@ -241,6 +241,7 @@ fn op_name(op: &OpStruct) -> &'static str {
         OpStruct::Explode(_) => "Explode",
         OpStruct::CsvScan(_) => "CsvScan",
         OpStruct::ShuffleScan(_) => "ShuffleScan",
+        OpStruct::MergeRows(_) => "MergeRows",
     }
 }
 

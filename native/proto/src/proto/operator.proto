@@ -54,6 +54,7 @@ message Operator {
     CsvScan csv_scan = 115;
     ShuffleScan shuffle_scan = 116;
     IcebergWrite iceberg_write = 117;
+    MergeRows merge_rows = 118;
   }
 }
 
@@ -503,6 +504,41 @@ enum AggregateMode {
 message Expand {
   repeated spark.spark_expression.Expr project_list = 1;
   int32 num_expr_per_project = 3;
+}
+
+// Native counterpart of Spark's `MergeRowsExec` (row-level MERGE dispatch). Mirrors the real
+// Spark 4.x bytecode shape: `isSourceRowPresent` / `isTargetRowPresent` are predicates (not
+// column ordinals), and each instruction is uniformly `condition + outputs`, where the number
+// of output row projections (0/1/2) distinguishes Discard/Keep/Split -- there is no separate
+// instruction-kind enum on the Spark side, so we don't invent one here either.
+message MergeRows {
+  spark.spark_expression.Expr is_source_row_present = 1;
+  spark.spark_expression.Expr is_target_row_present = 2;
+
+  repeated MergeInstruction matched_instructions = 3;
+  repeated MergeInstruction not_matched_instructions = 4;
+  repeated MergeInstruction not_matched_by_source_instructions = 5;
+
+  // Mirrors `MergeRowsExec.checkCardinality`: raise MERGE_CARDINALITY_VIOLATION if a target
+  // row matches more than one source row.
+  bool check_cardinality = 6;
+  // Ordinal (into the child row) of the target row-id column used for cardinality dedup.
+  // Only meaningful when check_cardinality is true.
+  int32 row_id_ordinal = 7;
+
+  // Schema of the emitted rows, matching `MergeRowsExec.output`.
+  repeated spark.spark_expression.DataType output_types = 8;
+}
+
+message MergeInstruction {
+  // Always present on the Spark side (Keep/Discard/Split.condition are non-optional).
+  spark.spark_expression.Expr condition = 1;
+  // 0 output rows = Discard, 1 = Keep, 2 = Split.
+  repeated MergeOutputRow outputs = 2;
+}
+
+message MergeOutputRow {
+  repeated spark.spark_expression.Expr exprs = 1;
 }
 
 message Explode {

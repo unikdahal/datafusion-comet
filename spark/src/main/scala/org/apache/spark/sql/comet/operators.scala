@@ -1203,6 +1203,45 @@ case class CometExpandExec(
   override lazy val metrics: Map[String, SQLMetric] = Map.empty
 }
 
+/**
+ * Native counterpart of Spark's `MergeRowsExec` -- the row-level MERGE dispatch operator that
+ * decides, per row, whether it is kept, discarded (a copy-on-write delete), or split into two
+ * output rows. See `org.apache.comet.serde.operator.CometMergeRows` (version-shimmed, since the
+ * Spark class this converts only exists in Spark 3.5+) for the conversion logic.
+ */
+case class CometMergeRowsExec(
+    override val nativeOp: Operator,
+    override val originalPlan: SparkPlan,
+    override val output: Seq[Attribute],
+    child: SparkPlan,
+    override val serializedPlanOpt: SerializedPlan)
+    extends CometUnaryExec {
+  override def outputPartitioning: Partitioning = UnknownPartitioning(0)
+
+  override def producedAttributes: AttributeSet = outputSet
+
+  override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan =
+    this.copy(child = newChild)
+
+  override def stringArgs: Iterator[Any] = Iterator(output, child)
+
+  override def equals(obj: Any): Boolean = {
+    obj match {
+      case other: CometMergeRowsExec =>
+        this.output == other.output &&
+        this.child == other.child &&
+        this.serializedPlanOpt == other.serializedPlanOpt
+      case _ =>
+        false
+    }
+  }
+
+  override def hashCode(): Int = Objects.hashCode(output, child)
+
+  // TODO: support native MergeRows metrics
+  override lazy val metrics: Map[String, SQLMetric] = Map.empty
+}
+
 object CometExplodeExec extends CometOperatorSerde[GenerateExec] {
 
   override def enabledConfig: Option[ConfigEntry[Boolean]] = Some(

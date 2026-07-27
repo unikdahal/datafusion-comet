@@ -451,15 +451,14 @@ class CometIcebergWriteActionSuite
     }
   }
 
-  test("native acceleration: ReplaceData (CoW MERGE) falls back (MergeRowsExec not Comet)") {
-    // TODO(comet-merge-rows): native MERGE engagement requires a Comet equivalent of Iceberg's
-    // `MergeRowsExec` (the per-row dispatch operator that assigns __row_operation codes from
-    // MATCHED/NOT MATCHED clauses). Without it, `MergeRowsExec` stays JVM, the upstream chain
-    // breaks Comet-native partway, and `requiresNativeChildren=true` declines the
-    // `IcebergWriteExec -> CometIcebergWriteExec` conversion. Until that lands, MERGE
-    // falls back to the JVM two-op path -- this test pins that contract so a future MERGE-row-exec
-    // addition surfaces clearly (the test will start failing and need to flip back to
-    // `assertNativeWriteEngages`).
+  test("native acceleration: ReplaceData (CoW MERGE) engages (CometMergeRowsExec)") {
+    // comet-merge-rows: CometMergeRowsExec is the native equivalent of Spark's `MergeRowsExec`
+    // (the per-row dispatch operator that assigns matched/not-matched/not-matched-by-source
+    // rows to Keep/Discard/Split instructions). With it registered, the upstream chain
+    // (scan/join/sort/shuffle/MergeRows) is fully Comet-native, so `requiresNativeChildren=true`
+    // now accepts the `IcebergWriteExec -> CometIcebergWriteExec` conversion for a plain
+    // matched-UPDATE + not-matched-INSERT upsert (Phase 1 scope: no NOT MATCHED BY SOURCE, no
+    // cross-partition Split).
     assumeNativeAcceleration()
     withIcebergCatalog { warehouseDir =>
       createTable(
@@ -470,7 +469,7 @@ class CometIcebergWriteActionSuite
       withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
         coalesceInsert("native_cow_merge", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
       }
-      assertNativeWriteDoesNotEngage("native_cow_merge", Seq(1, 2, 3)) {
+      assertNativeWriteEngages("native_cow_merge", Seq(1, 2, 3)) {
         spark.sql("""
           |MERGE INTO cat.db.native_cow_merge t
           |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
@@ -480,6 +479,14 @@ class CometIcebergWriteActionSuite
           |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
           |""".stripMargin)
       }
+      // Spot-check: row 2 updated (200.0), row 3 inserted, row 1 untouched.
+      val r = spark
+        .sql("SELECT id, amount FROM cat.db.native_cow_merge ORDER BY id")
+        .collect()
+      assert(r.length == 3)
+      assert(r(0).getDouble(1) == 10.0) // id=1 untouched
+      assert(r(1).getDouble(1) == 200.0) // id=2 updated
+      assert(r(2).getDouble(1) == 30.0) // id=3 inserted
     }
   }
 
