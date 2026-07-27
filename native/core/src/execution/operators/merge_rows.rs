@@ -193,6 +193,24 @@ pub struct MergeRowsStream {
     seen: HashSet<i64>,
 }
 
+/// Rewrites NULL slots to `false`, producing an all-valid boolean array.
+///
+/// Every boolean in this operator -- the row-presence flags and each instruction condition --
+/// goes through Spark's `BasePredicate.eval(InternalRow): Boolean`, which collapses a NULL
+/// predicate result to plain `false`. Arrow's `and`/`not` kernels instead propagate NULL, so a
+/// NULL must be flattened *before* it enters any mask arithmetic; otherwise a NULL condition
+/// poisons `run_group`'s shrinking `remaining` mask and the row is silently dropped from every
+/// later instruction in the group -- including the catch-all `Keep(TrueLiteral, target.output)`
+/// that Spark's `RewriteMergeIntoTable` appends to the matched and not-matched-by-source groups.
+/// For a copy-on-write MERGE that means the target row is never written to the rewritten data
+/// file, i.e. silent data loss.
+fn null_to_false(array: &BooleanArray) -> BooleanArray {
+    match array.nulls() {
+        Some(nulls) => BooleanArray::new(array.values() & nulls.inner(), None),
+        None => array.clone(),
+    }
+}
+
 fn eval_bool(
     expr: &Arc<dyn PhysicalExpr>,
     batch: &RecordBatch,
@@ -201,7 +219,7 @@ fn eval_bool(
     array
         .as_any()
         .downcast_ref::<BooleanArray>()
-        .cloned()
+        .map(null_to_false)
         .ok_or_else(|| DataFusionError::Internal("MergeRows: expected boolean array".to_string()))
 }
 
@@ -485,6 +503,106 @@ mod tests {
             .downcast_ref::<Int32Array>()
             .unwrap();
         assert_eq!(vals.value(0), 2);
+    }
+
+    #[test]
+    fn null_condition_falls_through_to_next_instruction() {
+        // Regression test for the NULL-propagation data-loss bug. Models the plan
+        // `RewriteMergeIntoTable` actually builds for
+        //   MERGE ... WHEN MATCHED AND s.val > 100 THEN UPDATE ...
+        // namely a two-instruction matched group whose second entry is the appended catch-all
+        // `Keep(TrueLiteral, target.output)`. With `val` NULL the first condition evaluates to
+        // NULL, which Spark treats as `false` and falls through to the catch-all; before the
+        // `null_to_false` normalization Arrow's NULL-propagating `and`/`not` poisoned the
+        // `remaining` mask and the row vanished from the output entirely.
+        let batch = RecordBatch::try_new(
+            test_schema(),
+            vec![
+                Arc::new(Int64Array::from(vec![1i64])),
+                Arc::new(Int32Array::from(vec![None::<i32>])),
+                Arc::new(BooleanArray::from(vec![true])),
+                Arc::new(BooleanArray::from(vec![true])),
+            ],
+        )
+        .unwrap();
+        let cond_null = MergeInstructionExec {
+            condition: binary(
+                col("val", &test_schema()).unwrap(),
+                DFOperator::Gt,
+                lit(100i32),
+                &test_schema(),
+            )
+            .unwrap(),
+            outputs: vec![vec![lit(1i32)]],
+        };
+        let keep_catch_all = MergeInstructionExec {
+            condition: lit(true),
+            outputs: vec![vec![lit(2i32)]],
+        };
+        let out = process_batch(
+            batch,
+            &col("source_present", &test_schema()).unwrap(),
+            &col("target_present", &test_schema()).unwrap(),
+            &[cond_null, keep_catch_all],
+            &[],
+            &[],
+            false,
+            0,
+            &mut HashSet::new(),
+            &out_schema(),
+        )
+        .unwrap();
+        assert_eq!(
+            out.num_rows(),
+            1,
+            "row with a NULL clause condition must fall through to the catch-all Keep, not \
+             disappear from the rewritten data file"
+        );
+        let vals = out.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(vals.value(0), 2);
+    }
+
+    #[test]
+    fn null_row_presence_flag_treated_as_false() {
+        // The presence flags feed the same mask arithmetic as clause conditions, so a nullable
+        // `__row_from_source` / `__row_from_target` must also collapse to `false` rather than
+        // NULL -- otherwise the row falls out of all three group masks and is dropped.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row_id", DataType::Int64, true),
+            Field::new("val", DataType::Int32, true),
+            Field::new("target_present", DataType::Boolean, true),
+            Field::new("source_present", DataType::Boolean, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1i64])),
+                Arc::new(Int32Array::from(vec![10])),
+                Arc::new(BooleanArray::from(vec![Some(true)])),
+                Arc::new(BooleanArray::from(vec![None::<bool>])),
+            ],
+        )
+        .unwrap();
+        // source NULL -> false, target true => not-matched-by-source group.
+        let out = process_batch(
+            batch,
+            &col("source_present", &schema).unwrap(),
+            &col("target_present", &schema).unwrap(),
+            &[],
+            &[],
+            &[MergeInstructionExec {
+                condition: lit(true),
+                outputs: vec![vec![col("val", &schema).unwrap()]],
+            }],
+            false,
+            0,
+            &mut HashSet::new(),
+            &out_schema(),
+        )
+        .unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let vals = out.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(vals.value(0), 10);
     }
 
     #[test]
