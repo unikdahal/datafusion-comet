@@ -109,11 +109,20 @@ case class CometIcebergWriteExec(
 
   // Names mirror Spark's stock `BatchWriteHelper` metrics (`numFiles` / `numOutputRows` /
   // `numOutputBytes`) so the Spark SQL UI shows the same row as it would for a non-Comet
-  // Iceberg write.
+  // Iceberg write. `write_time` is native-only: wall-clock this operator itself spent in
+  // writer.write/close + manifest encoding, separate from time spent awaiting the upstream
+  // native pipeline -- lets the write phase be isolated from upstream scan/join/merge time.
   override lazy val metrics: Map[String, SQLMetric] = Map(
     "numFiles" -> SQLMetrics.createMetric(sparkContext, "number of files written"),
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-    "numOutputBytes" -> SQLMetrics.createSizeMetric(sparkContext, "written output"))
+    "numOutputBytes" -> SQLMetrics.createSizeMetric(sparkContext, "written output"),
+    "write_time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "native writer time"),
+    // `input_rows / input_batches` is the average batch this operator was fed. The iceberg-rust
+    // writer stack's per-batch cost scales with column count rather than row count, so a low
+    // average here (a fragmented upstream, e.g. a copy-on-write MERGE) is what makes the write
+    // phase slow even though the same writer is fast for a plain INSERT.
+    "input_batches" -> SQLMetrics.createMetric(sparkContext, "input batches to native writer"),
+    "input_rows" -> SQLMetrics.createMetric(sparkContext, "input rows to native writer"))
 
   override def doExecute(): RDD[InternalRow] = {
     val columnarRdd = doExecuteColumnar()

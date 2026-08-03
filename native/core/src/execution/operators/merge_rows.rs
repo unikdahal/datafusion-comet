@@ -17,13 +17,16 @@
 
 use arrow::array::{Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchOptions};
 use arrow::buffer::BooleanBuffer;
+use arrow::compute::filter_record_batch;
 use arrow::compute::kernels::boolean::{and, not};
-use arrow::compute::{filter, filter_record_batch};
 use arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+};
 use datafusion::{
     execution::TaskContext,
     physical_plan::{
@@ -66,6 +69,7 @@ pub struct MergeRowsExec {
     child: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
     cache: Arc<PlanProperties>,
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl MergeRowsExec {
@@ -81,10 +85,26 @@ impl MergeRowsExec {
         child: Arc<dyn ExecutionPlan>,
         schema: SchemaRef,
     ) -> Result<Self, DataFusionError> {
+        // `check_cardinality` makes `row_id_ordinal` a direct index into the child batch, so a
+        // wire value that does not address a real column would panic inside `check_cardinality`
+        // with an out-of-bounds column access on the first batch. Reject it here instead, while
+        // there is still a plan to fall back from.
+        if check_cardinality {
+            let child_fields = child.schema().fields().len();
+            if row_id_ordinal >= child_fields {
+                return Err(DataFusionError::Internal(format!(
+                    "MergeRows: row id ordinal {row_id_ordinal} is out of range for a child with \
+                     {child_fields} columns"
+                )));
+            }
+        }
+
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
             Partitioning::UnknownPartitioning(1),
-            EmissionType::Final,
+            // One output batch per input batch -- nothing is buffered until the input ends, so
+            // this is `Incremental`, not `Final`.
+            EmissionType::Incremental,
             Boundedness::Bounded,
         ));
 
@@ -99,6 +119,7 @@ impl MergeRowsExec {
             child,
             schema,
             cache,
+            metrics: ExecutionPlanMetricsSet::new(),
         })
     }
 }
@@ -142,6 +163,7 @@ impl ExecutionPlan for MergeRowsExec {
             child: Arc::clone(&children[0]),
             schema: Arc::clone(&self.schema),
             cache: Arc::clone(&self.cache),
+            metrics: self.metrics.clone(),
         }))
     }
 
@@ -168,11 +190,17 @@ impl ExecutionPlan for MergeRowsExec {
             // be reset per batch.
             seen: HashSet::new(),
             reservation,
+            baseline: BaselineMetrics::new(&self.metrics, partition),
+            output_batches: MetricBuilder::new(&self.metrics).counter("output_batches", partition),
         }))
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 
     fn name(&self) -> &str {
@@ -199,6 +227,18 @@ pub struct MergeRowsStream {
     /// Pool accounting for [`MergeRowsStream::seen`]. Held for the life of the stream and
     /// released on drop.
     reservation: MemoryReservation,
+    /// `elapsed_compute` / `output_rows`. Without these the merge operator is invisible in the
+    /// Spark UI and in benchmarking, so its share of a slow MERGE cannot be separated from the
+    /// upstream join/scan or the downstream write.
+    baseline: BaselineMetrics,
+    /// Counts emitted batches, so `output_rows / output_batches` gives this operator's average
+    /// output batch size. `BaselineMetrics` tracks rows but not batches, and the batch *shape* is
+    /// what matters downstream: the iceberg-rust writer stack's cost per batch scales with column
+    /// count rather than row count, so a fragmented merge output would make the write phase slow
+    /// even though the same writer is fast for a plain INSERT. Measured here rather than on the
+    /// write operator so it reports the shape as it leaves this operator, upstream of the FFI
+    /// boundary between the merge and write native pipelines.
+    output_batches: Count,
 }
 
 /// Conservative per-entry cost of `seen`. hashbrown stores an 8-byte key plus a 1-byte control
@@ -253,6 +293,14 @@ fn project(
 /// selected by `group_mask`, producing zero or more output batches. Reproduces Spark's ordered,
 /// first-match-wins clause evaluation (`MergeRows`: "the first matching expression is used")
 /// via a shrinking `remaining` mask.
+///
+/// Output rows come out grouped by the instruction that produced them rather than in input row
+/// order -- this operator is set-at-a-time where Spark's is row-at-a-time. That is safe because
+/// nothing downstream depends on this operator's row order: Iceberg applies its required
+/// distribution and ordering to the *write's* input, so `DistributionAndOrderingUtils` places the
+/// repartition and sort above `MergeRows`, not below it. A partitioned `ClusteredWriter` therefore
+/// still receives partition-clustered input. Do not wire a writer directly to this operator's
+/// output without preserving that sort.
 fn run_group(
     batch: &RecordBatch,
     group_mask: &BooleanArray,
@@ -300,10 +348,12 @@ fn check_cardinality(
     seen: &mut HashSet<i64>,
     reservation: &mut MemoryReservation,
 ) -> Result<(), DataFusionError> {
-    // Filter just the row-id column rather than `filter_record_batch` over the whole batch: only
-    // this one column is read, so copying every other column on every poll is pure waste.
-    let filtered = filter(batch.column(row_id_ordinal), matched_mask)?;
-    let row_ids = filtered
+    // Read the row-id column in place and walk only the positions the mask selects. Filtering
+    // first would allocate a copy of the column on every poll purely to iterate it, and
+    // `filter_record_batch` over the whole batch would copy every other column too -- neither is
+    // needed, since this check reads one column and keeps nothing.
+    let row_ids = batch
+        .column(row_id_ordinal)
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or_else(|| {
@@ -311,7 +361,7 @@ fn check_cardinality(
         })?;
 
     let mut new_entries = 0usize;
-    for i in 0..row_ids.len() {
+    for i in matched_mask.values().set_indices() {
         if row_ids.is_valid(i) {
             let id = row_ids.value(i);
             if !seen.insert(id) {
@@ -398,21 +448,42 @@ impl Stream for MergeRowsStream {
         // `&mut this.seen` alongside the other `&this.*` borrows -- so cardinality state
         // accumulates across every batch polled from this stream instead of resetting per batch.
         let this = self.get_mut();
-        match this.child_stream.poll_next_unpin(cx) {
-            Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(process_batch(
-                batch,
-                &this.is_source_row_present,
-                &this.is_target_row_present,
-                &this.matched_instructions,
-                &this.not_matched_instructions,
-                &this.not_matched_by_source_instructions,
-                this.check_cardinality,
-                this.row_id_ordinal,
-                &mut this.seen,
-                &mut this.reservation,
-                &this.schema,
-            ))),
-            other => other,
+        // Loop rather than return the empty result: an input batch whose rows are all discarded
+        // (a copy-on-write DELETE clause, say) produces no output rows, and forwarding a zero-row
+        // batch makes every downstream stage pay for nothing -- an FFI export/import pair into
+        // the write pipeline, and in the partitioned case a full `RecordBatchPartitionSplitter`
+        // pass. Keep pulling until there is something to emit or the child is done.
+        loop {
+            let poll = match this.child_stream.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    // Times only this operator's own work; the upstream poll above is
+                    // deliberately outside the timer so `elapsed_compute` is not the whole
+                    // pipeline's wall clock.
+                    let _timer = this.baseline.elapsed_compute().timer();
+                    let result = process_batch(
+                        batch,
+                        &this.is_source_row_present,
+                        &this.is_target_row_present,
+                        &this.matched_instructions,
+                        &this.not_matched_instructions,
+                        &this.not_matched_by_source_instructions,
+                        this.check_cardinality,
+                        this.row_id_ordinal,
+                        &mut this.seen,
+                        &mut this.reservation,
+                        &this.schema,
+                    );
+                    match result {
+                        Ok(batch) if batch.num_rows() == 0 => continue,
+                        other => {
+                            this.output_batches.add(1);
+                            Poll::Ready(Some(other))
+                        }
+                    }
+                }
+                other => other,
+            };
+            return this.baseline.record_poll(poll);
         }
     }
 }
@@ -759,6 +830,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.num_rows(), 2);
+    }
+
+    /// A batch whose rows are all discarded must not surface as a zero-row batch: the stream
+    /// swallows it and pulls the next input instead, so downstream stages (the FFI hop into the
+    /// write pipeline, and `RecordBatchPartitionSplitter` for a partitioned table) never pay for
+    /// a batch with nothing in it.
+    #[tokio::test]
+    async fn all_discarded_batch_is_not_emitted() {
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::prelude::SessionContext;
+
+        // Batch 1: matched-only rows, all discarded. Batch 2: one row that survives.
+        let discarded = test_batch(vec![1], vec![10], vec![true], vec![true]);
+        let kept = test_batch(vec![2], vec![20], vec![false], vec![true]);
+        let source =
+            MemorySourceConfig::try_new_exec(&[vec![discarded, kept]], test_schema(), None)
+                .unwrap();
+
+        let exec = MergeRowsExec::try_new(
+            col("source_present", &test_schema()).unwrap(),
+            col("target_present", &test_schema()).unwrap(),
+            vec![discard_all()],
+            vec![keep_all()],
+            vec![],
+            false,
+            0,
+            source,
+            out_schema(),
+        )
+        .unwrap();
+
+        let ctx = SessionContext::new();
+        let mut stream = exec.execute(0, ctx.task_ctx()).unwrap();
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.next().await {
+            batches.push(batch.unwrap());
+        }
+        assert_eq!(
+            batches.len(),
+            1,
+            "the all-discarded batch must be swallowed, not forwarded as a zero-row batch"
+        );
+        assert_eq!(batches[0].num_rows(), 1);
+    }
+
+    /// A `row_id_ordinal` that does not address a real child column must be rejected at plan
+    /// construction. Reaching `check_cardinality` with it would panic on an out-of-bounds column
+    /// access instead of failing the query with a message.
+    #[test]
+    fn out_of_range_row_id_ordinal_is_rejected() {
+        use datafusion::datasource::memory::MemorySourceConfig;
+        let source = MemorySourceConfig::try_new_exec(&[vec![]], test_schema(), None).unwrap();
+        let err = MergeRowsExec::try_new(
+            col("source_present", &test_schema()).unwrap(),
+            col("target_present", &test_schema()).unwrap(),
+            vec![keep_all()],
+            vec![],
+            vec![],
+            true,
+            // `test_schema()` has 4 columns, so 99 cannot be a row-id column.
+            99,
+            source,
+            out_schema(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("row id ordinal"),
+            "expected an out-of-range ordinal error, got: {err}"
+        );
     }
 
     #[test]
