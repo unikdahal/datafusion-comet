@@ -86,9 +86,24 @@ case class CometScanRule(session: SparkSession)
     }
 
     def hasMetadataCol(plan: SparkPlan): Boolean = {
+      // Iceberg's `_file` metadata column (MetadataColumns.FILE_PATH) is allowed through this
+      // gate, but only for an Iceberg scan: iceberg-rust's RecordBatchTransformer knows how to
+      // inject it as a per-task constant (see RESERVED_FIELD_ID_FILE) and CometIcebergNativeScan
+      // resolves it explicitly below. Copy-on-write row-level operations request it so Iceberg
+      // knows which physical file each touched row came from.
+      //
+      // Every other metadata column (_pos, _deleted, _spec_id, input_file_name, ...) still forces
+      // a fallback to Spark -- and so does a column named `_file` on any other source, since no
+      // other Comet scan path can produce it.
+      val allowsFileMetadataCol = plan match {
+        case scanExec: BatchScanExec =>
+          IcebergReflection.isIcebergScanClass(scanExec.scan.getClass.getName)
+        case _ => false
+      }
       plan.expressions.exists(_.exists {
         case a: Attribute =>
-          a.isMetadataCol
+          a.isMetadataCol &&
+          !(allowsFileMetadataCol && a.name == IcebergReflection.RESERVED_COL_NAME_FILE)
         case _ => false
       })
     }

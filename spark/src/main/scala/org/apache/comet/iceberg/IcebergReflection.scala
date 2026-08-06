@@ -33,6 +33,31 @@ import org.apache.comet.util.ClassLoaders
 object IcebergReflection extends Logging {
 
   /**
+   * Reserved column name for Iceberg's `_file` metadata column (MetadataColumns.FILE_PATH).
+   * Requested by copy-on-write row-level operations (see SparkCopyOnWriteOperation) so Iceberg
+   * knows which physical file each touched row came from.
+   */
+  val RESERVED_COL_NAME_FILE: String = "_file"
+
+  /**
+   * Reserved field ID for the `_file` metadata column, per the Iceberg spec's reserved field ID
+   * range (Integer.MAX_VALUE - 200 and above). Must match `RESERVED_FIELD_ID_FILE` in
+   * iceberg-rust's `metadata_columns` module exactly -- this is the value the native
+   * RecordBatchTransformer keys on to inject the per-task constant.
+   */
+  val RESERVED_FIELD_ID_FILE: Int = Int.MaxValue - 1
+
+  /**
+   * Lower bound of the Iceberg spec's reserved field ID range. Field IDs at or above this are
+   * virtual metadata columns (`_file`, `_pos`, `_deleted`, ...) that never appear in a table's
+   * real schema, so they must not be mistaken for schema evolution.
+   */
+  val RESERVED_FIELD_ID_MIN: Int = Int.MaxValue - 200
+
+  /** True if `fieldId` names a virtual metadata column rather than a real table column. */
+  def isReservedFieldId(fieldId: Int): Boolean = fieldId >= RESERVED_FIELD_ID_MIN
+
+  /**
    * Iceberg class names used throughout Comet.
    */
   object ClassNames {
@@ -51,6 +76,11 @@ object IcebergReflection extends Logging {
     val UNBOUND_PREDICATE = "org.apache.iceberg.expressions.UnboundPredicate"
     val SPARK_BATCH_QUERY_SCAN = "org.apache.iceberg.spark.source.SparkBatchQueryScan"
     val SPARK_STAGED_SCAN = "org.apache.iceberg.spark.source.SparkStagedScan"
+    // Copy-on-write row-level operation (MERGE/UPDATE/DELETE) target-table scan. Sibling of
+    // SparkBatchQueryScan -- both extend SparkPartitioningAwareScan, just parameterized with
+    // different ScanTask generics (FileScanTask here vs PartitionScanTask). FileScanTask itself
+    // implements PartitionScanTask, so the reflection helpers below work unchanged for both.
+    val SPARK_COPY_ON_WRITE_SCAN = "org.apache.iceberg.spark.source.SparkCopyOnWriteScan"
     val SPARK_WRITE = "org.apache.iceberg.spark.source.SparkWrite"
     val TABLE_PROPERTIES = "org.apache.iceberg.TableProperties"
     val TYPE_UTIL = "org.apache.iceberg.types.TypeUtil"
@@ -79,7 +109,10 @@ object IcebergReflection extends Logging {
    * instances.
    */
   val ICEBERG_SCAN_CLASSES: Set[String] =
-    Set(ClassNames.SPARK_BATCH_QUERY_SCAN, ClassNames.SPARK_STAGED_SCAN)
+    Set(
+      ClassNames.SPARK_BATCH_QUERY_SCAN,
+      ClassNames.SPARK_STAGED_SCAN,
+      ClassNames.SPARK_COPY_ON_WRITE_SCAN)
 
   def isIcebergScanClass(name: String): Boolean = ICEBERG_SCAN_CLASSES.contains(name)
 

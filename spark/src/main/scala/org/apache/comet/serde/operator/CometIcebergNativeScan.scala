@@ -863,8 +863,16 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                       .buildFieldIdMapping(metadata.tableSchema)
                       .values
                       .toSet
+                    // Reserved metadata field IDs (`_file` and friends) are virtual: they are
+                    // never in the table schema, so counting them here would misread every
+                    // metadata-column scan as schema evolution and ship the narrow scan schema
+                    // instead of the table schema. The partition spec's source field IDs are
+                    // resolved against whichever schema is sent, so on a partitioned table the
+                    // narrow one fails native-side with "Field N not found in schema".
                     val hasHistoricalColumns =
-                      scanSchemaFieldIds.exists(id => !tableSchemaFieldIds.contains(id))
+                      scanSchemaFieldIds.exists(id =>
+                        !tableSchemaFieldIds.contains(id) &&
+                          !IcebergReflection.isReservedFieldId(id))
 
                     if (hasHistoricalColumns) {
                       metadata.scanSchema.asInstanceOf[AnyRef]
@@ -888,6 +896,18 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                   nameToFieldId
                     .get(attr.name)
                     .orElse(metadata.globalFieldIdMapping.get(attr.name))
+                    .orElse {
+                      // `_file` is a reserved virtual column (MetadataColumns.FILE_PATH):
+                      // it never appears in the real Iceberg schema, so buildFieldIdMapping
+                      // and globalFieldIdMapping never contain it. Resolve it explicitly to
+                      // the reserved field ID that iceberg-rust's RecordBatchTransformer
+                      // recognizes and injects as a per-task constant from data_file_path.
+                      if (attr.name == IcebergReflection.RESERVED_COL_NAME_FILE) {
+                        Some(IcebergReflection.RESERVED_FIELD_ID_FILE)
+                      } else {
+                        None
+                      }
+                    }
                     .orElse {
                       logWarning(s"Column '${attr.name}' not found in task or scan schema, " +
                         "skipping projection")
