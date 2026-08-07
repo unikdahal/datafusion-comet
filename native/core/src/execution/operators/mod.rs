@@ -30,6 +30,8 @@ mod iceberg_common;
 mod iceberg_scan;
 mod iceberg_write;
 pub use iceberg_write::IcebergWriteExec;
+mod merge_rows;
+pub use merge_rows::{MergeInstructionExec, MergeRowsExec};
 mod parquet_writer;
 pub use parquet_writer::ParquetWriterExec;
 mod csv_scan;

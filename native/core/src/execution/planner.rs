@@ -27,7 +27,10 @@ use crate::execution::operators::IcebergWriteExec;
 use crate::execution::{
     expressions::list_positions::ListPositionsExpr,
     expressions::subquery::Subquery,
-    operators::{ExecutionError, ExpandExec, ParquetWriterExec, ScanExec, ShuffleScanExec},
+    operators::{
+        ExecutionError, ExpandExec, MergeInstructionExec, MergeRowsExec, ParquetWriterExec,
+        ScanExec, ShuffleScanExec,
+    },
     planner::expression_registry::ExpressionRegistry,
     planner::operator_registry::OperatorRegistry,
     serde::to_arrow_datatype,
@@ -1669,6 +1672,68 @@ impl PhysicalPlanner {
                     scans,
                     shuffle_scans,
                     Arc::new(SparkPlan::new(spark_plan.plan_id, expand, vec![child])),
+                ))
+            }
+            OpStruct::MergeRows(merge) => {
+                assert_eq!(children.len(), 1);
+                let (scans, shuffle_scans, child) =
+                    self.create_plan(&children[0], inputs, partition_count)?;
+
+                let is_source_row_present =
+                    self.create_expr(merge.is_source_row_present.as_ref().unwrap(), child.schema())?;
+                let is_target_row_present =
+                    self.create_expr(merge.is_target_row_present.as_ref().unwrap(), child.schema())?;
+
+                let fields: Vec<Field> = merge
+                    .output_types
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, dt)| Field::new(format!("col_{idx}"), to_arrow_datatype(dt), true))
+                    .collect();
+                let schema = Arc::new(Schema::new(fields));
+
+                let compile_instructions = |instrs: &[spark_operator::MergeInstruction]| -> Result<Vec<MergeInstructionExec>, ExecutionError> {
+                    instrs
+                        .iter()
+                        .map(|instr| {
+                            let condition =
+                                self.create_expr(instr.condition.as_ref().unwrap(), child.schema())?;
+                            let outputs = instr
+                                .outputs
+                                .iter()
+                                .map(|row| {
+                                    row.exprs
+                                        .iter()
+                                        .map(|e| self.create_expr(e, child.schema()))
+                                        .collect::<Result<Vec<_>, _>>()
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok(MergeInstructionExec { condition, outputs })
+                        })
+                        .collect()
+                };
+
+                let matched_instructions = compile_instructions(&merge.matched_instructions)?;
+                let not_matched_instructions = compile_instructions(&merge.not_matched_instructions)?;
+                let not_matched_by_source_instructions =
+                    compile_instructions(&merge.not_matched_by_source_instructions)?;
+
+                let exec = Arc::new(MergeRowsExec::try_new(
+                    is_source_row_present,
+                    is_target_row_present,
+                    matched_instructions,
+                    not_matched_instructions,
+                    not_matched_by_source_instructions,
+                    merge.check_cardinality,
+                    merge.row_id_ordinal as usize,
+                    Arc::clone(&child.native_plan),
+                    schema,
+                )?);
+
+                Ok((
+                    scans,
+                    shuffle_scans,
+                    Arc::new(SparkPlan::new(spark_plan.plan_id, exec, vec![child])),
                 ))
             }
             OpStruct::Explode(explode) => {

@@ -538,10 +538,12 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] with
     val catalogProperties =
       IcebergReflection.getFileIOProperties(table).getOrElse(Map.empty[String, String])
 
-    val metadataLocation = IcebergReflection.getMetadataLocation(table).getOrElse {
-      withFallbackReason(op, "Iceberg Table has no metadata location (metadata-table scan?)")
-      return None
-    }
+    // A brand-new table (CREATE OR REPLACE TABLE ... AS SELECT / CTAS) has no committed metadata
+    // file yet at plan time, so this is legitimately absent -- not a fallback condition. The
+    // Rust side only uses metadata_location for Debug/Display, never operationally (data_location
+    // + schema + partition_spec + catalog_properties drive the actual write), so an empty string
+    // is safe here.
+    val metadataLocation = IcebergReflection.getMetadataLocation(table).getOrElse("")
     val outputSpecId = IcebergReflection.getOutputSpecIdFromSparkWrite(sparkWrite).getOrElse {
       withFallbackReason(op, "SparkWrite.outputSpecId reflection failed")
       return None
