@@ -526,7 +526,7 @@ object IcebergReflection extends Logging {
     getTableMetadata(table).flatMap { metadata =>
       try {
         val metadataFileLocationMethod = metadata.getClass.getMethod("metadataFileLocation")
-        Some(metadataFileLocationMethod.invoke(metadata).asInstanceOf[String])
+        Option(metadataFileLocationMethod.invoke(metadata).asInstanceOf[String])
       } catch {
         case e: Exception =>
           logError(
