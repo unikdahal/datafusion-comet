@@ -23,6 +23,7 @@ import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.logical.MergeRows
+import org.apache.spark.sql.catalyst.trees.TreeNode
 import org.apache.spark.sql.comet.{CometMergeRowsExec, SerializedPlan}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
@@ -105,7 +106,11 @@ object CometMergeRows extends CometOperatorSerde[MergeRowsExec] {
 
     val rowIdOrd = if (op.checkCardinality) rowIdOrdinal(op) else Some(0)
 
-    if (matched.forall(_.isDefined) && notMatched.forall(_.isDefined) &&
+    // `childOp` is empty when the child did not itself convert to a native operator --
+    // `CometExecRule.convertToComet` still calls `convert` in that case. Without this guard a
+    // childless `MergeRows` reaches the planner, where `assert_eq!(children.len(), 1)` panics
+    // instead of falling back to the JVM operator.
+    if (childOp.nonEmpty && matched.forall(_.isDefined) && notMatched.forall(_.isDefined) &&
       notMatchedBySource.forall(_.isDefined) && isSourcePresent.isDefined &&
       isTargetPresent.isDefined && outputTypes.forall(_.isDefined) && rowIdOrd.isDefined) {
       val mergeBuilder = OperatorOuterClass.MergeRows
@@ -120,7 +125,11 @@ object CometMergeRows extends CometOperatorSerde[MergeRowsExec] {
         .addAllOutputTypes(outputTypes.map(_.get).asJava)
       Some(builder.setMergeRows(mergeBuilder).build())
     } else {
-      withFallbackReason(op, allExprs: _*)
+      // Include the child so that when the fallback is caused by an unconverted child (empty
+      // `childOp`) rather than an unsupported expression, the child's own reason rolls up here
+      // instead of the operator reporting no reason at all -- same as `CometFilterExec`.
+      val fallbackNodes: Seq[TreeNode[_]] = allExprs :+ op.child
+      withFallbackReason(op, fallbackNodes: _*)
       None
     }
   }

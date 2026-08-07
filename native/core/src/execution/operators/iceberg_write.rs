@@ -34,7 +34,9 @@ use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
+};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
@@ -202,6 +204,20 @@ impl ExecutionPlan for IcebergWriteExec {
         let partition_id = self.partition_id;
         let task_attempt_id = self.task_attempt_id;
         let output_schema = Arc::clone(&self.output_schema);
+        // Wall-clock spent in this operator's own work (writer.write/close + manifest encode),
+        // as opposed to time spent awaiting the upstream native pipeline via `input.try_next()`.
+        // Reported separately from the JVM wrapper's outer wall-clock so the write phase can be
+        // isolated from upstream scan/join/merge time in benchmarking.
+        let write_time = MetricBuilder::new(&self.metrics).subset_time("write_time", partition);
+        // A meaningful share of this operator's cost is per-batch rather than per-row and scales
+        // with column count: `decorate_batch_with_field_ids` casts every column, iceberg-rust
+        // walks the whole schema for NaN counts (`ParquetWriter::write`), and the rolling writer
+        // sums every column writer's buffer (`RollingFileWriter::should_roll`) -- all once per
+        // batch regardless of row count. `input_rows / input_batches` is therefore the first
+        // number to check when the write phase is slow: a small average means the upstream is
+        // fragmenting and coalescing before the write is worth trying.
+        let input_batches = MetricBuilder::new(&self.metrics).counter("input_batches", partition);
+        let input_rows = MetricBuilder::new(&self.metrics).counter("input_rows", partition);
 
         let task = async move {
             let data_files = run_write_task(
@@ -213,17 +229,23 @@ impl ExecutionPlan for IcebergWriteExec {
                 writer_properties.as_ref().clone(),
                 partition_id,
                 task_attempt_id,
+                write_time.clone(),
+                input_batches,
+                input_rows,
             )
             .await?;
-            let manifest_bytes = encode_data_files_as_manifest(
-                data_files,
-                iceberg_schema,
-                partition_spec,
-                partition_id,
-                task_attempt_id,
-                &common.operation_id,
-            )
-            .await?;
+            let manifest_bytes = {
+                let _timer = write_time.timer();
+                encode_data_files_as_manifest(
+                    data_files,
+                    iceberg_schema,
+                    partition_spec,
+                    partition_id,
+                    task_attempt_id,
+                    &common.operation_id,
+                )
+                .await?
+            };
             let batch = build_output_batch(manifest_bytes, &output_schema)?;
             Ok::<_, DataFusionError>(futures::stream::iter(vec![Ok(batch)]))
         };
@@ -276,6 +298,9 @@ async fn run_write_task(
     writer_properties: WriterProperties,
     partition_id: Option<i32>,
     task_attempt_id: Option<i64>,
+    write_time: Time,
+    input_batches: Count,
+    input_rows: Count,
 ) -> DFResult<Vec<DataFile>> {
     let catalog_properties = common
         .catalog_properties
@@ -331,9 +356,18 @@ async fn run_write_task(
     let target_schema =
         Arc::new(iceberg::arrow::schema_to_arrow_schema(&iceberg_schema).map_err(iceberg_err)?);
     while let Some(batch) = input.try_next().await? {
+        // `ParquetWriter::write` skips empty batches, but only after the partitioned writers have
+        // already run `RecordBatchPartitionSplitter::split` over them, so drop them up front.
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        input_batches.add(1);
+        input_rows.add(batch.num_rows());
         let decorated = decorate_batch_with_field_ids(batch, &target_schema)?;
+        let _timer = write_time.timer();
         writer.write(decorated, splitter.as_ref()).await?;
     }
+    let _timer = write_time.timer();
     writer.close().await
 }
 
@@ -903,6 +937,10 @@ mod tests {
             writer_mode: ProtoIcebergWriterMode,
             batches: Vec<RecordBatch>,
         ) -> DFResult<Vec<DataFile>> {
+            let metrics = ExecutionPlanMetricsSet::new();
+            let write_time = MetricBuilder::new(&metrics).subset_time("write_time", 0);
+            let input_batches = MetricBuilder::new(&metrics).counter("input_batches", 0);
+            let input_rows = MetricBuilder::new(&metrics).counter("input_rows", 0);
             run_write_task(
                 input_stream(batches),
                 common,
@@ -912,6 +950,9 @@ mod tests {
                 WriterProperties::builder().build(),
                 Some(0),
                 Some(0),
+                write_time,
+                input_batches,
+                input_rows,
             )
             .await
         }
@@ -1033,6 +1074,8 @@ mod tests {
 
             let schema_arc = Arc::new(schema);
             let spec_arc = Arc::new(spec);
+            let metrics = ExecutionPlanMetricsSet::new();
+            let write_time = MetricBuilder::new(&metrics).subset_time("write_time", 0);
             let data_files = run_write_task(
                 input_stream(vec![batch(&[10, 20], &["x", "y"])]),
                 Arc::clone(&common),
@@ -1042,6 +1085,9 @@ mod tests {
                 WriterProperties::builder().build(),
                 Some(0),
                 Some(0),
+                write_time,
+                MetricBuilder::new(&metrics).counter("input_batches", 0),
+                MetricBuilder::new(&metrics).counter("input_rows", 0),
             )
             .await
             .unwrap();
