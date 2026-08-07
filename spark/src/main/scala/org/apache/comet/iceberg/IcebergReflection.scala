@@ -51,6 +51,11 @@ object IcebergReflection extends Logging {
     val UNBOUND_PREDICATE = "org.apache.iceberg.expressions.UnboundPredicate"
     val SPARK_BATCH_QUERY_SCAN = "org.apache.iceberg.spark.source.SparkBatchQueryScan"
     val SPARK_STAGED_SCAN = "org.apache.iceberg.spark.source.SparkStagedScan"
+    // Copy-on-write row-level operation (MERGE/UPDATE/DELETE) target-table scan. Sibling of
+    // SparkBatchQueryScan -- both extend SparkPartitioningAwareScan, just parameterized with
+    // different ScanTask generics (FileScanTask here vs PartitionScanTask). FileScanTask itself
+    // implements PartitionScanTask, so the reflection helpers below work unchanged for both.
+    val SPARK_COPY_ON_WRITE_SCAN = "org.apache.iceberg.spark.source.SparkCopyOnWriteScan"
     val SPARK_WRITE = "org.apache.iceberg.spark.source.SparkWrite"
     val TABLE_PROPERTIES = "org.apache.iceberg.TableProperties"
     val TYPE_UTIL = "org.apache.iceberg.types.TypeUtil"
@@ -79,7 +84,10 @@ object IcebergReflection extends Logging {
    * instances.
    */
   val ICEBERG_SCAN_CLASSES: Set[String] =
-    Set(ClassNames.SPARK_BATCH_QUERY_SCAN, ClassNames.SPARK_STAGED_SCAN)
+    Set(
+      ClassNames.SPARK_BATCH_QUERY_SCAN,
+      ClassNames.SPARK_STAGED_SCAN,
+      ClassNames.SPARK_COPY_ON_WRITE_SCAN)
 
   def isIcebergScanClass(name: String): Boolean = ICEBERG_SCAN_CLASSES.contains(name)
 
