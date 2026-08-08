@@ -27,7 +27,10 @@ use crate::execution::operators::IcebergWriteExec;
 use crate::execution::{
     expressions::list_positions::ListPositionsExpr,
     expressions::subquery::Subquery,
-    operators::{ExecutionError, ExpandExec, ParquetWriterExec, ScanExec, ShuffleScanExec},
+    operators::{
+        ExecutionError, ExpandExec, MergeInstructionExec, MergeRowsExec, ParquetWriterExec,
+        ScanExec, ShuffleScanExec,
+    },
     planner::expression_registry::ExpressionRegistry,
     planner::operator_registry::OperatorRegistry,
     serde::to_arrow_datatype,
@@ -169,6 +172,19 @@ fn strip_timestamp_tz(
         ))),
         _ => Ok(expr),
     }
+}
+
+/// Builds a positionally-named (`col_0`, `col_1`, ...) nullable schema from a list of output
+/// types. Shared by `Expand` and `MergeRows`, whose native operators both synthesize a fresh
+/// `RecordBatch` from compiled projection expressions rather than reading a Spark-declared
+/// schema off the wire.
+fn schema_from_datatypes(datatypes: &[DataType]) -> SchemaRef {
+    let fields: Vec<Field> = datatypes
+        .iter()
+        .enumerate()
+        .map(|(idx, dt)| Field::new(format!("col_{idx}"), dt.clone(), true))
+        .collect();
+    Arc::new(Schema::new(fields))
 }
 
 #[derive(Default)]
@@ -1650,12 +1666,7 @@ impl PhysicalPlanner {
                     .iter()
                     .map(|expr| expr.data_type(&child.schema()))
                     .collect::<Result<Vec<DataType>, _>>()?;
-                let fields: Vec<Field> = datatypes
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, dt)| Field::new(format!("col_{idx}"), dt.clone(), true))
-                    .collect();
-                let schema = Arc::new(Schema::new(fields));
+                let schema = schema_from_datatypes(&datatypes);
 
                 // `Expand` operator keeps the input batch and expands it to multiple output
                 // batches. However, `ScanExec` will reuse input arrays for the next
@@ -1669,6 +1680,88 @@ impl PhysicalPlanner {
                     scans,
                     shuffle_scans,
                     Arc::new(SparkPlan::new(spark_plan.plan_id, expand, vec![child])),
+                ))
+            }
+            OpStruct::MergeRows(merge) => {
+                assert_eq!(children.len(), 1);
+                let (scans, shuffle_scans, child) =
+                    self.create_plan(&children[0], inputs, partition_count)?;
+
+                let is_source_row_present = self.create_expr(
+                    merge.is_source_row_present.as_ref().unwrap(),
+                    child.schema(),
+                )?;
+                let is_target_row_present = self.create_expr(
+                    merge.is_target_row_present.as_ref().unwrap(),
+                    child.schema(),
+                )?;
+
+                let compile_instructions = |instrs: &[spark_operator::MergeInstruction]| -> Result<
+                    Vec<MergeInstructionExec>,
+                    ExecutionError,
+                > {
+                    instrs
+                        .iter()
+                        .map(|instr| {
+                            let condition = self
+                                .create_expr(instr.condition.as_ref().unwrap(), child.schema())?;
+                            let outputs = instr
+                                .outputs
+                                .iter()
+                                .map(|row| {
+                                    row.exprs
+                                        .iter()
+                                        .map(|e| self.create_expr(e, child.schema()))
+                                        .collect::<Result<Vec<_>, _>>()
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok(MergeInstructionExec { condition, outputs })
+                        })
+                        .collect()
+                };
+
+                let matched_instructions = compile_instructions(&merge.matched_instructions)?;
+                let not_matched_instructions =
+                    compile_instructions(&merge.not_matched_instructions)?;
+                let not_matched_by_source_instructions =
+                    compile_instructions(&merge.not_matched_by_source_instructions)?;
+
+                // Derive the output schema from the compiled projection expressions rather than
+                // Spark's declared `output_types`, mirroring `Expand` above: a Comet scan can hand
+                // up a dictionary-encoded string where Spark declares a plain `Utf8`, and
+                // `merge_rows.rs`'s `project()` builds its `RecordBatch` from the expression
+                // outputs, so a schema taken from the proto types could mismatch at runtime. Fall
+                // back to the declared types when every instruction is a Discard, since there is
+                // then no projection to read the types off.
+                let datatypes: Vec<DataType> = match matched_instructions
+                    .iter()
+                    .chain(&not_matched_instructions)
+                    .chain(&not_matched_by_source_instructions)
+                    .find_map(|instr| instr.outputs.first())
+                {
+                    Some(exprs) => exprs
+                        .iter()
+                        .map(|expr| expr.data_type(&child.schema()))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    None => merge.output_types.iter().map(to_arrow_datatype).collect(),
+                };
+                let schema = schema_from_datatypes(&datatypes);
+
+                let exec = Arc::new(MergeRowsExec::try_new(
+                    is_source_row_present,
+                    is_target_row_present,
+                    matched_instructions,
+                    not_matched_instructions,
+                    not_matched_by_source_instructions,
+                    merge.row_id_ordinal.map(|ord| ord as usize),
+                    Arc::clone(&child.native_plan),
+                    schema,
+                )?);
+
+                Ok((
+                    scans,
+                    shuffle_scans,
+                    Arc::new(SparkPlan::new(spark_plan.plan_id, exec, vec![child])),
                 ))
             }
             OpStruct::Explode(explode) => {

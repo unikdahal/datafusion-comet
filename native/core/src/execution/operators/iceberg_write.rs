@@ -34,7 +34,9 @@ use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
+};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
@@ -202,8 +204,18 @@ impl ExecutionPlan for IcebergWriteExec {
         let partition_id = self.partition_id;
         let task_attempt_id = self.task_attempt_id;
         let output_schema = Arc::clone(&self.output_schema);
+        // write_time: this operator's own work (writer.write/close + manifest encode), separate
+        // from the JVM wrapper's outer wall-clock so the write phase isolates from upstream
+        // scan/join/merge time. input_rows/input_batches: a low average signals a fragmented
+        // upstream feeding the writer -- the first thing to check when the write phase is slow.
+        let write_metrics = WriteMetrics {
+            write_time: MetricBuilder::new(&self.metrics).subset_time("write_time", partition),
+            input_batches: MetricBuilder::new(&self.metrics).counter("input_batches", partition),
+            input_rows: MetricBuilder::new(&self.metrics).counter("input_rows", partition),
+        };
 
         let task = async move {
+            let write_time = write_metrics.write_time.clone();
             let data_files = run_write_task(
                 input_stream,
                 Arc::clone(&common),
@@ -213,17 +225,21 @@ impl ExecutionPlan for IcebergWriteExec {
                 writer_properties.as_ref().clone(),
                 partition_id,
                 task_attempt_id,
+                write_metrics,
             )
             .await?;
-            let manifest_bytes = encode_data_files_as_manifest(
-                data_files,
-                iceberg_schema,
-                partition_spec,
-                partition_id,
-                task_attempt_id,
-                &common.operation_id,
-            )
-            .await?;
+            let manifest_bytes = {
+                let _timer = write_time.timer();
+                encode_data_files_as_manifest(
+                    data_files,
+                    iceberg_schema,
+                    partition_spec,
+                    partition_id,
+                    task_attempt_id,
+                    &common.operation_id,
+                )
+                .await?
+            };
             let batch = build_output_batch(manifest_bytes, &output_schema)?;
             Ok::<_, DataFusionError>(futures::stream::iter(vec![Ok(batch)]))
         };
@@ -262,6 +278,22 @@ impl DisplayAs for IcebergWriteExec {
     }
 }
 
+/// The three per-task write metrics, grouped so they travel as one parameter instead of three.
+///
+/// `write_time` covers only this operator's own work (writer.write/close + manifest encode),
+/// separate from time spent awaiting the upstream native pipeline, so the write phase can be
+/// isolated from upstream scan/join/merge time. `input_rows / input_batches` is the average
+/// batch fed to this operator: the iceberg-rust writer stack's per-batch cost scales with column
+/// count rather than row count, so a low average (a fragmented upstream, e.g. a copy-on-write
+/// MERGE) is what makes the write phase slow even though the writer itself is fast for a plain
+/// INSERT.
+#[derive(Clone)]
+struct WriteMetrics {
+    write_time: Time,
+    input_batches: Count,
+    input_rows: Count,
+}
+
 /// One-shot per-task write coroutine. Builds the iceberg-rust writer stack, decorates each input
 /// batch with `PARQUET_FIELD_ID_META_KEY` metadata so iceberg-rust can match Arrow columns to
 /// Iceberg field IDs, and routes through `UnpartitionedWriter`/`FanoutWriter`/`ClusteredWriter`
@@ -276,6 +308,7 @@ async fn run_write_task(
     writer_properties: WriterProperties,
     partition_id: Option<i32>,
     task_attempt_id: Option<i64>,
+    metrics: WriteMetrics,
 ) -> DFResult<Vec<DataFile>> {
     let catalog_properties = common
         .catalog_properties
@@ -331,9 +364,18 @@ async fn run_write_task(
     let target_schema =
         Arc::new(iceberg::arrow::schema_to_arrow_schema(&iceberg_schema).map_err(iceberg_err)?);
     while let Some(batch) = input.try_next().await? {
+        // `ParquetWriter::write` skips empty batches, but only after the partitioned writers have
+        // already run `RecordBatchPartitionSplitter::split` over them, so drop them up front.
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        metrics.input_batches.add(1);
+        metrics.input_rows.add(batch.num_rows());
         let decorated = decorate_batch_with_field_ids(batch, &target_schema)?;
+        let _timer = metrics.write_time.timer();
         writer.write(decorated, splitter.as_ref()).await?;
     }
+    let _timer = metrics.write_time.timer();
     writer.close().await
 }
 
@@ -896,6 +938,17 @@ mod tests {
             })
         }
 
+        /// Fresh metrics rooted in their own `ExecutionPlanMetricsSet`, for tests that only care
+        /// about `run_write_task`'s return value, not its metric output.
+        fn test_write_metrics() -> WriteMetrics {
+            let metrics = ExecutionPlanMetricsSet::new();
+            WriteMetrics {
+                write_time: MetricBuilder::new(&metrics).subset_time("write_time", 0),
+                input_batches: MetricBuilder::new(&metrics).counter("input_batches", 0),
+                input_rows: MetricBuilder::new(&metrics).counter("input_rows", 0),
+            }
+        }
+
         async fn run(
             common: Arc<IcebergWriteCommon>,
             schema: Schema,
@@ -912,6 +965,7 @@ mod tests {
                 WriterProperties::builder().build(),
                 Some(0),
                 Some(0),
+                test_write_metrics(),
             )
             .await
         }
@@ -1042,6 +1096,7 @@ mod tests {
                 WriterProperties::builder().build(),
                 Some(0),
                 Some(0),
+                test_write_metrics(),
             )
             .await
             .unwrap();

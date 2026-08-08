@@ -1203,6 +1203,53 @@ case class CometExpandExec(
   override lazy val metrics: Map[String, SQLMetric] = Map.empty
 }
 
+/**
+ * Native counterpart of Spark's `MergeRowsExec` -- the row-level MERGE dispatch operator that
+ * decides, per row, whether it is kept, discarded (a copy-on-write delete), or split into two
+ * output rows. See `org.apache.comet.serde.operator.CometMergeRows` (version-shimmed, since the
+ * Spark class this converts only exists in Spark 3.5+) for the conversion logic.
+ */
+case class CometMergeRowsExec(
+    override val nativeOp: Operator,
+    override val originalPlan: SparkPlan,
+    override val output: Seq[Attribute],
+    child: SparkPlan,
+    override val serializedPlanOpt: SerializedPlan)
+    extends CometUnaryExec {
+  // Matches Spark's `MergeRowsExec`, which does not override `outputPartitioning` and so inherits
+  // `SparkPlan`'s `UnknownPartitioning(0)`. Reporting the child's partitioning instead would be
+  // *stronger* than Spark's contract and could let `EnsureRequirements` skip a shuffle the JVM
+  // plan takes, so this must stay in step with Spark rather than be "improved".
+  override def outputPartitioning: Partitioning = UnknownPartitioning(0)
+
+  override def producedAttributes: AttributeSet = outputSet
+
+  override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan =
+    this.copy(child = newChild)
+
+  override def stringArgs: Iterator[Any] = Iterator(output, child)
+
+  override def equals(obj: Any): Boolean = {
+    obj match {
+      case other: CometMergeRowsExec =>
+        this.output == other.output &&
+        this.child == other.child &&
+        this.serializedPlanOpt == other.serializedPlanOpt
+      case _ =>
+        false
+    }
+  }
+
+  override def hashCode(): Int = Objects.hashCode(output, child)
+
+  // `output_rows / output_batches` is this operator's average output batch size -- the shape the
+  // downstream native Iceberg writer is fed, whose per-batch cost scales with column count rather
+  // than row count.
+  override lazy val metrics: Map[String, SQLMetric] =
+    CometMetricNode.baselineMetrics(sparkContext) ++ Map(
+      "output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"))
+}
+
 object CometExplodeExec extends CometOperatorSerde[GenerateExec] {
 
   override def enabledConfig: Option[ConfigEntry[Boolean]] = Some(
