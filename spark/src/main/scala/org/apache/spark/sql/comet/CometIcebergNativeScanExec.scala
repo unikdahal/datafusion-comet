@@ -27,6 +27,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, SortOrder}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, UnknownPartitioning}
+import org.apache.spark.sql.execution.{BaseSubqueryExec, InSubqueryExec, ReusedSubqueryExec}
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -116,10 +117,39 @@ case class CometIcebergNativeScanExec(
   def perPartitionData: Array[Array[Byte]] = serializedPartitionData._2
 
   // numPartitions for execution - derived from actual DPP-filtered partitions
-  // Only accessed during execution, not planning
   def numPartitions: Int = perPartitionData.length
 
-  override lazy val outputPartitioning: Partitioning = UnknownPartitioning(numPartitions)
+  // True if a runtime filter subquery is still wrapped in CometSubqueryAdaptiveBroadcastExec,
+  // pending conversion by CometPlanAdaptiveDynamicPruningFilters. Resolving one now would throw.
+  private def hasPendingRuntimeFilterConversion: Boolean = runtimeFilters.exists(_.exists {
+    case e: InSubqueryExec if e.values().isEmpty =>
+      e.plan match {
+        case _: CometSubqueryAdaptiveBroadcastExec => true
+        case ReusedSubqueryExec(_: CometSubqueryAdaptiveBroadcastExec) => true
+        case _ => false
+      }
+    case _ => false
+  })
+
+  // Resolves runtime filter subqueries directly (like CometNativeScanExec does), instead of via
+  // the full prepare()/waitForSubqueries() lifecycle, which latches permanently on first call.
+  private def resolveRuntimeFilterSubqueries(): Unit = runtimeFilters.foreach(_.foreach {
+    case e: InSubqueryExec if e.values().isEmpty => e.updateResult()
+    case _ =>
+  })
+
+  // Not a lazy val: outputPartitioning can be probed before this node's own prepare() runs
+  // (e.g. via a sibling shuffle's mapOutputStatisticsFuture). Forcing numPartitions then would
+  // hit an unresolved runtime-filter subquery and throw, so fall back to "unknown" until it's
+  // safe to compute for real.
+  override def outputPartitioning: Partitioning = {
+    if (originalPlan == null || hasPendingRuntimeFilterConversion) {
+      UnknownPartitioning(0)
+    } else {
+      resolveRuntimeFilterSubqueries()
+      UnknownPartitioning(numPartitions)
+    }
+  }
 
   override lazy val outputOrdering: Seq[SortOrder] = Nil
 
