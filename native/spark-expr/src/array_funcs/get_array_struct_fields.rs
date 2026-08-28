@@ -148,6 +148,16 @@ impl PhysicalExpr for GetArrayStructFields {
     }
 }
 
+impl Display for GetArrayStructFields {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GetArrayStructFields [child: {:?}, ordinal: {:?}]",
+            self.child, self.ordinal
+        )
+    }
+}
+
 fn get_array_struct_fields<O: OffsetSizeTrait>(
     list_array: &GenericListArray<O>,
     ordinal: usize,
@@ -162,15 +172,14 @@ fn get_array_struct_fields<O: OffsetSizeTrait>(
     // Get struct column by ordinal
     let extracted_column = values.column(ordinal);
 
-    let data = if values.null_count() == extracted_column.null_count() {
+    // A child field is null whenever either its own validity bitmap or its parent struct's
+    // validity bitmap marks the row null. Null counts alone are not sufficient to determine
+    // whether the two bitmaps are equal: they can contain the same number of nulls at different
+    // positions. Always merge the actual validity bitmaps so parent nulls are propagated.
+    let merged_nulls = NullBuffer::union(values.nulls(), extracted_column.nulls());
+    let data = if merged_nulls.as_ref() == extracted_column.nulls() {
         Arc::clone(extracted_column)
     } else {
-        // In some cases the column obtained from struct by ordinal doesn't
-        // represent all nulls that imposed by parent values.
-        // This maybe caused by a low level reader bug and needs more investigation.
-        // For this specific case we patch the null buffer for the column by merging nulls buffers
-        // from parent and column
-        let merged_nulls = NullBuffer::union(values.nulls(), extracted_column.nulls());
         make_array(
             extracted_column
                 .into_data()
@@ -180,19 +189,8 @@ fn get_array_struct_fields<O: OffsetSizeTrait>(
         )
     };
 
-    // `output_field` is the same field `data_type()` declares for the extracted list's element,
-    // already widened to nullable when the parent struct element is nullable. Guard the remaining
-    // case where the parent's runtime null buffer is narrower than its declared nullability (a
-    // low-level reader can under-report), which merges a null into `data` under a field that the
-    // schema still called non-nullable; GenericListArray's constructor would then reject it.
-    let field = if data.null_count() > 0 && !output_field.is_nullable() {
-        Arc::new(output_field.as_ref().clone().with_nullable(true))
-    } else {
-        output_field
-    };
-
     let array = GenericListArray::new(
-        field,
+        output_field,
         list_array.offsets().clone(),
         data,
         list_array.nulls().cloned(),
@@ -263,6 +261,47 @@ mod tests {
     }
 
     #[test]
+    fn parent_and_child_nulls_are_merged_even_when_null_counts_match() {
+        // Parent and child each have one null, but at different positions. A null-count-only
+        // shortcut would incorrectly keep row 0 valid instead of propagating the parent null.
+        let e_field = Arc::new(Field::new("e", DataType::Struct(Fields::empty()), true));
+        let e_array = StructArray::new_empty_fields(
+            2,
+            Some(NullBuffer::from(vec![true, false])),
+        );
+        let n_fields = Fields::from(vec![e_field]);
+        let n_values = StructArray::new(
+            n_fields.clone(),
+            vec![Arc::new(e_array)],
+            Some(NullBuffer::from(vec![false, true])),
+        );
+        let elem_field = Arc::new(Field::new("item", DataType::Struct(n_fields), true));
+        let list_array = ListArray::new(
+            Arc::clone(&elem_field),
+            OffsetBuffer::new(vec![0, 1, 2].into()),
+            Arc::new(n_values),
+            None,
+        );
+        let schema = Schema::new(vec![Field::new("arr", DataType::List(elem_field), true)]);
+        let batch =
+            RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(list_array)]).unwrap();
+        let expr = GetArrayStructFields::new(Arc::new(Column::new("arr", 0)), 0);
+
+        let extracted = expr.evaluate(&batch).unwrap().into_array(2).unwrap();
+        let extracted_list = extracted.as_any().downcast_ref::<ListArray>().unwrap();
+        let e_values = extracted_list
+            .values()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+
+        assert_eq!(e_values.null_count(), 2);
+        assert!(e_values.is_null(0), "parent null must be propagated");
+        assert!(e_values.is_null(1), "child null must be preserved");
+        assert_eq!(&expr.data_type(&schema).unwrap(), extracted.data_type());
+    }
+
+    #[test]
     fn declared_data_type_matches_the_array_evaluate_produces() {
         // The reviewer's blocker: `data_type()` must advertise the same element-field nullability
         // that `evaluate()` produces, otherwise a projection re-wrapping the output in a batch
@@ -312,15 +351,5 @@ mod tests {
         }
         let output = expr.evaluate(&batch).unwrap().into_array(2).unwrap();
         assert_eq!(&expr.data_type(&schema).unwrap(), output.data_type());
-    }
-}
-
-impl Display for GetArrayStructFields {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "GetArrayStructFields [child: {:?}, ordinal: {:?}]",
-            self.child, self.ordinal
-        )
     }
 }
