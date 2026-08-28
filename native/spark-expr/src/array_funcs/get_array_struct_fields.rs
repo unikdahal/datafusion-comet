@@ -265,10 +265,7 @@ mod tests {
         // Parent and child each have one null, but at different positions. A null-count-only
         // shortcut would incorrectly keep row 0 valid instead of propagating the parent null.
         let e_field = Arc::new(Field::new("e", DataType::Struct(Fields::empty()), true));
-        let e_array = StructArray::new_empty_fields(
-            2,
-            Some(NullBuffer::from(vec![true, false])),
-        );
+        let e_array = StructArray::new_empty_fields(2, Some(NullBuffer::from(vec![true, false])));
         let n_fields = Fields::from(vec![e_field]);
         let n_values = StructArray::new(
             n_fields.clone(),
