@@ -19,7 +19,7 @@
 
 package org.apache.comet.serde
 
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
+import org.apache.spark.sql.catalyst.expressions.{ArrayContains, ArrayUnion, Attribute, Expression}
 
 /**
  * Trait for providing serialization logic for expressions.
@@ -79,12 +79,27 @@ trait CometExpressionSerde[T <: Expression] {
   /**
    * Determine the support level of the expression based on its attributes.
    *
+   * The two array expressions below use DataFusion array signatures that reconstruct a canonical
+   * Arrow list field ("item") while coercing their arguments. Spark's ArrayType does not preserve
+   * that field name, so a native child such as `list<e: struct<>>` can appear Spark-type-equal but
+   * still require a recursive Arrow cast to `list<item: struct<>>`. Arrow cannot cast a zero-field
+   * struct through that path. Keep these generic serdes on Spark whenever an argument contains an
+   * empty struct; expression-specific serdes with their own `getSupportLevel` remain unaffected.
+   *
    * @param expr
    *   The Spark expression.
    * @return
    *   Support level (Compatible, Incompatible, or Unsupported).
    */
-  def getSupportLevel(expr: T): SupportLevel = Compatible(None)
+  def getSupportLevel(expr: T): SupportLevel = expr match {
+    case _: ArrayContains | _: ArrayUnion
+        if expr.children.exists(child => SupportLevel.containsEmptyStruct(child.dataType)) =>
+      Unsupported(
+        Some(
+          s"${expr.prettyName} with an empty struct in an argument type is not supported " +
+            "natively (DataFusion array coercion can cast a zero-field struct and error)"))
+    case _ => Compatible(None)
+  }
 
   /**
    * Convert a Spark expression into a protocol buffer representation that can be passed into
