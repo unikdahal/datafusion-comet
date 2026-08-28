@@ -36,7 +36,6 @@ on:
   push:
     branches:
       - main
-      - review-fixes-empty-struct-ci
   workflow_dispatch:
 
 jobs:
