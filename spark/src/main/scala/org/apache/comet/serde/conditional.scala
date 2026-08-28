@@ -26,6 +26,21 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, CaseWhen, Coalesce,
 import org.apache.comet.serde.QueryPlanSerde.{exprToProtoInternal, scalarFunctionExprToProto}
 
 object CometIf extends CometExpressionSerde[If] {
+  override def getSupportLevel(expr: If): SupportLevel = {
+    // Spark's DataType for arrays does not carry the Arrow list-element field name. Two branches
+    // can therefore both be ArrayType(StructType(Nil), ...) while their native Arrow types are
+    // list<e: struct<>> and list<item: struct<>>. DataFusion's conditional type reconciliation
+    // may cast one branch to the other's exact Arrow type, and casting a zero-field struct fails.
+    if (SupportLevel.containsEmptyStruct(expr.dataType)) {
+      Unsupported(
+        Some(
+          "IF whose result type contains an empty struct is not supported natively " +
+            "(branch coercion can cast a zero-field struct and error)"))
+    } else {
+      Compatible()
+    }
+  }
+
   override def convert(
       expr: If,
       inputs: Seq[Attribute],
@@ -50,6 +65,18 @@ object CometIf extends CometExpressionSerde[If] {
 }
 
 object CometCaseWhen extends CometExpressionSerde[CaseWhen] {
+  override def getSupportLevel(expr: CaseWhen): SupportLevel = {
+    val resultBranchCount = expr.branches.size + expr.elseValue.size
+    if (resultBranchCount > 1 && SupportLevel.containsEmptyStruct(expr.dataType)) {
+      Unsupported(
+        Some(
+          "CASE WHEN with multiple result branches whose type contains an empty struct is not " +
+            "supported natively (branch coercion can cast a zero-field struct and error)"))
+    } else {
+      Compatible()
+    }
+  }
+
   override def convert(
       expr: CaseWhen,
       inputs: Seq[Attribute],
@@ -129,6 +156,17 @@ object CometGreatest extends CometLeastGreatest[Greatest]("greatest")
 object CometLeast extends CometLeastGreatest[Least]("least")
 
 object CometCoalesce extends CometExpressionSerde[Coalesce] {
+  override def getSupportLevel(expr: Coalesce): SupportLevel = {
+    if (expr.children.size > 1 && SupportLevel.containsEmptyStruct(expr.dataType)) {
+      Unsupported(
+        Some(
+          "COALESCE over multiple operands whose result type contains an empty struct is not " +
+            "supported natively (CASE branch coercion can cast a zero-field struct and error)"))
+    } else {
+      Compatible()
+    }
+  }
+
   override def convert(
       expr: Coalesce,
       inputs: Seq[Attribute],
