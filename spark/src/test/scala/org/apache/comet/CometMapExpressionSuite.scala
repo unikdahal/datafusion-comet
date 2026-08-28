@@ -281,7 +281,6 @@ class CometMapExpressionSuite extends CometTestBase {
       CometConf.COMET_EXEC_LOCAL_TABLE_SCAN_ENABLED.key -> "true",
       SQLConf.OPTIMIZER_EXCLUDED_RULES.key ->
         "org.apache.spark.sql.catalyst.optimizer.ConvertToLocalRelation") {
-      import scala.jdk.CollectionConverters._
       val keyType = StructType(Seq(StructField("e", StructType(Nil))))
       val schema = StructType(Seq(StructField("m", MapType(keyType, IntegerType))))
       val data = java.util.List.of[Row](Row(Map(Row(Row()) -> 10)))
