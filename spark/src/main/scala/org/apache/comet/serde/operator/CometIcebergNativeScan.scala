@@ -264,8 +264,8 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
 
   /**
    * Reads equality-delete field IDs for the native serde path. The accessor is required on every
-   * supported Iceberg DeleteFile API, so a missing method or invocation failure must propagate.
-   * A null return is distinct: Iceberg uses it for files without equality keys.
+   * supported Iceberg DeleteFile API, so a missing method or invocation failure must propagate. A
+   * null return is distinct: Iceberg uses it for files without equality keys.
    */
   private def requiredEqualityFieldIds(
       deleteFileClass: Class[_],
