@@ -334,13 +334,18 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     deleteBuilder.setFilePath(deletePath)
 
     val contentMethod = IcebergReflection.getMethod(deleteFileClass, "content")
-    deleteBuilder.setContentType(contentMethod.invoke(deleteFile).toString)
+    val contentType = contentMethod.invoke(deleteFile).toString
+    deleteBuilder.setContentType(contentType)
 
     val specIdMethod = IcebergReflection.getMethod(deleteFileClass, "specId")
     deleteBuilder.setPartitionSpecId(specIdMethod.invoke(deleteFile).asInstanceOf[Int])
 
-    requiredEqualityFieldIds(deleteFileClass, deleteFile)
-      .forEach(id => deleteBuilder.addEqualityIds(id))
+    val equalityFieldIds = requiredEqualityFieldIds(deleteFileClass, deleteFile)
+    if (contentType == IcebergReflection.ContentTypes.EQUALITY_DELETES && equalityFieldIds.isEmpty) {
+      throw new IllegalStateException(
+        s"Iceberg equality delete file '$deletePath' has no equality field IDs")
+    }
+    equalityFieldIds.forEach(id => deleteBuilder.addEqualityIds(id))
 
     // Encrypted delete files carry a plaintext StandardKeyMetadata blob; forward it verbatim.
     // Unencrypted delete files leave the field unset.
