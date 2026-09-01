@@ -341,7 +341,9 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     deleteBuilder.setPartitionSpecId(specIdMethod.invoke(deleteFile).asInstanceOf[Int])
 
     val equalityFieldIds = requiredEqualityFieldIds(deleteFileClass, deleteFile)
-    if (contentType == IcebergReflection.ContentTypes.EQUALITY_DELETES && equalityFieldIds.isEmpty) {
+    val isEqualityDelete =
+      contentType == IcebergReflection.ContentTypes.EQUALITY_DELETES
+    if (isEqualityDelete && equalityFieldIds.isEmpty) {
       throw new IllegalStateException(
         s"Iceberg equality delete file '$deletePath' has no equality field IDs")
     }
