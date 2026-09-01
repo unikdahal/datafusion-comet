@@ -69,6 +69,20 @@ class CometIcebergDeleteFileSerdeSuite extends AnyFunSuite {
     assert(proto.getEqualityIds(1) == 5)
   }
 
+  test("equality-delete file: null equalityFieldIds() is fatal") {
+    val ex = intercept[IllegalStateException](serialize(new EqualityDeleteFileWithNullIds))
+    assert(
+      ex.getMessage ==
+        "Iceberg equality delete file 's3://bucket/eq-null-ids.parquet' has no equality field IDs")
+  }
+
+  test("equality-delete file: empty equalityFieldIds() is fatal") {
+    val ex = intercept[IllegalStateException](serialize(new EqualityDeleteFileWithEmptyIds))
+    assert(
+      ex.getMessage ==
+        "Iceberg equality delete file 's3://bucket/eq-empty-ids.parquet' has no equality field IDs")
+  }
+
   test("content() invocation failure propagates instead of defaulting to POSITION_DELETES") {
     val ex = intercept[InvocationTargetException](serialize(new ThrowingContentDeleteFile))
     assert(ex.getCause.getMessage == "content boom")
@@ -114,6 +128,22 @@ class CometIcebergDeleteFileSerdeSuite extends AnyFunSuite {
     def specId(): Int = 0
     def equalityFieldIds(): java.util.List[Integer] =
       java.util.List.of(Integer.valueOf(3), Integer.valueOf(5))
+    def keyMetadata(): java.nio.ByteBuffer = null
+  }
+
+  class EqualityDeleteFileWithNullIds {
+    def location(): String = "s3://bucket/eq-null-ids.parquet"
+    def content(): String = "EQUALITY_DELETES"
+    def specId(): Int = 0
+    def equalityFieldIds(): java.util.List[Integer] = null
+    def keyMetadata(): java.nio.ByteBuffer = null
+  }
+
+  class EqualityDeleteFileWithEmptyIds {
+    def location(): String = "s3://bucket/eq-empty-ids.parquet"
+    def content(): String = "EQUALITY_DELETES"
+    def specId(): Int = 0
+    def equalityFieldIds(): java.util.List[Integer] = java.util.List.of[Integer]()
     def keyMetadata(): java.nio.ByteBuffer = null
   }
 
