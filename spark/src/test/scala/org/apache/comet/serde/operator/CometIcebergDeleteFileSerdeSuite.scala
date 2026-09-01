@@ -71,16 +71,14 @@ class CometIcebergDeleteFileSerdeSuite extends AnyFunSuite {
 
   test("equality-delete file: null equalityFieldIds() is fatal") {
     val ex = intercept[IllegalStateException](serialize(new EqualityDeleteFileWithNullIds))
-    assert(
-      ex.getMessage ==
-        "Iceberg equality delete file 's3://bucket/eq-null-ids.parquet' has no equality field IDs")
+    assert(ex.getMessage ==
+      "Iceberg equality delete file 's3://bucket/eq-null-ids.parquet' has no equality field IDs")
   }
 
   test("equality-delete file: empty equalityFieldIds() is fatal") {
     val ex = intercept[IllegalStateException](serialize(new EqualityDeleteFileWithEmptyIds))
-    assert(
-      ex.getMessage ==
-        "Iceberg equality delete file 's3://bucket/eq-empty-ids.parquet' has no equality field IDs")
+    assert(ex.getMessage ==
+      "Iceberg equality delete file 's3://bucket/eq-empty-ids.parquet' has no equality field IDs")
   }
 
   test("content() invocation failure propagates instead of defaulting to POSITION_DELETES") {
