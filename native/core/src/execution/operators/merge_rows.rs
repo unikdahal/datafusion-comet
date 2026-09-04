@@ -63,8 +63,12 @@ struct MergeConfig {
 }
 
 impl MergeConfig {
-    /// Validate the optional row ID against the current child schema.
-    fn validate(&self, child: &Arc<dyn ExecutionPlan>) -> Result<(), DataFusionError> {
+    /// Validate the row ID and instruction shape against the current child/output schemas.
+    fn validate(
+        &self,
+        child: &Arc<dyn ExecutionPlan>,
+        output_schema: &SchemaRef,
+    ) -> Result<(), DataFusionError> {
         if let Some(ordinal) = self.row_id_ordinal {
             let child_schema = child.schema();
             let child_fields = child_schema.fields().len();
@@ -79,6 +83,33 @@ impl MergeConfig {
                 return Err(DataFusionError::Internal(format!(
                     "MergeRows: row id column at ordinal {ordinal} must be Int64, got {data_type}"
                 )));
+            }
+        }
+
+        let output_width = output_schema.fields().len();
+        for (group, instructions) in [
+            ("matched", &self.matched_instructions),
+            ("not matched", &self.not_matched_instructions),
+            (
+                "not matched by source",
+                &self.not_matched_by_source_instructions,
+            ),
+        ] {
+            for (instruction_index, instruction) in instructions.iter().enumerate() {
+                if instruction.outputs.len() > 2 {
+                    return Err(DataFusionError::Internal(format!(
+                        "MergeRows: {group} instruction {instruction_index} has {} output rows; expected at most 2",
+                        instruction.outputs.len()
+                    )));
+                }
+                for (output_index, output) in instruction.outputs.iter().enumerate() {
+                    if output.len() != output_width {
+                        return Err(DataFusionError::Internal(format!(
+                            "MergeRows: {group} instruction {instruction_index} output {output_index} has {} expressions; expected {output_width}",
+                            output.len()
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -115,7 +146,7 @@ impl MergeRowsExec {
             not_matched_by_source_instructions,
             row_id_ordinal,
         });
-        config.validate(&child)?;
+        config.validate(&child, &schema)?;
 
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
@@ -168,7 +199,7 @@ impl ExecutionPlan for MergeRowsExec {
         };
         let child = Arc::clone(child);
         // A replacement child may have a different row-ID schema.
-        self.config.validate(&child)?;
+        self.config.validate(&child, &self.schema)?;
         Ok(Arc::new(MergeRowsExec {
             config: Arc::clone(&self.config),
             child,
@@ -1113,6 +1144,50 @@ mod tests {
         }
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 1);
+    }
+
+    #[test]
+    fn instruction_with_more_than_two_outputs_is_rejected() {
+        use datafusion::datasource::memory::MemorySourceConfig;
+        let source = MemorySourceConfig::try_new_exec(&[vec![]], test_schema(), None).unwrap();
+        let invalid = MergeInstructionExec {
+            condition: lit(true),
+            outputs: vec![vec![lit(1i32)], vec![lit(2i32)], vec![lit(3i32)]],
+        };
+        let err = MergeRowsExec::try_new(
+            col("source_present", &test_schema()).unwrap(),
+            col("target_present", &test_schema()).unwrap(),
+            vec![invalid],
+            vec![],
+            vec![],
+            None,
+            source,
+            out_schema(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected at most 2"));
+    }
+
+    #[test]
+    fn instruction_output_width_must_match_operator_schema() {
+        use datafusion::datasource::memory::MemorySourceConfig;
+        let source = MemorySourceConfig::try_new_exec(&[vec![]], test_schema(), None).unwrap();
+        let invalid = MergeInstructionExec {
+            condition: lit(true),
+            outputs: vec![vec![lit(1i32), lit(2i32)]],
+        };
+        let err = MergeRowsExec::try_new(
+            col("source_present", &test_schema()).unwrap(),
+            col("target_present", &test_schema()).unwrap(),
+            vec![invalid],
+            vec![],
+            vec![],
+            None,
+            source,
+            out_schema(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected 1"));
     }
 
     #[test]

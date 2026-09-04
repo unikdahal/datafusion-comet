@@ -1509,7 +1509,7 @@ case class CometMergeRowsExec(
       rowIdOrdinal,
       child)
 
-  // Spark 4.x per-clause metrics require instruction context that Spark 3.5 lacks.
+  // Spark 4.1+ per-clause metrics require instruction context that earlier versions lack.
   // Expose baseline metrics until that context is version-gated through native serde.
   override lazy val metrics: Map[String, SQLMetric] =
     CometMetricNode.baselineMetrics(sparkContext) ++ Map(

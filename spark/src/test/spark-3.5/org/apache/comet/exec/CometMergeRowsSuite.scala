@@ -45,8 +45,8 @@ import org.apache.comet.CometSparkSessionExtensions.isSpark35Plus
  * `MergeRowsExec` (and, with `split-updates=true`, emits `Split` for update-as-delete+insert).
  * Comet's bottom-up conversion makes that child eligible for native execution under the JVM
  * write, so both shapes are exercised here (`deltaMergeCase`) and checked against a pure-Spark
- * baseline. Broader native-write acceleration is tracked by umbrella issue #5122. See
- * `CometIcebergWriteActionSuite` for MERGE INTO coverage against real Iceberg tables.
+ * baseline. See `CometIcebergWriteActionSuite` for MERGE INTO coverage against real Iceberg
+ * tables.
  */
 class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
 
