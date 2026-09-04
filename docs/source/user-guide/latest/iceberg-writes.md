@@ -128,7 +128,10 @@ per-task Parquet write is delegated to [iceberg-rust](https://github.com/apache/
 The native writer must produce the same outcome as iceberg-java — the same Parquet features,
 statistics, and manifest metadata — so a write is only eligible when every table property it
 depends on is one the native path reproduces exactly, and additionally only when the plan
-feeding the write is fully Comet-native. Ineligible writes run through iceberg-java unchanged,
+feeding the write is fully Comet-native. For a partitioned table that plan includes the hash
+distribution and local sort Iceberg requests on its partition transforms; those stay native
+because the transforms themselves have native implementations (see
+[Iceberg system functions](iceberg.md)). Ineligible writes run through iceberg-java unchanged,
 with the reason reported as a fall-back reason in Comet's extended EXPLAIN output.
 
 **Most Iceberg write settings are not supported.** Detection is an allowlist: a write is
@@ -156,7 +159,7 @@ A write is eligible only when ALL of the following hold:
 | `write.spark.fanout.enabled`                                                                                                                | any value (the native writer implements both clustered and fanout modes)                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `write.target-file-size-bytes`                                                                                                              | any value (file rolling cadence differs; see accepted divergences)                                                                                                                                                                                                                                                                                                                                                                                                              |
 | data location URI scheme                                                                                                                    | `file`, `memory`, `s3`, `s3a`, `gs`                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| partition spec                                                                                                                              | any (but see partition paths under accepted divergences)                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| partition spec                                                                                                                              | any                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | column types                                                                                                                                | any except `uuid` (Spark plans it as a string; no Arrow cast reaches `fixed(16)`)                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Within the namespaces that shape data-file bytes — `write.parquet.*` and `parquet.*` —
@@ -279,15 +282,6 @@ iceberg-java's _writer-tracked_ state would have recorded, and both are analyzed
   parquet footer), while iceberg-java's writer-tracked counts do not. Both counts inflate by
   the same amount, so the derived null ratios and `IS NULL` / `IS NOT NULL` pruning decisions
   are unaffected.
-
-### Operational caveat
-
-- Partition paths are not URL-escaped: iceberg-java percent-encodes partition directory names
-  and values (`region=a%2Fb`), iceberg-rust writes them raw (`region=a/b`). Readers resolve
-  files through manifest metadata, not paths, so query results are unaffected — but the
-  directory layout differs from iceberg-java's, and partition values containing characters
-  that are invalid in a URI (`:`, `#`, newline) may produce paths that `HadoopFileIO`-based
-  readers cannot open.
 
 All content not listed above — the logical data, encodings for non-FLBA columns, statistics
 values, and manifest metadata — must match iceberg-java exactly, or the write falls back.
