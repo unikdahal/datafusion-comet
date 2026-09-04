@@ -24,9 +24,8 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.comet.serde.CometOperatorSerde
 
 /**
- * Spark 3.4 predates `MergeRowsExec` (it was moved from Iceberg extensions into Spark core in
- * Iceberg 1.4.0 / SPARK-52403, first shipping in Spark 3.5). Nothing to register here; CoW MERGE
- * on 3.4 continues to run via Iceberg's own extension-provided operator, unconverted.
+ * Spark 3.4 predates the core `MergeRowsExec` implementation used by newer Spark versions.
+ * Nothing is registered here, so MERGE continues through the version-specific JVM path.
  */
 object ShimCometMergeRows {
   val nativeExecs: Map[Class[_ <: SparkPlan], CometOperatorSerde[_]] = Map.empty
