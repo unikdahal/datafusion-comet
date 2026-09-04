@@ -141,6 +141,17 @@ object CometConf extends ShimCometConf {
       .booleanConf
       .createWithDefault(false)
 
+  val COMET_ICEBERG_REMOVE_ORPHAN_FILES_NATIVE_ENABLED: ConfigEntry[Boolean] =
+    conf("spark.comet.iceberg.removeOrphanFiles.native.enabled")
+      .category(CATEGORY_SCAN)
+      .doc(
+        "Whether to run Iceberg `remove_orphan_files` through Comet's native implementation. " +
+          "When disabled (default), the procedure falls through to Iceberg-Java. When enabled, " +
+          "Comet intercepts the CALL and runs metadata traversal, listing, and deletes " +
+          "natively, falling back to Iceberg-Java for unsupported options or storage.")
+      .booleanConf
+      .createWithDefault(false)
+
   val COMET_ICEBERG_DATA_FILE_CONCURRENCY_LIMIT: ConfigEntry[Int] =
     conf("spark.comet.scan.icebergNative.dataFileConcurrencyLimit")
       .category(CATEGORY_SCAN)
@@ -546,6 +557,18 @@ object CometConf extends ShimCometConf {
       .internal()
       .intConf
       .createWithDefault(Int.MaxValue)
+
+  val COMET_SHUFFLE_JVM_MEMORY_WAIT_TIMEOUT: ConfigEntry[Long] =
+    conf("spark.comet.shuffle.jvm.memoryWaitTimeout")
+      .category(CATEGORY_SHUFFLE)
+      .doc(
+        "How long a Comet JVM (columnar) shuffle task running in on-heap mode waits for other " +
+          "tasks to free shared shuffle pool memory before failing with an out-of-memory error " +
+          "(Spark may then retry the task). The wait ends earlier when it provably cannot " +
+          "succeed. This is an internal config for testing purpose or advanced tuning.")
+      .internal()
+      .timeConf(TimeUnit.MILLISECONDS)
+      .createWithDefault(TimeUnit.MINUTES.toMillis(5))
 
   val COMET_SHUFFLE_JVM_MEMORY_FACTOR: ConfigEntry[Double] =
     conf("spark.comet.shuffle.jvm.memoryFactor")
