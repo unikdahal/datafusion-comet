@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  patch-planner:
+  patch-review:
     runs-on: ubuntu-24.04
     container:
       image: amd64/rust
@@ -18,19 +18,25 @@ jobs:
         with:
           ref: merge-rows-review-candidate
           fetch-depth: 0
-      - name: Harden protobuf planner boundary
+
+      - name: Apply planner and versioned-source review fixes
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add canonical https://github.com/apache/datafusion-comet.git
+          git fetch canonical main
+
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path("native/core/src/execution/planner.rs")
-          s = p.read_text()
-          marker = '''                let matched_instructions = compile_instructions(&merge.matched_instructions)?;'''
-          validation = '''                let output_width = merge.output_types.len();
+          planner = Path("native/core/src/execution/planner.rs")
+          s = planner.read_text()
+
+          if "let output_width = merge.output_types.len();" not in s:
+              marker = "                let matched_instructions = compile_instructions(&merge.matched_instructions)?;"
+              validation = '''                let output_width = merge.output_types.len();
                   let validate_instruction_shapes =
                       |group: &str, instructions: &[spark_operator::MergeInstruction]| {
                           for (instruction_index, instruction) in instructions.iter().enumerate() {
@@ -59,12 +65,14 @@ jobs:
                   )?;
 
           '''
-          if marker not in s:
-              raise SystemExit("instruction compilation marker not found")
-          s = s.replace(marker, validation + marker, 1)
+              if marker not in s:
+                  raise SystemExit("instruction compilation marker not found")
+              s = s.replace(marker, validation + marker, 1)
 
-          marker = '''                let exec = Arc::new(MergeRowsExec::try_new('''
-          ordinal = '''                let row_id_ordinal = match merge.row_id_ordinal {
+          old_cast = "                    merge.row_id_ordinal.map(|ord| ord as usize),"
+          if old_cast in s:
+              marker = "                let exec = Arc::new(MergeRowsExec::try_new("
+              ordinal = '''                let row_id_ordinal = match merge.row_id_ordinal {
                       Some(ordinal) if ordinal < 0 => {
                           return Err(ExecutionError::GeneralError(format!(
                               "MergeRows row_id_ordinal must be non-negative, got {ordinal}"
@@ -75,31 +83,115 @@ jobs:
                   };
 
           '''
-          if marker not in s:
-              raise SystemExit("MergeRowsExec construction marker not found")
-          s = s.replace(marker, ordinal + marker, 1)
-          old = '''                    merge.row_id_ordinal.map(|ord| ord as usize),'''
-          if old not in s:
-              raise SystemExit("row_id_ordinal cast marker not found")
-          s = s.replace(old, '''                    row_id_ordinal,''', 1)
-          p.write_text(s)
+              if marker not in s:
+                  raise SystemExit("MergeRowsExec construction marker not found")
+              s = s.replace(marker, ordinal + marker, 1)
+              s = s.replace(old_cast, "                    row_id_ordinal,", 1)
+          elif "let row_id_ordinal = match merge.row_id_ordinal" not in s:
+              raise SystemExit("row_id_ordinal was neither original nor reviewed form")
+
+          planner.write_text(s)
+
+          license_header = '''/*
+           * Licensed to the Apache Software Foundation (ASF) under one
+           * or more contributor license agreements.  See the NOTICE file
+           * distributed with this work for additional information
+           * regarding copyright ownership.  The ASF licenses this file
+           * to you under the Apache License, Version 2.0 (the
+           * "License"); you may not use this file except in compliance
+           * with the License.  You may obtain a copy of the License at
+           *
+           *   http://www.apache.org/licenses/LICENSE-2.0
+           *
+           * Unless required by applicable law or agreed to in writing,
+           * software distributed under the License is distributed on an
+           * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+           * KIND, either express or implied.  See the License for the
+           * specific language governing permissions and limitations
+           * under the License.
+           */
+
+          '''
+
+          spark40 = Path("spark/src/main/spark-4.0/org/apache/comet/rules/shims/ShimCometMergeRows.scala")
+          spark40.parent.mkdir(parents=True, exist_ok=True)
+          spark40.write_text(license_header + '''package org.apache.comet.rules.shims
+
+          import org.apache.spark.sql.execution.SparkPlan
+          import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
+
+          import org.apache.comet.serde.CometOperatorSerde
+          import org.apache.comet.serde.operator.CometMergeRows
+
+          /** Registers native `MergeRowsExec` for Spark 4.0. */
+          object ShimCometMergeRows {
+            val nativeExecs: Map[Class[_ <: SparkPlan], CometOperatorSerde[_]] =
+              Map(classOf[MergeRowsExec] -> CometMergeRows)
+          }
+          ''')
+
+          spark41plus = Path("spark/src/main/spark-4.1+/org/apache/comet/rules/shims/ShimCometMergeRows.scala")
+          spark41plus.parent.mkdir(parents=True, exist_ok=True)
+          spark41plus.write_text(license_header + '''package org.apache.comet.rules.shims
+
+          import org.apache.spark.sql.execution.SparkPlan
+
+          import org.apache.comet.serde.CometOperatorSerde
+
+          /**
+           * Spark 4.1+ keeps `MergeRowsExec` on the JVM so the existing-table write path can derive
+           * and deliver the action summary expected by summary-aware commits.
+           */
+          object ShimCometMergeRows {
+            val nativeExecs: Map[Class[_ <: SparkPlan], CometOperatorSerde[_]] = Map.empty
+          }
+          ''')
+
+          broad = Path("spark/src/main/spark-4.x/org/apache/comet/rules/shims/ShimCometMergeRows.scala")
+          if broad.exists():
+              broad.unlink()
           PY
 
-      - name: Format and commit planner fix
+      - name: Apply and verify formatting
         shell: bash
         run: |
           set -euo pipefail
-          cd native
-          cargo fmt --all
-          cargo fmt --all -- --check
-          cd ..
+          ./mvnw -B -Pspark-3.4,scala-2.12 -DskipTests spotless:apply
+          ./mvnw -B -Pspark-3.5,scala-2.13 -DskipTests spotless:apply
+          ./mvnw -B -Pspark-4.0 -DskipTests spotless:apply
+          ./mvnw -B -Pspark-4.1 -DskipTests spotless:apply
+          ./mvnw -B -Pspark-4.2 -DskipTests spotless:apply
+          ./mvnw -B -Pspark-3.4,scala-2.12 -DskipTests spotless:check
+          ./mvnw -B -Pspark-3.5,scala-2.13 -DskipTests spotless:check
+          ./mvnw -B -Pspark-4.0 -DskipTests spotless:check
+          ./mvnw -B -Pspark-4.1 -DskipTests spotless:check
+          ./mvnw -B -Pspark-4.2 -DskipTests spotless:check
+          (cd native && cargo fmt --all && cargo fmt --all -- --check)
           git diff --check
-          git add native/core/src/execution/planner.rs
-          git commit -m "fix: validate MergeRows protobuf shape at planning boundary"
-          git push origin HEAD:merge-rows-review-candidate
+
+      - name: Verify feature diff is self-contained
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff canonical/main -- | grep -E 'SPARK-[0-9]+|#[0-9]{2,}|/pull/[0-9]+|/issues/[0-9]+'; then
+            echo "External issue or pull-request identifier found in feature diff"
+            exit 1
+          fi
+
+      - name: Commit reviewed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Reviewed candidate already contains all fixes"
+          else
+            git commit -m "fix: harden MergeRows planning and versioned source layout"
+            git push origin HEAD:merge-rows-review-candidate
+          fi
 
   native-test:
-    needs: patch-planner
+    needs: patch-review
     runs-on: ubuntu-24.04
     container:
       image: amd64/rust
