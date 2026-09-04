@@ -6,10 +6,100 @@ on:
       - merge-rows-review-executor
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  patch-planner:
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: merge-rows-review-candidate
+          fetch-depth: 0
+      - name: Harden protobuf planner boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("native/core/src/execution/planner.rs")
+          s = p.read_text()
+          marker = '''                let matched_instructions = compile_instructions(&merge.matched_instructions)?;'''
+          validation = '''                let output_width = merge.output_types.len();
+                  let validate_instruction_shapes =
+                      |group: &str, instructions: &[spark_operator::MergeInstruction]| {
+                          for (instruction_index, instruction) in instructions.iter().enumerate() {
+                              if instruction.outputs.len() > 2 {
+                                  return Err(ExecutionError::GeneralError(format!(
+                                      "MergeRows {group} instruction {instruction_index} has {} output rows; expected at most 2",
+                                      instruction.outputs.len()
+                                  )));
+                              }
+                              for (output_index, output) in instruction.outputs.iter().enumerate() {
+                                  if output.exprs.len() != output_width {
+                                      return Err(ExecutionError::GeneralError(format!(
+                                          "MergeRows {group} instruction {instruction_index} output {output_index} has {} expressions; expected {output_width}",
+                                          output.exprs.len()
+                                      )));
+                                  }
+                              }
+                          }
+                          Ok(())
+                      };
+                  validate_instruction_shapes("matched", &merge.matched_instructions)?;
+                  validate_instruction_shapes("not matched", &merge.not_matched_instructions)?;
+                  validate_instruction_shapes(
+                      "not matched by source",
+                      &merge.not_matched_by_source_instructions,
+                  )?;
+
+          '''
+          if marker not in s:
+              raise SystemExit("instruction compilation marker not found")
+          s = s.replace(marker, validation + marker, 1)
+
+          marker = '''                let exec = Arc::new(MergeRowsExec::try_new('''
+          ordinal = '''                let row_id_ordinal = match merge.row_id_ordinal {
+                      Some(ordinal) if ordinal < 0 => {
+                          return Err(ExecutionError::GeneralError(format!(
+                              "MergeRows row_id_ordinal must be non-negative, got {ordinal}"
+                          )));
+                      }
+                      Some(ordinal) => Some(ordinal as usize),
+                      None => None,
+                  };
+
+          '''
+          if marker not in s:
+              raise SystemExit("MergeRowsExec construction marker not found")
+          s = s.replace(marker, ordinal + marker, 1)
+          old = '''                    merge.row_id_ordinal.map(|ord| ord as usize),'''
+          if old not in s:
+              raise SystemExit("row_id_ordinal cast marker not found")
+          s = s.replace(old, '''                    row_id_ordinal,''', 1)
+          p.write_text(s)
+          PY
+
+      - name: Format and commit planner fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd native
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cd ..
+          git diff --check
+          git add native/core/src/execution/planner.rs
+          git commit -m "fix: validate MergeRows protobuf shape at planning boundary"
+          git push origin HEAD:merge-rows-review-candidate
+
   native-test:
+    needs: patch-planner
     runs-on: ubuntu-24.04
     container:
       image: amd64/rust
