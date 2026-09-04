@@ -164,7 +164,16 @@ for profile in \
 do
   ./mvnw -B -P"$profile" -DskipTests spotless:apply
   ./mvnw -B -P"$profile" -DskipTests spotless:check
-  ./mvnw -B -pl spark -am -P"$profile" -DskipTests test-compile
+  compile_log="/tmp/test-compile-${profile//,/_}.log"
+  if ! ./mvnw -B -pl spark -am -P"$profile" -DskipTests test-compile 2>&1 | tee "$compile_log"; then
+    mkdir -p .ci-diagnostics
+    cp "$compile_log" .ci-diagnostics/spark-test-compile.log
+    printf '%s\n' "$profile" > .ci-diagnostics/profile.txt
+    git add -A
+    git commit -m "tmp: capture MergeRows compile diagnostics"
+    git push --force origin HEAD:merge-rows-diagnostic
+    exit 1
+  fi
 done
 
 (
