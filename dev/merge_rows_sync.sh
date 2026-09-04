@@ -7,6 +7,7 @@ git fetch origin merge-rows-merge-work
 git checkout -B merge-rows-working origin/merge-rows-merge-work
 
 python3 - <<'PY'
+import re
 from pathlib import Path
 
 # Apply the already-reviewed protobuf collision repair so Scala compilation can reach the
@@ -19,8 +20,9 @@ if old not in text:
     raise SystemExit("expected MergeRows operator-tag collision was not found")
 proto.write_text(text.replace(old, new, 1))
 
-# The Spark-3.5 source root is itself the compatibility gate; remove the redundant runtime
-# assumption exactly as the full validation candidate does.
+# The Spark-3.5 source root is itself the compatibility gate. Remove each assumption as a whole
+# line: a substring replacement can start inside a six-space-indented line and leave two orphaned
+# spaces on the following line, which is semantically harmless but violates Spotless.
 suite = Path("spark/src/test/spark-3.5/org/apache/comet/exec/CometMergeRowsSuite.scala")
 text = suite.read_text()
 text = text.replace("import org.apache.comet.CometSparkSessionExtensions.isSpark35Plus\n", "")
@@ -28,9 +30,13 @@ text = text.replace(
     '  private def assumeMerge(): Unit = assume(isSpark35Plus, "MergeRowsExec requires Spark 3.5+")\n\n',
     "",
 )
-text = text.replace("    assumeMerge()\n", "")
+text = re.sub(r"^[ \t]*assumeMerge\(\)\n", "", text, flags=re.MULTILINE)
 suite.write_text(text)
 PY
+
+# Make formatting non-blocking so test-compile reaches the Scala test compiler. The comprehensive
+# validation will still run both Spotless apply and Spotless check for every supported profile.
+./mvnw -B -Pspark-3.5,scala-2.12 -DskipTests spotless:apply
 
 log=/tmp/spark-3.5-test-compile.log
 if ! ./mvnw -B -pl spark -am -Pspark-3.5,scala-2.12 -DskipTests test-compile 2>&1 | tee "$log"; then
