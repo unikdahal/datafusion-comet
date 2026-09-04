@@ -37,6 +37,12 @@ if ! ./mvnw -B -pl spark -am -Pspark-3.5,scala-2.12 -DskipTests test-compile 2>&
   mkdir -p .ci-diagnostics
   cp "$log" .ci-diagnostics/spark-test-compile.log
   printf '%s\n' 'spark-3.5,scala-2.12' > .ci-diagnostics/profile.txt
+  {
+    echo '=== Maven / Scala compiler errors ==='
+    grep -E '^\[ERROR\]|(^|[[:space:]])error:|not found:|is not a member of|type mismatch|Compilation failed' "$log" | tail -n 240 || true
+    echo '=== Final 120 log lines ==='
+    tail -n 120 "$log"
+  } > .ci-diagnostics/summary.txt
   git add -A
   git commit -m "tmp: capture Spark 3.5 MergeRows compile diagnostics"
   git push --force origin HEAD:merge-rows-diagnostic
