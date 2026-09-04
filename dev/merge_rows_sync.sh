@@ -3,7 +3,7 @@ set -euo pipefail
 
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-git fetch origin merge-rows-merge-work
+git fetch origin merge-rows-merge-work merge-rows-main-base
 git checkout -B merge-rows-working origin/merge-rows-merge-work
 
 python3 - <<'PY'
@@ -147,7 +147,7 @@ PY
 
 # Preserve the current-main workflow bodies in this staging branch. The GitHub connector will add
 # the MergeRows suite entries after validation so the final tree can still contain workflow edits.
-git checkout merge-rows-main-base -- \
+git checkout origin/merge-rows-main-base -- \
   .github/workflows/pr_build_linux.yml \
   .github/workflows/pr_build_macos.yml
 
@@ -177,7 +177,7 @@ done
 git diff --check
 
 # New MergeRows code must not carry external issue/PR identifiers on the fork.
-if git diff --unified=0 merge-rows-main-base...HEAD | \
+if git diff --unified=0 origin/merge-rows-main-base...HEAD | \
     grep '^+' | grep -E '(SPARK-[0-9]+|issue #[0-9]+|PR #[0-9]+|pull/[0-9]+)'; then
   echo "external tracker identifier found in added MergeRows content" >&2
   exit 1
@@ -186,8 +186,8 @@ fi
 # Include formatter output, then collapse the staging branch to one commit whose sole parent is
 # the exact current-main snapshot.
 git add -A
-git reset --soft merge-rows-main-base
+git reset --soft origin/merge-rows-main-base
 git commit -m "feat: add native support for MergeRowsExec"
-test "$(git rev-list --count merge-rows-main-base..HEAD)" = "1"
-test "$(git rev-list --count HEAD..merge-rows-main-base)" = "0"
+test "$(git rev-list --count origin/merge-rows-main-base..HEAD)" = "1"
+test "$(git rev-list --count HEAD..origin/merge-rows-main-base)" = "0"
 git push --force origin HEAD:merge-rows-final-staging
