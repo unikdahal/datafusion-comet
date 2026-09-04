@@ -29,7 +29,6 @@ import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.util.QueryExecutionListener
 
 import org.apache.comet.CometConf
-import org.apache.comet.CometSparkSessionExtensions.isSpark35Plus
 
 /**
  * `CometMergeRowsExec` converts Spark's `MergeRowsExec` and the `MergeRows` logical node that
@@ -63,10 +62,7 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       .set("spark.sql.shuffle.partitions", "4")
   }
 
-  private def assumeMerge(): Unit = assume(isSpark35Plus, "MergeRowsExec requires Spark 3.5+")
-
   test("MERGE all row-routing groups engage CometMergeRowsExec and match Spark") {
-    assumeMerge()
     val target = s"$catalog.default.rowlevel_target"
     val source = s"$catalog.default.rowlevel_source"
 
@@ -138,7 +134,6 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
 
   test(
     "MERGE cardinality violation raises SparkRuntimeException, not a generic native exception") {
-    assumeMerge()
     val target = s"$catalog.default.rowlevel_target_card"
     val source = s"$catalog.default.rowlevel_source_card"
 
@@ -240,7 +235,6 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
   }
 
   test("MERGE with a scalar-subquery assignment runs natively and matches Spark") {
-    assumeMerge()
     val target = s"$catalog.default.subq_target"
     val source = s"$catalog.default.subq_source"
 
@@ -296,8 +290,7 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
   // a Split instruction, so the test cannot silently stop exercising delete+reinsert semantics.
   private def deltaMergeCase(name: String, splitUpdates: Boolean, matchedClause: String): Unit = {
     test(s"delta-backed MERGE: $name") {
-      assumeMerge()
-      val target = s"$catalog.default.delta_t_${name.replaceAll("\\W", "_")}"
+        val target = s"$catalog.default.delta_t_${name.replaceAll("\\W", "_")}"
       val source = s"$catalog.default.delta_s_${name.replaceAll("\\W", "_")}"
 
       def reset(): Unit = {
@@ -354,7 +347,6 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
   deltaMergeCase("matched delete", splitUpdates = false, "WHEN MATCHED THEN DELETE")
 
   test("CometMergeRowsExec semantic identity reflects instruction groups and cardinality flag") {
-    assumeMerge()
     val target = s"$catalog.default.eq_target"
     val source = s"$catalog.default.eq_source"
     sql(s"DROP TABLE IF EXISTS $target")

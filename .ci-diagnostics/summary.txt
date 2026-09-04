@@ -1,0 +1,144 @@
+=== Maven / Scala compiler errors ===
+[ERROR] Failed to execute goal com.diffplug.spotless:spotless-maven-plugin:2.43.0:check (default) on project comet-spark-spark3.5_2.12: The following files had format violations:
+[ERROR]     src/test/spark-3.5/org/apache/comet/exec/CometMergeRowsSuite.scala
+[ERROR]         @@ -290,7 +290,7 @@
+[ERROR]          ··//·a·Split·instruction,·so·the·test·cannot·silently·stop·exercising·delete+reinsert·semantics.
+[ERROR]          ··private·def·deltaMergeCase(name:·String,·splitUpdates:·Boolean,·matchedClause:·String):·Unit·=·{
+[ERROR]          ····test(s"delta-backed·MERGE:·$name")·{
+[ERROR]         -········val·target·=·s"$catalog.default.delta_t_${name.replaceAll("\\W",·"_")}"
+[ERROR]         +······val·target·=·s"$catalog.default.delta_t_${name.replaceAll("\\W",·"_")}"
+[ERROR]          ······val·source·=·s"$catalog.default.delta_s_${name.replaceAll("\\W",·"_")}"
+[ERROR]          
+[ERROR]          ······def·reset():·Unit·=·{
+[ERROR] Run 'mvn spotless:apply' to fix these violations.
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoExecutionException
+[ERROR] 
+[ERROR] After correcting the problems, you can resume the build with the command
+[ERROR]   mvn <args> -rf :comet-spark-spark3.5_2.12
+=== Final 120 log lines ===
+[INFO] Input directories:
+[INFO]     /home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto
+[INFO] Output targets:
+[INFO]     java: /home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources (add: main, clean: false, plugin: null, outputOptions: null)
+[INFO] /home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources does not exist. Creating...
+[INFO]     Processing (java): operator.proto
+protoc-jar: executing: [/tmp/protoc14776294261981293624.exe, -I/home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto, --java_out=/home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources, /home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto/operator.proto]
+[INFO]     Processing (java): partitioning.proto
+protoc-jar: executing: [/tmp/protoc14776294261981293624.exe, -I/home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto, --java_out=/home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources, /home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto/partitioning.proto]
+[INFO]     Processing (java): types.proto
+protoc-jar: executing: [/tmp/protoc14776294261981293624.exe, -I/home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto, --java_out=/home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources, /home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto/types.proto]
+[INFO]     Processing (java): config.proto
+protoc-jar: executing: [/tmp/protoc14776294261981293624.exe, -I/home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto, --java_out=/home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources, /home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto/config.proto]
+[INFO]     Processing (java): literal.proto
+protoc-jar: executing: [/tmp/protoc14776294261981293624.exe, -I/home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto, --java_out=/home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources, /home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto/literal.proto]
+[INFO]     Processing (java): metric.proto
+protoc-jar: executing: [/tmp/protoc14776294261981293624.exe, -I/home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto, --java_out=/home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources, /home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto/metric.proto]
+[INFO]     Processing (java): expr.proto
+protoc-jar: executing: [/tmp/protoc14776294261981293624.exe, -I/home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto, --java_out=/home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources, /home/runner/work/datafusion-comet/datafusion-comet/native/proto/src/proto/expr.proto]
+[INFO] Adding generated sources (java): /home/runner/work/datafusion-comet/datafusion-comet/spark/target/generated-sources
+[INFO] 
+[INFO] --- build-helper:3.4.0:add-source (add-shim-source) @ comet-spark-spark3.5_2.12 ---
+[INFO] Source directory: /home/runner/work/datafusion-comet/datafusion-comet/spark/src/main/spark-3.x added.
+[INFO] Source directory: /home/runner/work/datafusion-comet/datafusion-comet/spark/src/main/spark-none added.
+[INFO] Source directory: /home/runner/work/datafusion-comet/datafusion-comet/spark/src/main/spark-3.5 added.
+[INFO] 
+[INFO] --- remote-resources:1.7.0:process (process-resource-bundles) @ comet-spark-spark3.5_2.12 ---
+[INFO] Preparing remote bundle org.apache:apache-jar-resource-bundle:1.4
+[INFO] Copying 3 resources from 1 bundle.
+[INFO] 
+[INFO] --- resources:3.1.0:resources (default-resources) @ comet-spark-spark3.5_2.12 ---
+[INFO] Using 'UTF-8' encoding to copy filtered resources.
+[INFO] Copying 1 resource
+[INFO] skip non existing resourceDirectory /home/runner/work/datafusion-comet/datafusion-comet/spark/../native/target/x86_64-apple-darwin/release
+[INFO] skip non existing resourceDirectory /home/runner/work/datafusion-comet/datafusion-comet/spark/../native/target/aarch64-apple-darwin/release
+[INFO] skip non existing resourceDirectory /home/runner/work/datafusion-comet/datafusion-comet/spark/../native/target/debug
+[INFO] Copying 3 resources
+[INFO] 
+[INFO] --- flatten:1.3.0:flatten (flatten) @ comet-spark-spark3.5_2.12 ---
+[INFO] Generating flattened POM of project org.apache.datafusion:comet-spark-spark3.5_2.12:jar:1.1.0-SNAPSHOT...
+[INFO] 
+[INFO] --- scala:4.9.6:compile (scala-compile-first) @ comet-spark-spark3.5_2.12 ---
+[INFO] Compiler bridge file: /home/runner/.sbt/1.0/zinc/org.scala-sbt/org.scala-sbt-compiler-bridge_2.12-1.10.8-bin_2.12.18__61.0-1.10.8_20250303T164041.jar
+[INFO] compiling 188 Scala sources and 51 Java sources to /home/runner/work/datafusion-comet/datafusion-comet/spark/target/classes ...
+[WARNING] [Warn] /home/runner/work/datafusion-comet/datafusion-comet/spark/src/main/scala/org/apache/comet/iceberg/IcebergReflection.scala:1608: inferred existential type (java.lang.reflect.Constructor[_$51], Array[Object])( forSome { type _$51 }), which cannot be expressed by wildcards,  should be enabled
+by making the implicit value scala.language.existentials visible.
+----
+This can be achieved by adding the import clause 'import scala.language.existentials'
+or by setting the compiler option -language:existentials.
+See the Scaladoc for value scala.language.existentials for a discussion
+why the feature should be explicitly enabled.
+[WARNING] [Warn] /home/runner/work/datafusion-comet/datafusion-comet/spark/src/main/scala/org/apache/spark/sql/comet/execution/shuffle/CometNativeShuffleWriter.scala:480: The outer reference in this type test cannot be checked at run time.
+[WARNING] two warnings found
+[WARNING] Unexpected javac output: /home/runner/.m2/repository/org/apache/arrow/arrow-memory-core/18.3.0/arrow-memory-core-18.3.0.jar(/org/apache/arrow/memory/BaseAllocator.class): warning: Cannot find annotation method 'value()' in type 'KeyFor': class file for org.checkerframework.checker.nullness.qual.KeyFor not found
+/home/runner/.m2/repository/org/apache/arrow/arrow-memory-core/18.3.0/arrow-memory-core-18.3.0.jar(/org/apache/arrow/memory/BaseAllocator.class): warning: Cannot find annotation method 'value()' in type 'KeyFor'
+/home/runner/.m2/repository/org/apache/arrow/arrow-memory-core/18.3.0/arrow-memory-core-18.3.0.jar(/org/apache/arrow/memory/BaseAllocator.class): warning: Cannot find annotation method 'value()' in type 'KeyFor'
+/home/runner/.m2/repository/org/apache/arrow/arrow-memory-core/18.3.0/arrow-memory-core-18.3.0.jar(/org/apache/arrow/memory/BaseAllocator.class): warning: Cannot find annotation method 'value()' in type 'KeyFor'
+/home/runner/work/datafusion-comet/datafusion-comet/spark/src/main/java/org/apache/comet/vector/CometVector.java:67: warning: Unsafe is internal proprietary API and may be removed in a future release
+      java.lang.reflect.Field unsafeField = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                                                    ^
+/home/runner/work/datafusion-comet/datafusion-comet/spark/src/main/java/org/apache/comet/vector/CometVector.java:69: warning: Unsafe is internal proprietary API and may be removed in a future release
+      final sun.misc.Unsafe unsafe = (sun.misc.Unsafe) unsafeField.get(null);
+                    ^
+/home/runner/work/datafusion-comet/datafusion-comet/spark/src/main/java/org/apache/comet/vector/CometVector.java:69: warning: Unsafe is internal proprietary API and may be removed in a future release
+      final sun.misc.Unsafe unsafe = (sun.misc.Unsafe) unsafeField.get(null);
+                                              ^
+7 warnings.
+[INFO] compile in 45.3 s
+[INFO] 
+[INFO] --- scala:4.9.6:add-source (scala-compile-first) @ comet-spark-spark3.5_2.12 ---
+[INFO] 
+[INFO] --- compiler:3.11.0:compile (default-compile) @ comet-spark-spark3.5_2.12 ---
+[INFO] Not compiling main sources
+[INFO] 
+[INFO] --- scalastyle:1.0.0:check (default) @ comet-spark-spark3.5_2.12 ---
+Saving to outputFile=/home/runner/work/datafusion-comet/datafusion-comet/spark/target/scalastyle-output.xml
+Processed 151 file(s)
+Found 0 errors
+Found 0 warnings
+Found 0 infos
+Finished in 4169 ms
+[INFO] 
+[INFO] --- spotless:2.43.0:check (default) @ comet-spark-spark3.5_2.12 ---
+[INFO] Index file does not exist. Fallback to an empty index
+[INFO] Spotless.Java is keeping 57 files clean - 0 needs changes to be clean, 57 were already clean, 0 were skipped because caching determined they were already clean
+[INFO] Spotless.Scala is keeping 469 files clean - 1 needs changes to be clean, 468 were already clean, 0 were skipped because caching determined they were already clean
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for Comet Project Parent POM 1.1.0-SNAPSHOT:
+[INFO] 
+[INFO] Comet Project Parent POM ........................... SUCCESS [ 14.212 s]
+[INFO] comet-common ....................................... SUCCESS [ 15.032 s]
+[INFO] comet-spark ........................................ FAILURE [01:47 min]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  02:16 min
+[INFO] Finished at: 2026-09-04T23:25:01Z
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal com.diffplug.spotless:spotless-maven-plugin:2.43.0:check (default) on project comet-spark-spark3.5_2.12: The following files had format violations:
+[ERROR]     src/test/spark-3.5/org/apache/comet/exec/CometMergeRowsSuite.scala
+[ERROR]         @@ -290,7 +290,7 @@
+[ERROR]          ··//·a·Split·instruction,·so·the·test·cannot·silently·stop·exercising·delete+reinsert·semantics.
+[ERROR]          ··private·def·deltaMergeCase(name:·String,·splitUpdates:·Boolean,·matchedClause:·String):·Unit·=·{
+[ERROR]          ····test(s"delta-backed·MERGE:·$name")·{
+[ERROR]         -········val·target·=·s"$catalog.default.delta_t_${name.replaceAll("\\W",·"_")}"
+[ERROR]         +······val·target·=·s"$catalog.default.delta_t_${name.replaceAll("\\W",·"_")}"
+[ERROR]          ······val·source·=·s"$catalog.default.delta_s_${name.replaceAll("\\W",·"_")}"
+[ERROR]          
+[ERROR]          ······def·reset():·Unit·=·{
+[ERROR] Run 'mvn spotless:apply' to fix these violations.
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoExecutionException
+[ERROR] 
+[ERROR] After correcting the problems, you can resume the build with the command
+[ERROR]   mvn <args> -rf :comet-spark-spark3.5_2.12
