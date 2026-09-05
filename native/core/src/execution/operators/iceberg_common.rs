@@ -1,19 +1,17 @@
 // Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
+// or more contributor license agreements.  See the NOTICE file distributed with
+// this work for additional information regarding copyright ownership.
+// The ASF licenses this file to You under the Apache License, Version 2.0
+// (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! Helpers shared between the Iceberg scan and Iceberg write operators.
 
@@ -35,11 +33,13 @@ const ICEBERG_PROVIDER_CLASS_PROPERTY: &str = "s3.comet.credential.provider.clas
 /// `CometS3CredentialBridge` can read whatever the vendor needs.
 const STORAGE_PROPERTY_PREFIXES: &[&str] = &["s3.", "gcs.", "adls.", "client."];
 
-/// Pick an OpenDAL storage backend from a URI's scheme. `file` (or no scheme) falls through to
-/// the local file system. `memory` is used by the write path to assemble manifest bytes that
-/// stay entirely in-process. For S3, the Comet credential bridge is wired in when a provider
-/// class is configured; `access_mode` is forwarded to the JVM SPI so the read and write paths can
-/// be granted different (e.g. read-only vs read-write) credentials.
+/// Pick an OpenDAL storage backend from a URI's scheme. URI schemes are case-insensitive, so
+/// normalize before dispatch; the JVM admission layer already does the same and must not admit a
+/// location that fails only after native execution begins. `file` (or no scheme) falls through to
+/// the local file system. `memory` is used by the write path to assemble manifest bytes that stay
+/// entirely in-process. For S3, the Comet credential bridge is wired in when a provider class is
+/// configured; `access_mode` is forwarded to the JVM SPI so the read and write paths can be
+/// granted different (e.g. read-only vs read-write) credentials.
 pub(crate) fn storage_factory_for(
     path: &str,
     catalog_properties: &HashMap<String, String>,
@@ -47,11 +47,14 @@ pub(crate) fn storage_factory_for(
     access_mode: AccessMode,
 ) -> Result<Arc<dyn StorageFactory>, DataFusionError> {
     let scheme = if path.contains("://") {
-        path.split("://").next().unwrap_or("file")
+        path.split("://")
+            .next()
+            .unwrap_or("file")
+            .to_ascii_lowercase()
     } else {
-        "file"
+        "file".to_string()
     };
-    match scheme {
+    match scheme.as_str() {
         "file" => Ok(Arc::new(OpenDalStorageFactory::Fs)),
         "memory" => Ok(Arc::new(OpenDalStorageFactory::Memory)),
         "s3" | "s3a" => {
@@ -195,10 +198,20 @@ mod tests {
         for mode in [AccessMode::Read, AccessMode::Write] {
             assert!(factory_result("file:///tmp/x", mode).is_ok());
             assert!(factory_result("/tmp/no-scheme", mode).is_ok());
-            assert!(factory_result("memory:manifest.avro", mode).is_ok());
+            assert!(factory_result("memory:///manifest.avro", mode).is_ok());
             // No credential provider configured: the default chain applies in both modes.
             assert!(factory_result("s3://bucket/db/table", mode).is_ok());
             assert!(factory_result("gs://bucket/db/table", mode).is_ok());
+        }
+    }
+
+    #[test]
+    fn uri_schemes_are_case_insensitive() {
+        for mode in [AccessMode::Read, AccessMode::Write] {
+            assert!(factory_result("FILE:///tmp/x", mode).is_ok());
+            assert!(factory_result("MEMORY:///manifest.avro", mode).is_ok());
+            assert!(factory_result("S3://bucket/db/table", mode).is_ok());
+            assert!(factory_result("GS://bucket/db/table", mode).is_ok());
         }
     }
 
