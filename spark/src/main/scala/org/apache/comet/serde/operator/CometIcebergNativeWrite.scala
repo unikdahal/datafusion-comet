@@ -81,11 +81,16 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
 
   private val EncryptionPropertyPrefix = "encryption."
   private val UnsupportedWriteTypeIds: Set[String] = Set("UUID")
-  // `oss` is deliberately absent: iceberg-rust has an OSS backend, but Comet does not forward
-  // `oss.*` catalog properties to it and no functional test covers the path, so an OSS write
-  // could silently drop endpoint/credential configuration. Fail closed until it is covered.
-  private val SupportedStorageSchemes: Set[String] =
-    Set("file", "memory", "s3", "s3a", "gs")
+  private val HadoopFileIOClass = "org.apache.iceberg.hadoop.HadoopFileIO"
+  private val S3FileIOClass = "org.apache.iceberg.aws.s3.S3FileIO"
+  private val GCSFileIOClass = "org.apache.iceberg.gcp.gcs.GCSFileIO"
+
+  // Keep the write surface intentionally narrower than the native read surface. Writes bypass
+  // table.io(), so admitting a backend is safe only when Comet reproduces the concrete FileIO's
+  // storage and credential semantics end-to-end. `memory` is deliberately excluded because
+  // opendal's in-process Memory backend is not Iceberg's Java InMemoryFileIO store. `oss` is also
+  // excluded because Comet does not forward oss.* properties into the native FileIO.
+  private val SupportedStorageSchemes: Set[String] = Set("file", "s3", "s3a", "gs")
   private val MinUnsupportedFormatVersion = 3
   private val ParquetWritePropertyPrefix = "write.parquet."
   private val ParquetMrPropertyPrefix = "parquet."
@@ -305,15 +310,34 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       .find(k => !IgnoredHadoopParquetConfKeys.contains(k))
       .map(k => s"Hadoop configuration sets $k (reaches iceberg-java's writer but not native)")
 
+  private def storageScheme(location: String): String =
+    if (location.contains("://")) {
+      location.substring(0, location.indexOf("://")).toLowerCase(Locale.ROOT)
+    } else {
+      "file"
+    }
+
+  private[comet] def isNativeWriteFileIOSupported(
+      fileIOClassName: String,
+      dataLocation: String): Boolean =
+    storageScheme(dataLocation) match {
+      // Local native writes reconstruct the same filesystem directly.
+      case "file" => fileIOClassName == HadoopFileIOClass
+      // HadoopFileIO over S3A is admitted because the write proto explicitly translates the
+      // session's fs.s3a.* configuration. S3FileIO is admitted from its s3.* property bag.
+      case "s3" | "s3a" =>
+        fileIOClassName == HadoopFileIOClass || fileIOClassName == S3FileIOClass
+      // GCS is admitted only for the concrete GCSFileIO whose gcs.* properties are forwarded.
+      // HadoopFileIO+gs is intentionally rejected because fs.gs.* is not translated to gcs.*.
+      case "gs" => fileIOClassName == GCSFileIOClass
+      case _ => false
+    }
+
   private val requireSupportedStorageScheme: TriggerRule = ctx =>
     IcebergReflection.getDataLocation(ctx.table) match {
       case None => Some("could not resolve the table data location")
       case Some(location) =>
-        val scheme = if (location.contains("://")) {
-          location.substring(0, location.indexOf("://")).toLowerCase(Locale.ROOT)
-        } else {
-          "file"
-        }
+        val scheme = storageScheme(location)
         if (SupportedStorageSchemes.contains(scheme)) None
         else Some(s"unsupported storage scheme: $scheme")
     }
@@ -325,23 +349,22 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   private val requireExecutorReflectionResolvable: TriggerRule = _ =>
     IcebergReflection.executorReflectionUnresolved
 
-  // The `io-impl` property rule above only sees FileIO configured through table/write
-  // properties; a catalog-level `io-impl` (or a catalog implementation installing its own
-  // FileIO) leaves the properties clean while `table.io()` is still custom. Gate on the
-  // instantiated FileIO's class hierarchy, mirroring the scan side's `isCompatibleFileIO` --
-  // except that the EncryptingFileIO family, which the scan accepts (it reads ciphertext
-  // through iceberg-rust's own storage layer), is rejected here: the native writer produces
-  // plaintext data files.
+  // The `io-impl` property rule above only sees FileIO configured through table/write properties;
+  // a catalog-level `io-impl` or a catalog implementation can still install a different FileIO.
+  // Native writes bypass table.io(), so the destructive/write admission rule is intentionally
+  // exact rather than hierarchy-based: subclasses and wrappers may change credentials, routing,
+  // encryption, retries, or location semantics that the native backend does not reproduce.
   private val requireRecognizedTableFileIO: TriggerRule = ctx =>
-    IcebergReflection.getFileIO(ctx.table) match {
-      case None => Some("could not resolve table.io() for FileIO compatibility checking")
-      case Some(io)
-          if IcebergReflection.classNameInHierarchy(
-            io.getClass,
-            IcebergReflection.COMPATIBLE_FILE_IO_CLASSES) =>
+    (IcebergReflection.getFileIO(ctx.table), IcebergReflection.getDataLocation(ctx.table)) match {
+      case (None, _) => Some("could not resolve table.io() for FileIO compatibility checking")
+      case (_, None) => Some("could not resolve table data location for FileIO compatibility checking")
+      case (Some(io), Some(location))
+          if isNativeWriteFileIOSupported(io.getClass.getName, location) =>
         None
-      case Some(io) =>
-        Some(s"table.io() is ${io.getClass.getName}, which the native write path would bypass")
+      case (Some(io), Some(location)) =>
+        Some(
+          s"table.io() is ${io.getClass.getName} for ${storageScheme(location)} storage; " +
+            "the native write path would bypass unproven FileIO semantics")
     }
 
   private val PlaintextEncryptionManagerClass =
