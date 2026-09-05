@@ -136,8 +136,7 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
     }
   }
 
-  test(
-    "MERGE cardinality violation raises SparkRuntimeException, not a generic native exception") {
+  test("MERGE cardinality violation matches Spark's structured exception") {
     assumeMerge()
     val target = s"$catalog.default.rowlevel_target_card"
     val source = s"$catalog.default.rowlevel_source_card"
@@ -186,31 +185,36 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       sparkEx = intercept[Exception](sql(mergeSql).collect())
     }
 
-    // Both must be the same real Spark exception type/condition, not a generic
-    // CometNativeException/CometQueryExecutionException wrapping an opaque message.
-    val sparkRuntimeExceptionClass = "org.apache.spark.SparkRuntimeException"
+    // Spark 3.5 returns SparkException here while Spark 4.x returns SparkRuntimeException. The
+    // native path must follow the Spark version under test rather than hard-coding either class.
     assert(
-      sparkEx.getClass.getName == sparkRuntimeExceptionClass,
-      s"expected Spark's own baseline to be a $sparkRuntimeExceptionClass, got ${sparkEx.getClass}")
-    assert(
-      cometEx.getClass.getName == sparkRuntimeExceptionClass,
-      s"Comet's native MERGE cardinality violation must surface as a $sparkRuntimeExceptionClass " +
-        s"like Spark's own, got ${cometEx.getClass}: ${cometEx.getMessage}")
+      cometEx.getClass == sparkEx.getClass,
+      "Comet's native MERGE cardinality violation must use Spark's baseline exception type " +
+        s"${sparkEx.getClass.getName}, got ${cometEx.getClass.getName}: ${cometEx.getMessage}")
+
     // Spark 4.x renamed SparkThrowable#getErrorClass to #getCondition. Resolve the accessor
-    // reflectively in this cross-version suite so Spark 3.5 and 4.x can compile the same source.
-    val cometCondition = Seq("getCondition", "getErrorClass").iterator
-      .flatMap { methodName =>
-        try {
-          Some(cometEx.getClass.getMethod(methodName).invoke(cometEx).asInstanceOf[String])
-        } catch {
-          case _: NoSuchMethodException => None
+    // reflectively so the same source validates the structured error on Spark 3.5 and 4.x.
+    def errorCondition(ex: Throwable): String = {
+      Seq("getCondition", "getErrorClass").iterator
+        .flatMap { methodName =>
+          try {
+            Some(ex.getClass.getMethod(methodName).invoke(ex).asInstanceOf[String])
+          } catch {
+            case _: NoSuchMethodException => None
+          }
         }
-      }
-      .find(_ != null)
-      .getOrElse(fail(s"${cometEx.getClass.getName} exposes no Spark error-condition accessor"))
+        .find(_ != null)
+        .getOrElse(fail(s"${ex.getClass.getName} exposes no Spark error-condition accessor"))
+    }
+
+    val sparkCondition = errorCondition(sparkEx)
+    val cometCondition = errorCondition(cometEx)
     assert(
-      cometCondition == "MERGE_CARDINALITY_VIOLATION",
-      s"expected error condition MERGE_CARDINALITY_VIOLATION, got $cometCondition")
+      sparkCondition == "MERGE_CARDINALITY_VIOLATION",
+      s"expected Spark baseline condition MERGE_CARDINALITY_VIOLATION, got $sparkCondition")
+    assert(
+      cometCondition == sparkCondition,
+      s"Comet error condition $cometCondition did not match Spark baseline $sparkCondition")
   }
 
   /** Runs `mergeSql` with Comet on and returns the `CometMergeRowsExec` it planned, if any. */
