@@ -447,7 +447,7 @@ class CometIcebergWriteDetectionSuite extends CometTestBase with CometIcebergTes
     }
   }
 
-  test("Compatible for the remaining supported data location schemes") {
+  test("fall-back: storage and FileIO pair is not proven for native writes") {
     withDetectionCatalog { dir =>
       Seq("gs", "memory").foreach { scheme =>
         val table = s"${scheme}_scheme"
@@ -456,9 +456,29 @@ class CometIcebergWriteDetectionSuite extends CometTestBase with CometIcebergTes
           table,
           partitionSpec = "",
           properties = Some(s"'write.data.path'='$scheme://nonexistent/iceberg/db/$table'"))
-        assertSupportLevelIs[Compatible](table, allowWriteFailure = true)
+        assertUnsupportedContainsAllowingWriteFailure(table, "table.io()")
       }
     }
+  }
+
+  test("native write FileIO admission is exact and scheme scoped") {
+    val hadoopFileIO = "org.apache.iceberg.hadoop.HadoopFileIO"
+    val s3FileIO = "org.apache.iceberg.aws.s3.S3FileIO"
+    val gcsFileIO = "org.apache.iceberg.gcp.gcs.GCSFileIO"
+
+    assert(CometIcebergNativeWrite.isNativeWriteFileIOSupported(hadoopFileIO, "file:///tmp/t"))
+    assert(CometIcebergNativeWrite.isNativeWriteFileIOSupported(hadoopFileIO, "s3a://bucket/t"))
+    assert(CometIcebergNativeWrite.isNativeWriteFileIOSupported(s3FileIO, "s3://bucket/t"))
+    assert(CometIcebergNativeWrite.isNativeWriteFileIOSupported(gcsFileIO, "gs://bucket/t"))
+    assert(
+      !CometIcebergNativeWrite.isNativeWriteFileIOSupported(
+        "example.CustomHadoopFileIO",
+        "file:///tmp/t"))
+    assert(!CometIcebergNativeWrite.isNativeWriteFileIOSupported(hadoopFileIO, "gs://bucket/t"))
+    assert(
+      !CometIcebergNativeWrite.isNativeWriteFileIOSupported(
+        hadoopFileIO,
+        "memory://table/t"))
   }
 
   test("fall-back: oss data location scheme (oss.* properties are not forwarded)") {
@@ -549,10 +569,10 @@ class CometIcebergWriteDetectionSuite extends CometTestBase with CometIcebergTes
   test("fall-back: catalog-level custom FileIO that no property reveals") {
     // `io-impl` set at the CATALOG level never appears in table or write properties, so the
     // property rule cannot see it -- only inspecting the instantiated table.io() can. The test
-    // FileIO delegates to HadoopFileIO by composition (inheritance would pass the hierarchy
-    // check, by design), so the table itself works normally. A dedicated catalog name is
-    // required: Spark caches catalog instances per session, so adding `io-impl` to the shared
-    // detection catalog's conf would not reach an already-instantiated catalog.
+    // FileIO delegates to HadoopFileIO by composition, so the table itself works normally. A
+    // dedicated catalog name is required: Spark caches catalog instances per session, so adding
+    // `io-impl` to the shared detection catalog's conf would not reach an already-instantiated
+    // catalog. Exact native admission rejects this wrapper and subclasses alike.
     withTempIcebergDir { warehouseDir =>
       val ioCat = "io_probe_cat"
       withSQLConf(
@@ -885,9 +905,8 @@ class CometIcebergWriteDetectionSuite extends CometTestBase with CometIcebergTes
 
 /**
  * A FileIO that works normally (delegating to HadoopFileIO) but whose class is not on Comet's
- * recognized-FileIO allowlist. Composition rather than inheritance is the point: a HadoopFileIO
- * SUBCLASS passes the hierarchy check by design, while this class must be declined. Instantiated
- * reflectively by Iceberg's `CatalogUtil.loadFileIO`, hence top-level with a no-arg constructor.
+ * exact native-write allowlist. Native writes bypass FileIO semantics, so composition, wrappers,
+ * and subclasses are all declined unless they are explicitly supported and tested.
  */
 class DetectionDelegatingFileIO extends FileIO with HadoopConfigurable {
   private val delegate = new HadoopFileIO()
