@@ -141,6 +141,17 @@ object CometConf extends ShimCometConf {
       .booleanConf
       .createWithDefault(false)
 
+  val COMET_ICEBERG_REMOVE_ORPHAN_FILES_NATIVE_ENABLED: ConfigEntry[Boolean] =
+  conf("spark.comet.iceberg.removeOrphanFiles.native.enabled")
+    .category(CATEGORY_SCAN)
+    .doc(
+      "Whether to run Iceberg `remove_orphan_files` through Comet's native implementation. " +
+        "When disabled (default), the procedure falls through to Iceberg-Java. When enabled, " +
+        "Comet intercepts the CALL and runs metadata traversal, listing, and deletes " +
+        "natively, falling back to Iceberg-Java for unsupported options or storage.")
+    .booleanConf
+    .createWithDefault(false)
+
   val COMET_ICEBERG_DATA_FILE_CONCURRENCY_LIMIT: ConfigEntry[Int] =
     conf("spark.comet.scan.icebergNative.dataFileConcurrencyLimit")
       .category(CATEGORY_SCAN)

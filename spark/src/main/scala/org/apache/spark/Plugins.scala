@@ -33,6 +33,7 @@ import org.apache.comet.CometConf
 import org.apache.comet.CometConf.{COMET_METRICS_ENABLED, COMET_ONHEAP_ENABLED}
 import org.apache.comet.CometKryoRegistrator
 import org.apache.comet.annotation.Public
+import org.apache.comet.iceberg.CometIcebergMaintenanceExtensions
 
 /**
  * Comet driver plugin. This class is loaded by Spark's plugin framework. It will be instantiated
@@ -68,7 +69,8 @@ class CometDriverPlugin extends DriverPlugin with Logging with ShimCometDriverPl
     CometDriverPlugin.maybeSetCacheSerializer(sc.conf, extraConfs)
     CometDriverPlugin.warnIfKryoRegistratorMissing(sc.conf)
 
-    // register CometSparkSessionExtensions if it isn't already registered
+    // Register Comet session extensions if they are not already registered. The maintenance parser
+    // is kept last so it wraps the complete parser chain, including Iceberg's Spark 3.x parser.
     CometDriverPlugin.registerCometSessionExtension(sc.conf)
 
     // Register Comet metrics
@@ -204,18 +206,27 @@ object CometDriverPlugin extends Logging {
 
   def registerCometSessionExtension(conf: SparkConf): Unit = {
     val extensionKey = StaticSQLConf.SPARK_SESSION_EXTENSIONS.key
-    val extensionClass = classOf[CometSparkSessionExtensions].getName
-    val extensions = conf.get(extensionKey, "")
-    if (extensions.isEmpty) {
-      logInfo(s"Setting $extensionKey=$extensionClass")
-      conf.set(extensionKey, extensionClass)
-    } else {
-      val currentExtensions = extensions.split(",").map(_.trim)
-      if (!currentExtensions.contains(extensionClass)) {
-        val newValue = s"$extensions,$extensionClass"
-        logInfo(s"Setting $extensionKey=$newValue")
-        conf.set(extensionKey, newValue)
-      }
+    val cometExtension = classOf[CometSparkSessionExtensions].getName
+    val maintenanceExtension = classOf[CometIcebergMaintenanceExtensions].getName
+    val currentExtensions = conf
+      .get(extensionKey, "")
+      .split(',')
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .toSeq
+
+    val withComet =
+      if (currentExtensions.contains(cometExtension)) currentExtensions
+      else currentExtensions :+ cometExtension
+
+    // Always keep the maintenance parser outermost. If a caller listed it explicitly in another
+    // position, move only this Comet-owned extension; preserve every other extension's order.
+    val desiredExtensions = withComet.filterNot(_ == maintenanceExtension) :+ maintenanceExtension
+    val desiredValue = desiredExtensions.mkString(",")
+    val currentValue = currentExtensions.mkString(",")
+    if (desiredValue != currentValue) {
+      logInfo(s"Setting $extensionKey=$desiredValue")
+      conf.set(extensionKey, desiredValue)
     }
   }
 }
