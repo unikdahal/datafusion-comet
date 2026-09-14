@@ -177,31 +177,34 @@ class CometIcebergNativeScanSuite extends AnyFunSuite with Matchers {
   }
 
   test("equality-delete file with null equality ids is fatal") {
-    val ex = intercept[IllegalStateException](serializeDeleteFile(new EqualityDeleteFileWithNullIds))
+    val ex =
+      intercept[IllegalStateException](serializeDeleteFile(new EqualityDeleteFileWithNullIds))
     ex.getMessage shouldBe
       "Iceberg equality delete file 's3://bucket/eq-null-ids.parquet' has no equality field IDs"
   }
 
   test("equality-delete file with empty equality ids is fatal") {
-    val ex = intercept[IllegalStateException](
-      serializeDeleteFile(new EqualityDeleteFileWithEmptyIds))
+    val ex =
+      intercept[IllegalStateException](serializeDeleteFile(new EqualityDeleteFileWithEmptyIds))
     ex.getMessage shouldBe
       "Iceberg equality delete file 's3://bucket/eq-empty-ids.parquet' has no equality field IDs"
   }
 
   test("content invocation failure propagates instead of defaulting to position deletes") {
-    val ex = intercept[InvocationTargetException](serializeDeleteFile(new ThrowingContentDeleteFile))
+    val ex =
+      intercept[InvocationTargetException](serializeDeleteFile(new ThrowingContentDeleteFile))
     ex.getCause.getMessage shouldBe "content boom"
   }
 
   test("spec id invocation failure propagates instead of defaulting to zero") {
-    val ex = intercept[InvocationTargetException](serializeDeleteFile(new ThrowingSpecIdDeleteFile))
+    val ex =
+      intercept[InvocationTargetException](serializeDeleteFile(new ThrowingSpecIdDeleteFile))
     ex.getCause.getMessage shouldBe "spec boom"
   }
 
   test("equality-id invocation failure propagates instead of dropping ids") {
-    val ex = intercept[InvocationTargetException](
-      serializeDeleteFile(new ThrowingEqualityIdsDeleteFile))
+    val ex =
+      intercept[InvocationTargetException](serializeDeleteFile(new ThrowingEqualityIdsDeleteFile))
     ex.getCause.getMessage shouldBe "ids boom"
   }
 
