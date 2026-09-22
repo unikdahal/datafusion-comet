@@ -19,20 +19,125 @@
 
 package org.apache.comet.serde.operator
 
+import java.lang.reflect.{InvocationTargetException, Proxy}
+
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import org.apache.iceberg.expressions.Expressions
+import org.apache.iceberg.FileScanTask
+import org.apache.iceberg.expressions.{Expression, Expressions}
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.types.{ArrayType, IntegerType, MapType, StringType, StructType}
 
-/**
- * Unit tests for [[CometIcebergNativeScan.hadoopToIcebergS3Properties]]. The pinned iceberg-rust
- * S3 parser reads ONLY global `s3.*` keys (never `s3.bucket.*`), so the function drops per-bucket
- * keys and promotes just the TARGET bucket's keys to global `s3.*`. Pure-function assertions, so
- * a lightweight `AnyFunSuite` (no Spark session) suffices.
- */
+/** Unit tests for Iceberg scan serialization without a Spark session. */
 class CometIcebergNativeScanSuite extends AnyFunSuite with Matchers {
+
+  private val residualOutput = Seq(AttributeReference("value", IntegerType)())
+
+  private def convertResidual(expr: Any) =
+    CometIcebergNativeScan.icebergExprToProto(expr, residualOutput, Set.empty)
+
+  private def serializeResidual(residual: => Expression) = {
+    val task = Proxy.newProxyInstance(
+      classOf[FileScanTask].getClassLoader,
+      Array[Class[_]](classOf[FileScanTask]),
+      (_, method, _) => {
+        assert(method.getName == "residual")
+        residual
+      })
+    CometIcebergNativeScan.serializeResidual(
+      task,
+      classOf[FileScanTask].getMethod("residual"),
+      residualOutput,
+      Set.empty)
+  }
+
+  class MissingUnboundPredicate
+
+  class ThrowingUnboundPredicate(val failure: RuntimeException) {
+    def op(): String = throw failure
+  }
+
+  class BrokenAnd {
+    def left(): Any = Expressions.equal("value", Int.box(1))
+    def right(): Any = new MissingUnboundPredicate
+  }
+
+  class BrokenOr extends BrokenAnd
+
+  class BrokenNot {
+    def child(): Any = new BrokenAnd
+  }
+
+  test("residual accessor failures are fatal and preserve the cause") {
+    val failure = new IllegalStateException("residual evaluation failed")
+    val error = intercept[RuntimeException] {
+      serializeResidual(throw failure)
+    }
+    error.getMessage shouldBe "Failed to serialize Iceberg task residual"
+    error.getCause shouldBe a[InvocationTargetException]
+    error.getCause.getCause should be theSameInstanceAs failure
+  }
+
+  test("residual reflection lookup and invocation failures propagate") {
+    intercept[NoSuchMethodException] {
+      convertResidual(new MissingUnboundPredicate)
+    }
+    val failure = new IllegalStateException("expression operation failed")
+    val error = intercept[InvocationTargetException] {
+      convertResidual(new ThrowingUnboundPredicate(failure))
+    }
+    error.getCause should be theSameInstanceAs failure
+  }
+
+  test("nested residual reflection failures propagate through AND OR and NOT") {
+    Seq(new BrokenAnd, new BrokenOr, new BrokenNot).foreach { expr =>
+      intercept[NoSuchMethodException] {
+        convertResidual(expr)
+      }
+    }
+  }
+
+  test("residual literal conversion failures are fatal at task serialization") {
+    for (expr <- Seq(
+        Expressions.equal("value", "not an integer"),
+        Expressions.in("value", "not an integer", "also not an integer"))) {
+      val error = intercept[RuntimeException] {
+        serializeResidual(expr)
+      }
+      error.getCause shouldBe a[ClassCastException]
+    }
+  }
+
+  test("supported real Iceberg residuals survive task serialization") {
+    val left = Expressions.equal("value", Int.box(1))
+    val right = Expressions.greaterThan("value", Int.box(2))
+    val binary = serializeResidual(left).get.getBinary
+    binary.getColumn shouldBe "value"
+    binary.getValue.getIntVal shouldBe 1
+    serializeResidual(Expressions.and(left, right)).get.hasAnd shouldBe true
+    serializeResidual(Expressions.or(left, right)).get.hasOr shouldBe true
+    serializeResidual(Expressions.not(left)).get.hasNot shouldBe true
+    serializeResidual(
+      Expressions.in("value", Int.box(1), Int.box(2))).get.getSet.getValuesCount shouldBe 2
+  }
+
+  test("intentionally unsupported residuals still omit pushdown") {
+    val supported = Expressions.equal("value", Int.box(1))
+    val unsupported = Expressions.notIn("value", Int.box(2), Int.box(3))
+    Seq(
+      Expressions.alwaysTrue(),
+      Expressions.alwaysFalse(),
+      unsupported,
+      Expressions.equal("absent", Int.box(1)),
+      Expressions.and(supported, unsupported),
+      Expressions.or(supported, unsupported),
+      Expressions.not(Expressions.and(supported, unsupported))).foreach { expr =>
+      serializeResidual(expr) shouldBe None
+    }
+    CometIcebergNativeScan
+      .icebergExprToProto(supported, residualOutput, Set("value")) shouldBe None
+  }
 
   test("complex type null residuals are not serialized") {
     // Container predicates stay in the post-scan filter, not the native residual pool.

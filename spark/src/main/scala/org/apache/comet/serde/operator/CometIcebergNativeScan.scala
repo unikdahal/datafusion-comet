@@ -19,6 +19,7 @@
 
 package org.apache.comet.serde.operator
 
+import java.lang.reflect.Method
 import java.math.BigDecimal
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets.UTF_8
@@ -26,6 +27,7 @@ import java.util.{Base64, UUID}
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
+import scala.util.control.NonFatal
 
 import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods._
@@ -647,99 +649,102 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
    * pruning.
    *
    * Residuals come from Iceberg's ResidualEvaluator (partial evaluation of the scan filter
-   * against each file's partition data). This is only a pruning hint: the CometFilter above the
-   * scan enforces correctness, so any node or literal we cannot represent yields None (no
-   * pushdown). Predicates over `pageIndexUnsupportedColumns` also yield None (iceberg-rust cannot
-   * use those columns in the page index). Uses reflection because Iceberg's expression classes
-   * are not on Spark's classpath at planning time; residuals are unbound predicates carrying a
-   * NamedReference (column name) and a literal.
+   * against each file's partition data). Intentionally unsupported nodes or literals yield None
+   * (no pushdown), with filtering retained above the scan. Unexpected reflection or conversion
+   * failures propagate: native execution is already selected, and dropping a residual may lose
+   * filtering that Spark considers fully pushed. Predicates over `pageIndexUnsupportedColumns`
+   * also yield None (iceberg-rust cannot use those columns in the page index). Uses reflection
+   * because Iceberg's expression classes are not on Spark's classpath at planning time; residuals
+   * are unbound predicates carrying a NamedReference (column name) and a literal.
    */
   def icebergExprToProto(
       icebergExpr: Any,
       output: Seq[Attribute],
       pageIndexUnsupportedColumns: Set[String]): Option[OperatorOuterClass.IcebergPredicate] = {
-    try {
-      val exprClass = icebergExpr.getClass
-      val attributeMap = output.map(attr => attr.name -> attr).toMap
+    val exprClass = icebergExpr.getClass
+    val attributeMap = output.map(attr => attr.name -> attr).toMap
 
-      if (exprClass.getName.endsWith(Constants.ExpressionTypes.UNBOUND_PREDICATE)) {
-        val operation = IcebergReflection.getMethod(exprClass, "op").invoke(icebergExpr).toString
-        val term = IcebergReflection.getMethod(exprClass, "term").invoke(icebergExpr)
-        val ref = IcebergReflection.getMethod(term.getClass, "ref").invoke(term)
-        val columnName =
-          IcebergReflection.getMethod(ref.getClass, "name").invoke(ref).asInstanceOf[String]
+    if (exprClass.getName.endsWith(Constants.ExpressionTypes.UNBOUND_PREDICATE)) {
+      val operation = IcebergReflection.getMethod(exprClass, "op").invoke(icebergExpr).toString
+      val term = IcebergReflection.getMethod(exprClass, "term").invoke(icebergExpr)
+      val ref = IcebergReflection.getMethod(term.getClass, "ref").invoke(term)
+      val columnName =
+        IcebergReflection.getMethod(ref.getClass, "name").invoke(ref).asInstanceOf[String]
 
-        // Iceberg names a nested reference by its dotted path ("struct.field"), which never matches
-        // a top-level scan output attribute, so a residual on a nested field drops here. That miss
-        // is also why the top-level-only pageIndexUnsupportedColumns gate below stays sound.
-        attributeMap.get(columnName).flatMap { attribute =>
-          import Constants.Operations._
-          import OperatorOuterClass.IcebergPredicateOperator
-          // iceberg-rust binds accessors only for primitive fields. Containers cannot be partition
-          // columns, so exact partition selection cannot remove their null checks from the
-          // post-scan filter. That filter also enforces predicates unsupported by the page index.
-          if (pageIndexUnsupportedColumns.contains(columnName) ||
-            isComplexType(attribute.dataType)) {
-            None
-          } else {
-            operation match {
-              case IS_NULL => Some(unaryPredicate(columnName, IcebergPredicateOperator.IsNull))
-              case IS_NOT_NULL | NOT_NULL =>
-                Some(unaryPredicate(columnName, IcebergPredicateOperator.NotNull))
-              case op if binaryOps.contains(op) =>
-                binaryPredicate(exprClass, icebergExpr, columnName, attribute, binaryOps(op))
-              case IN => setPredicate(exprClass, icebergExpr, columnName, attribute)
-              // NOT_IN is inherently unprunable from column stats, so it is not pushed.
-              case _ => None
-            }
+      // Iceberg names a nested reference by its dotted path ("struct.field"), which never matches
+      // a top-level scan output attribute, so a residual on a nested field drops here. That miss
+      // is also why the top-level-only pageIndexUnsupportedColumns gate below stays sound.
+      attributeMap.get(columnName).flatMap { attribute =>
+        import Constants.Operations._
+        import OperatorOuterClass.IcebergPredicateOperator
+        // iceberg-rust binds accessors only for primitive fields. Containers cannot be partition
+        // columns, so exact partition selection cannot remove their null checks from the
+        // post-scan filter. That filter also enforces predicates unsupported by the page index.
+        if (pageIndexUnsupportedColumns.contains(columnName) ||
+          isComplexType(attribute.dataType)) {
+          None
+        } else {
+          operation match {
+            case IS_NULL => Some(unaryPredicate(columnName, IcebergPredicateOperator.IsNull))
+            case IS_NOT_NULL | NOT_NULL =>
+              Some(unaryPredicate(columnName, IcebergPredicateOperator.NotNull))
+            case op if binaryOps.contains(op) =>
+              binaryPredicate(exprClass, icebergExpr, columnName, attribute, binaryOps(op))
+            case IN => setPredicate(exprClass, icebergExpr, columnName, attribute)
+            // NOT_IN is inherently unprunable from column stats, so it is not pushed.
+            case _ => None
           }
         }
-      } else if (exprClass.getName.endsWith(Constants.ExpressionTypes.AND)) {
-        val left = icebergExprToProto(
-          IcebergReflection.getMethod(exprClass, "left").invoke(icebergExpr),
-          output,
-          pageIndexUnsupportedColumns)
-        val right = icebergExprToProto(
-          IcebergReflection.getMethod(exprClass, "right").invoke(icebergExpr),
-          output,
-          pageIndexUnsupportedColumns)
-        (left, right) match {
-          // Push the residual only if it converts whole. Dropping a conjunct is safe in positive
-          // position but strengthens the predicate under a NOT (De Morgan), which would wrongly
-          // prune, and tracking polarity across arbitrary nesting is error prone. So an
-          // unconvertible conjunct elides the whole residual; the post-scan CometFilter is exact.
-          case (Some(l), Some(r)) => Some(logicalPredicate(isAnd = true, l, r))
-          case _ => None
-        }
-      } else if (exprClass.getName.endsWith(Constants.ExpressionTypes.OR)) {
-        val left = icebergExprToProto(
-          IcebergReflection.getMethod(exprClass, "left").invoke(icebergExpr),
-          output,
-          pageIndexUnsupportedColumns)
-        val right = icebergExprToProto(
-          IcebergReflection.getMethod(exprClass, "right").invoke(icebergExpr),
-          output,
-          pageIndexUnsupportedColumns)
-        // Dropping a disjunct would strengthen the predicate and wrongly prune, so require both.
-        (left, right) match {
-          case (Some(l), Some(r)) => Some(logicalPredicate(isAnd = false, l, r))
-          case _ => None
-        }
-      } else if (exprClass.getName.endsWith(Constants.ExpressionTypes.NOT)) {
-        val child = IcebergReflection.getMethod(exprClass, "child").invoke(icebergExpr)
-        icebergExprToProto(child, output, pageIndexUnsupportedColumns).map(notPredicate)
-      } else {
-        None
       }
+    } else if (exprClass.getName.endsWith(Constants.ExpressionTypes.AND)) {
+      val left = icebergExprToProto(
+        IcebergReflection.getMethod(exprClass, "left").invoke(icebergExpr),
+        output,
+        pageIndexUnsupportedColumns)
+      val right = icebergExprToProto(
+        IcebergReflection.getMethod(exprClass, "right").invoke(icebergExpr),
+        output,
+        pageIndexUnsupportedColumns)
+      (left, right) match {
+        // Push the residual only if it converts whole. Dropping a conjunct is safe in positive
+        // position but strengthens the predicate under a NOT (De Morgan), which would wrongly
+        // prune, and tracking polarity across arbitrary nesting is error prone. So an
+        // unconvertible conjunct elides the whole residual; the post-scan CometFilter is exact.
+        case (Some(l), Some(r)) => Some(logicalPredicate(isAnd = true, l, r))
+        case _ => None
+      }
+    } else if (exprClass.getName.endsWith(Constants.ExpressionTypes.OR)) {
+      val left = icebergExprToProto(
+        IcebergReflection.getMethod(exprClass, "left").invoke(icebergExpr),
+        output,
+        pageIndexUnsupportedColumns)
+      val right = icebergExprToProto(
+        IcebergReflection.getMethod(exprClass, "right").invoke(icebergExpr),
+        output,
+        pageIndexUnsupportedColumns)
+      // Dropping a disjunct would strengthen the predicate and wrongly prune, so require both.
+      (left, right) match {
+        case (Some(l), Some(r)) => Some(logicalPredicate(isAnd = false, l, r))
+        case _ => None
+      }
+    } else if (exprClass.getName.endsWith(Constants.ExpressionTypes.NOT)) {
+      val child = IcebergReflection.getMethod(exprClass, "child").invoke(icebergExpr)
+      icebergExprToProto(child, output, pageIndexUnsupportedColumns).map(notPredicate)
+    } else {
+      None
+    }
+  }
+
+  private[operator] def serializeResidual(
+      task: Any,
+      residualMethod: Method,
+      output: Seq[Attribute],
+      pageIndexUnsupportedColumns: Set[String]): Option[OperatorOuterClass.IcebergPredicate] = {
+    try {
+      icebergExprToProto(residualMethod.invoke(task), output, pageIndexUnsupportedColumns)
     } catch {
-      // Reflection over Iceberg's expression classes can fail on an unexpected shape (e.g. an
-      // Iceberg version change). A residual is only a pruning hint, so skip pushdown rather than
-      // fail the scan, but log it: a persistent warning here signals a real API drift to fix.
-      case e: Exception =>
-        logWarning(
-          "Skipping Iceberg residual pushdown; could not convert expression: " +
-            s"${e.getMessage}")
-        None
+      case NonFatal(e) =>
+        throw new RuntimeException("Failed to serialize Iceberg task residual", e)
     }
   }
 
@@ -1193,18 +1198,7 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                 }
 
                 val residualExprOpt =
-                  try {
-                    icebergExprToProto(
-                      residualMethod.invoke(task),
-                      output,
-                      pageIndexUnsupportedColumns)
-                  } catch {
-                    case e: Exception =>
-                      logWarning(
-                        "Failed to extract residual expression from FileScanTask: " +
-                          s"${e.getMessage}")
-                      None
-                  }
+                  serializeResidual(task, residualMethod, output, pageIndexUnsupportedColumns)
 
                 residualExprOpt.foreach { residual =>
                   val residualIdx = residualToPoolIndex.getOrElseUpdate(
