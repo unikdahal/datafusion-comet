@@ -144,10 +144,11 @@ object CometConf extends ShimCometConf {
   val COMET_ICEBERG_DELTA_WRITE_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.iceberg.delta.write.enabled")
       .category(CATEGORY_TESTING)
-      .doc("Use the native Iceberg V2 position-delta writer for eligible row-level " +
-        "commands after metadata and runtime Iceberg compatibility checks pass. " +
-        "Spark and Iceberg retain planning and driver-side RowDelta commit. " +
-        "Experimental and off by default.")
+      .doc(
+        "Use the native Iceberg V2 position-delta writer for eligible row-level " +
+          "commands after metadata and runtime Iceberg compatibility checks pass. " +
+          "Spark and Iceberg retain planning and driver-side RowDelta commit. " +
+          "Experimental and off by default.")
       .booleanConf
       .createWithDefault(false)
 
