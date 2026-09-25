@@ -462,9 +462,7 @@ impl IcebergDeltaWriteExec {
         })?;
         if !matches!(
             command,
-            IcebergDeltaCommand::Delete
-                | IcebergDeltaCommand::Update
-                | IcebergDeltaCommand::Merge
+            IcebergDeltaCommand::Delete | IcebergDeltaCommand::Update | IcebergDeltaCommand::Merge
         ) {
             return Err(DataFusionError::Plan(
                 "Native Iceberg delta requires a DELETE, UPDATE, or MERGE command".into(),
@@ -566,9 +564,8 @@ impl IcebergDeltaWriteExec {
         let iceberg_schema = parse_iceberg_schema(&common.iceberg_schema_json)?;
         let data_target_schema =
             Arc::new(iceberg::arrow::schema_to_arrow_schema(&iceberg_schema).map_err(iceberg_err)?);
-        let delete_without_data_projection = command
-            == IcebergDeltaCommand::Delete
-            && layout.data_ordinals.is_empty();
+        let delete_without_data_projection =
+            command == IcebergDeltaCommand::Delete && layout.data_ordinals.is_empty();
         if layout.data_ordinals.len() != data_target_schema.fields().len()
             && !delete_without_data_projection
         {
