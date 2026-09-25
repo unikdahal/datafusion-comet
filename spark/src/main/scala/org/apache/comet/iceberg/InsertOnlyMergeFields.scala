@@ -29,6 +29,6 @@ private[iceberg] final case class InsertOnlyMergeFields(
     write: Option[Write],
     tableName: String)
 
-private[iceberg] trait IcebergInsertOnlyMergeShim {
+private[iceberg] trait IcebergInsertOnlyMergeShimApi {
   def extract(plan: LogicalPlan): Option[InsertOnlyMergeFields]
 }

@@ -22,7 +22,7 @@ package org.apache.comet.iceberg
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
 /** Spark 3.5 uses Spark's WriteDelta logical node for Iceberg row-level writes. */
-private[iceberg] object IcebergDeltaLogicalShim extends IcebergDeltaLogicalShim {
+private[iceberg] object IcebergDeltaLogicalShim extends IcebergDeltaLogicalShimApi {
   private val writeDeltaClass = "org.apache.spark.sql.catalyst.plans.logical.WriteDelta"
 
   override def extract(plan: LogicalPlan): Option[DeltaLogicalFields] =

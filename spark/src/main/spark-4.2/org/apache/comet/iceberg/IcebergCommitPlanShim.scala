@@ -30,7 +30,7 @@ private[iceberg] object IcebergCommitPlanShim {
 }
 
 /** Extracts Spark 4.2's insert-only MERGE rewrite before DataSourceV2Strategy plans it. */
-private[iceberg] object IcebergInsertOnlyMergeShim extends IcebergInsertOnlyMergeShim {
+private[iceberg] object IcebergInsertOnlyMergeShim extends IcebergInsertOnlyMergeShimApi {
   override def extract(plan: LogicalPlan): Option[InsertOnlyMergeFields] = plan match {
     case InsertOnlyMerge(table: DataSourceV2Relation, query, write, _) =>
       Some(InsertOnlyMergeFields(table, query, write, table.name))

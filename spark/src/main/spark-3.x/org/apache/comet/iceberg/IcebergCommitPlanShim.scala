@@ -29,8 +29,7 @@ private[iceberg] object IcebergCommitPlanShim {
 }
 
 /** Spark lines before 4.2 do not expose InsertOnlyMerge as a logical command. */
-private[iceberg] object IcebergInsertOnlyMergeShim extends IcebergInsertOnlyMergeShim {
+private[iceberg] object IcebergInsertOnlyMergeShim extends IcebergInsertOnlyMergeShimApi {
   override def extract(plan: LogicalPlan): Option[InsertOnlyMergeFields] = None
 }
-
 

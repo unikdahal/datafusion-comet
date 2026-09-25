@@ -22,7 +22,7 @@ package org.apache.comet.iceberg
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
 /** Spark 4.1's WriteDelta descriptor is extracted through the shared compatibility bridge. */
-private[iceberg] object IcebergDeltaLogicalFieldsShim extends IcebergDeltaLogicalFieldsShim {
+private[iceberg] object IcebergDeltaLogicalFieldsShim extends IcebergDeltaLogicalFieldsShimApi {
   override def extract(plan: LogicalPlan): Option[DeltaLogicalFields] =
     IcebergReflection.extractDeltaLogicalFields(plan)
 }

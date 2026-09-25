@@ -37,11 +37,11 @@ case class DeltaLogicalFields(
     command: Option[DeltaCommand] = None,
     tableName: Option[String] = None)
 
-private[iceberg] trait IcebergDeltaLogicalShim {
+private[iceberg] trait IcebergDeltaLogicalShimApi {
   def extract(plan: LogicalPlan): Option[DeltaLogicalFields]
 }
 
 /** Version-specific extraction of Spark's public WriteDelta logical node. */
-private[iceberg] trait IcebergDeltaLogicalFieldsShim {
+private[iceberg] trait IcebergDeltaLogicalFieldsShimApi {
   def extract(plan: LogicalPlan): Option[DeltaLogicalFields]
 }

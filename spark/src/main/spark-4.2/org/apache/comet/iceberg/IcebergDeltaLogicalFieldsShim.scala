@@ -25,7 +25,7 @@ import org.apache.spark.sql.connector.write.RowLevelOperation.Command.{DELETE, M
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 
 /** Spark 4.2 exposes the row-level fields directly; keep this extraction fully typed. */
-private[iceberg] object IcebergDeltaLogicalFieldsShim extends IcebergDeltaLogicalFieldsShim {
+private[iceberg] object IcebergDeltaLogicalFieldsShim extends IcebergDeltaLogicalFieldsShimApi {
   override def extract(plan: LogicalPlan): Option[DeltaLogicalFields] = plan match {
     case delta: WriteDelta =>
       val command = delta.operation.command match {
