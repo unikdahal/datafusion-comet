@@ -69,12 +69,6 @@ object Utils extends CometTypeShim with Logging {
     org.apache.spark.util.Utils.getSimpleName(cls)
   }
 
-  /** Bridges serialization helpers that Spark marks as private to the Spark package. */
-  def serialize[T](value: T): Array[Byte] = org.apache.spark.util.Utils.serialize(value)
-
-  def deserialize[T](bytes: Array[Byte], loader: ClassLoader): T =
-    org.apache.spark.util.Utils.deserialize[T](bytes, loader)
-
   /** Compares Spark data types while ignoring compatible nullability differences. */
   def equalsIgnoreCompatibleNullability(left: DataType, right: DataType): Boolean =
     DataType.equalsIgnoreCompatibleNullability(left, right)
