@@ -114,18 +114,7 @@ case class IcebergCommitExec(
           s"Iceberg write job failed; aborting with ${completed.length} completed task " +
             "message(s)",
           cause)
-        // The BatchWrite contract expects a job-level abort. Iceberg's own `SparkWrite.abort`
-        // only deletes files after a cleanable *commit* failure and skips cleanup otherwise, so
-        // the data files of tasks that completed before the job failed would stay behind even
-        // though nothing can reference them (no commit was attempted). Delete them here; the
-        // failed task's own files are cleaned up by the task itself.
-        val failure = abortAfter(completed, cause)
-        try deleteCompletedTaskFiles(completed)
-        catch {
-          case cleanupFailure: Throwable =>
-            cause.addSuppressed(cleanupFailure)
-        }
-        throw failure
+        throw abortAfterJobFailure(completed, cause)
     }
     longMetric("numCommittedMessages").add(messages.length)
 
@@ -156,6 +145,30 @@ case class IcebergCommitExec(
       case abortFailure: Throwable =>
         logError("Iceberg write abort failed")
         cause.addSuppressed(abortFailure)
+        QueryExecutionErrors.writingJobFailedError(cause)
+    }
+
+  /**
+   * A job failure happens before any commit is attempted. Iceberg's BatchWrite.abort therefore
+   * owns cleanup of completed task files and, on every supported Iceberg version, deletes them
+   * while cleanupOnAbort is still true. Only fall back to Comet's direct FileIO cleanup when the
+   * abort itself fails; otherwise a second delete would race/retry work Iceberg already completed.
+   */
+  private def abortAfterJobFailure(
+      messages: Array[WriterCommitMessage],
+      cause: Throwable): Throwable =
+    try {
+      batchWrite.abort(messages)
+      cause
+    } catch {
+      case abortFailure: Throwable =>
+        logError("Iceberg write abort failed; attempting direct cleanup of completed task files")
+        cause.addSuppressed(abortFailure)
+        try deleteCompletedTaskFiles(messages)
+        catch {
+          case cleanupFailure: Throwable =>
+            cause.addSuppressed(cleanupFailure)
+        }
         QueryExecutionErrors.writingJobFailedError(cause)
     }
 
