@@ -21,8 +21,6 @@ package org.apache.spark.sql.comet
 
 import java.util.ArrayList
 
-import scala.jdk.CollectionConverters._
-
 import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
@@ -306,7 +304,4 @@ private object IcebergDeltaWriteExec {
   def requireReflection[A](value: Option[A], description: String): A =
     value.getOrElse(
       throw new IllegalStateException(s"Native Iceberg delta write: $description unavailable"))
-
-
-
 }
