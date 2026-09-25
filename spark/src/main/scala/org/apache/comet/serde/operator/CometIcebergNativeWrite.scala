@@ -27,7 +27,6 @@ import scala.util.control.NonFatal
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.comet.{CometIcebergDeltaWriteExec, CometIcebergWriteExec, CometNativeExec, IcebergWriteExec}
-import org.apache.spark.sql.comet.util.{Utils => CometUtils}
 
 import com.google.protobuf.ByteString
 
@@ -685,20 +684,30 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
           .getPartitionSpecs(table)
           .getOrElse(throw new IllegalStateException("Table.specs() is unavailable"))
         val deltaProto = nativeOp.getIcebergDeltaWrite
-        val previousDeletesBlob = deltaProto.getPreviousDeletesBlob.toByteArray
-        val previousDeletesBroadcast: Option[Broadcast[Array[Byte]]] =
-          if (previousDeletesBlob.isEmpty) None
-          else Some(op.session.sparkContext.broadcast(previousDeletesBlob))
-        val executorDeltaProto = deltaProto.toBuilder.clearPreviousDeletesBlob().build()
-        val executorNativeOp = nativeOp.toBuilder.setIcebergDeltaWrite(executorDeltaProto).build()
+        val previousDeleteFilesBroadcast: Option[Broadcast[Map[String, AnyRef]]] =
+          if (deltaProto.getPreviousDeletesBlob.isEmpty) {
+            None
+          } else {
+            val groups = IcebergDeltaReflection
+              .rewritablePositionDeletes(positionDeltaWrite.asInstanceOf[AnyRef])
+              .fold(
+                reason =>
+                  throw new IllegalStateException(
+                    s"Could not rebuild rewritable deletes for executor commit messages: $reason"),
+                identity)
+            val originalsByLocation = groups.iterator
+              .flatMap(_.deleteFiles.iterator.map(file => file.location -> file.originalFile))
+              .toMap
+            Some(op.session.sparkContext.broadcast(originalsByLocation))
+          }
         CometIcebergDeltaWriteExec(
-          executorNativeOp,
+          nativeOp,
           op.child,
           op.batchWrite,
           table.asInstanceOf[AnyRef],
           outputSpecId,
           specs,
-          previousDeletesBroadcast)
+          previousDeleteFilesBroadcast)
       case _ =>
         val sparkWrite = IcebergReflection
           .getOuterSparkWrite(op.batchWrite)
@@ -1001,17 +1010,8 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       previousDeletesBuilder.addGroups(groupBuilder)
     }
     val previousDeletesBlob =
-      if (previousDeleteGroups.nonEmpty) {
-        val originals = previousDeleteGroups.map { group =>
-          group.dataFile -> group.deleteFiles.map(_.originalFile)
-        }.toMap
-        previousDeletesBuilder
-          .setSerializedDeleteFiles(ByteString.copyFrom(CometUtils.serialize(originals)))
-          .build()
-          .toByteString
-      } else {
-        ByteString.EMPTY
-      }
+      if (previousDeleteGroups.nonEmpty) previousDeletesBuilder.build().toByteString
+      else ByteString.EMPTY
 
     val operationLayout = OperatorOuterClass.DeltaInputLayout
       .newBuilder()
