@@ -255,7 +255,10 @@ impl DeleteRouter {
                 }
             }
             if let Some((last_path, last_position)) = self.last_position.get(&key) {
-                let path_order = path.encode_utf16().cmp(last_path.encode_utf16());
+                // Rust UTF-8 string ordering preserves Unicode scalar-value order, matching
+                // Iceberg-Java Comparators.charSequences(). Comparing raw UTF-16 code units would
+                // incorrectly place supplementary characters before some BMP characters.
+                let path_order = compare_iceberg_file_paths(&path, last_path);
                 if path_order.is_lt() || (path_order.is_eq() && position < *last_position) {
                     return Err(DataFusionError::Execution(format!(
                         "Ordered Iceberg position deletes are not sorted: ({path}, {position}) follows ({last_path}, {last_position})"
@@ -1317,6 +1320,22 @@ fn downcast<'a, T: 'static>(array: &'a ArrayRef, label: &str) -> DFResult<&'a T>
     })
 }
 
+fn compare_iceberg_file_paths(left: &str, right: &str) -> std::cmp::Ordering {
+    left.cmp(right)
+}
+
 fn iceberg_err(error: iceberg::Error) -> DataFusionError {
     DataFusionError::External(Box::new(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_iceberg_file_paths;
+
+    #[test]
+    fn iceberg_file_path_order_matches_java_for_supplementary_unicode() {
+        assert!(compare_iceberg_file_paths("\u{e000}.parquet", "\u{10000}.parquet").is_lt());
+        assert!(compare_iceberg_file_paths("a.parquet", "b.parquet").is_lt());
+        assert!(compare_iceberg_file_paths("same.parquet", "same.parquet").is_eq());
+    }
 }
