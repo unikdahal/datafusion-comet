@@ -834,9 +834,10 @@ message IcebergPreviousDeletesForDataFile {
 
 message IcebergPreviousDeletes {
   repeated IcebergPreviousDeletesForDataFile groups = 1;
-  // Lossless Java serialization of Map[String, Seq[DeleteFile]]. Rust ignores this field; the
-  // executor wrapper uses it to put the exact original DeleteFile objects into DeltaTaskCommit.
-  bytes serialized_delete_files = 2;
+  // Field 2 previously carried Java-serialized DeleteFile objects. Keep it reserved so those
+  // JVM-only objects can never accidentally re-enter the native/JNI transport.
+  reserved 2;
+  reserved "serialized_delete_files";
 }
 
 message DeltaMetadataLayout {
