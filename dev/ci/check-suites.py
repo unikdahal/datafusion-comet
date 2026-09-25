@@ -43,18 +43,25 @@ if __name__ == "__main__":
         "org.apache.comet.exec.CometColumnarShuffleSuite" # abstract
     ]
 
-    for workflow_filename in [".github/workflows/pr_build_linux.yml", ".github/workflows/pr_build_macos.yml"]:
-        workflow = open(workflow_filename, encoding="utf-8").read()
+    workflow_filenames = [".github/workflows/pr_build_linux.yml", ".github/workflows/pr_build_macos.yml"]
+    workflows = {
+        workflow_filename: open(workflow_filename, encoding="utf-8").read()
+        for workflow_filename in workflow_filenames
+    }
 
-        root = Path(".")
-        for path in root.rglob("*Suite.scala"):
-            class_name = file_to_class_name(path)
-            if class_name:
-                if "Shim" in class_name:
-                    continue
-                if class_name in ignore_list:
-                    continue
-                if class_name not in workflow:
-                    print(f"Suite not found in workflow {workflow_filename}: {class_name}")
-                    sys.exit(-1)
-                print(f"Found {class_name} in {workflow_filename}")
+    for path in Path(".").rglob("*Suite.scala"):
+        class_name = file_to_class_name(path)
+        if not class_name or "Shim" in class_name or class_name in ignore_list:
+            continue
+
+        # The macOS workflow only runs Spark 4.0. Spark 4.2-only suites belong
+        # to the Linux matrix, which includes the Spark 4.2 profile.
+        applicable_workflows = workflow_filenames
+        if "spark-4.2" in path.parts:
+            applicable_workflows = [".github/workflows/pr_build_linux.yml"]
+
+        for workflow_filename in applicable_workflows:
+            if class_name not in workflows[workflow_filename]:
+                print(f"Suite not found in workflow {workflow_filename}: {class_name}")
+                sys.exit(-1)
+            print(f"Found {class_name} in {workflow_filename}")

@@ -454,7 +454,7 @@ jobs:
     # `lint` is already upstream via build-native; it is listed here so this
     # job can read its `profile-matrix` output.
     needs: [lint, build-native]
-    if: ${{ !inputs.cache-refresh-only }}
+    if: ${{ !inputs.cache-refresh-only && (matrix.suite.name != 'spark-4.2-iceberg-transaction' || matrix.profile.name == 'Spark 4.2, JDK 17') }}
     strategy:
       matrix:
         # The Spark profiles live in dev/ci/linux-test-profiles.py and are
@@ -491,6 +491,9 @@ jobs:
               org.apache.comet.CometFuzzTestSuite
               org.apache.comet.CometFuzzIcebergSuite
               org.apache.comet.DataGeneratorSuite
+          - name: "spark-4.2-iceberg-transaction"
+            value: |
+              org.apache.comet.IcebergTransactionSuite
           - name: "shuffle"
             value: |
               org.apache.comet.exec.CometShuffleSuite
