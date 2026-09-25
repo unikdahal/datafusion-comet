@@ -57,8 +57,8 @@ import com.google.protobuf.CodedOutputStream
 
 import org.apache.comet.{CometConf, CometExecIterator, CometRuntimeException, ConfigEntry, ContribServices}
 import org.apache.comet.CometSparkSessionExtensions.{isCometShuffleEnabled, isSpark35Plus, withFallbackReason}
-import org.apache.comet.parquet.CometParquetUtils
 import org.apache.comet.iceberg.IcebergSemanticMetricsShim
+import org.apache.comet.parquet.CometParquetUtils
 import org.apache.comet.rules.CometExecRule
 import org.apache.comet.serde.{CometOperatorSerde, Compatible, OperatorOuterClass, QueryContextInterner, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.{AggregateMode => CometAggregateMode, Operator}

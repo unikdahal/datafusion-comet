@@ -306,7 +306,9 @@ object IcebergDeltaReflection {
         "addFile",
         classOf[String],
         classOf[Array[Byte]]),
-      inMemoryInputFileConstructor = inputFile.getConstructor(classOf[String], classOf[Array[Byte]]),
+      inMemoryInputFileConstructor = inputFile.getConstructor(
+        classOf[String],
+        classOf[Array[Byte]]),
       genericManifestFileConstructor = genericManifestCtor,
       manifestContentField = contentField,
       manifestSnapshotIdField = snapshotField,
