@@ -973,6 +973,49 @@ class CometIcebergWriteActionSuite
     }
   }
 
+  test("native MoR PARTITION DELETE works without raising the Spark 3.4 Iceberg runtime") {
+    assumeNativeAcceleration()
+    withIcebergCatalog { warehouseDir =>
+      createTable(
+        warehouseDir,
+        "native_mor_partition_delete",
+        partitionSpec = "PARTITIONED BY (region)",
+        properties = Some(
+          "'format-version'='2', 'write.delete.mode'='merge-on-read', " +
+            "'write.delete.granularity'='partition'"))
+      withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+        coalesceInsert(
+          "native_mor_partition_delete",
+          Seq(
+            (1, "us", 10.0),
+            (2, "us", 20.0),
+            (3, "eu", 30.0)))
+      }
+
+      val snapshot = withNativeEnabled {
+        captureWrite("native_mor_partition_delete") {
+          spark.sql(s"DELETE FROM $catalog.$ns.native_mor_partition_delete WHERE id = 2")
+        }
+      }
+      val deltaWrites = snapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
+      }
+      assert(
+        deltaWrites.nonEmpty,
+        "PARTITION-granularity PositionDelta should remain native on the supported Iceberg " +
+          s"runtime. Plans:\n${snapshot.plans.mkString("\n--\n")}")
+      assertRows("native_mor_partition_delete", Seq(1, 3))
+
+      val deletes = spark
+        .sql(
+          s"SELECT file_path, delete_file_path, pos " +
+            s"FROM $catalog.$ns.native_mor_partition_delete.position_deletes")
+        .collect()
+        .toSeq
+      assert(deletes.size == 1, s"expected one committed position delete, got $deletes")
+    }
+  }
+
   test("Spark 3.4 Iceberg 1.5 FILE-granularity MoR DELETE falls back cleanly") {
     assumeNativeAcceleration()
     assume(!isSpark35Plus, "standard Spark 3.4 profile uses Iceberg 1.5.2")
@@ -1009,7 +1052,7 @@ class CometIcebergWriteActionSuite
 
   test("native MoR FILE deletes rewrite prior delete files without losing positions") {
     assumeNativeAcceleration()
-    assume(isSpark35Plus, "FILE-granularity rewrite coverage requires Iceberg 1.8+")
+    assume(icebergVersionAtLeast(1, 8), "FILE-granularity rewrite coverage requires Iceberg 1.8+")
     withIcebergCatalog { warehouseDir =>
       createTable(
         warehouseDir,
@@ -1088,7 +1131,7 @@ class CometIcebergWriteActionSuite
 
   test("native MoR FILE deletes stay scoped to one target data file") {
     assumeNativeAcceleration()
-    assume(isSpark35Plus, "native position-delta writes require Spark 3.5+")
+    assume(icebergVersionAtLeast(1, 8), "FILE-granularity rewrite coverage requires Iceberg 1.8+")
     withIcebergCatalog { warehouseDir =>
       createTable(
         warehouseDir,
