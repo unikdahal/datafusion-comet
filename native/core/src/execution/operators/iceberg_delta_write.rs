@@ -1012,7 +1012,7 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
                 .flatten()
                 .map(DataFile::record_count)
                 .sum();
-            let delete_bytes_written = delete_files
+            let delete_bytes_written: u64 = delete_files
                 .values()
                 .flatten()
                 .map(DataFile::file_size_in_bytes)
