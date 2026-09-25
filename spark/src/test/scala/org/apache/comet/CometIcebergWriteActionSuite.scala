@@ -973,9 +973,43 @@ class CometIcebergWriteActionSuite
     }
   }
 
+  test("Spark 3.4 Iceberg 1.5 FILE-granularity MoR DELETE falls back cleanly") {
+    assumeNativeAcceleration()
+    assume(!isSpark35Plus, "standard Spark 3.4 profile uses Iceberg 1.5.2")
+    assume(!icebergVersionAtLeast(1, 8), "Iceberg 1.8+ exposes rewritableDeletes")
+    withIcebergCatalog { warehouseDir =>
+      createTable(
+        warehouseDir,
+        "mor_file_34_fallback",
+        partitionSpec = "",
+        properties = Some(
+          "'format-version'='2', 'write.delete.mode'='merge-on-read', " +
+            "'write.delete.granularity'='file'"))
+      withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+        coalesceInsert(
+          "mor_file_34_fallback",
+          Seq((1, "us", 10.0), (2, "us", 20.0), (3, "us", 30.0)))
+      }
+
+      val snapshot = withNativeEnabled {
+        captureWrite("mor_file_34_fallback") {
+          spark.sql(s"DELETE FROM $catalog.$ns.mor_file_34_fallback WHERE id = 2")
+        }
+      }
+      val nativeDeltaWrites = snapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
+      }
+      assert(
+        nativeDeltaWrites.isEmpty,
+        "Iceberg 1.5.2 has no command-scan rewritableDeletes API, so FILE-granularity native " +
+          s"writing must fall back. Plans:\n${snapshot.plans.mkString("\n--\n")}")
+      assertRows("mor_file_34_fallback", Seq(1, 3))
+    }
+  }
+
   test("native MoR FILE deletes rewrite prior delete files without losing positions") {
     assumeNativeAcceleration()
-    assume(isSpark35Plus, "native position-delta writes require Spark 3.5+")
+    assume(isSpark35Plus, "FILE-granularity rewrite coverage requires Iceberg 1.8+")
     withIcebergCatalog { warehouseDir =>
       createTable(
         warehouseDir,
