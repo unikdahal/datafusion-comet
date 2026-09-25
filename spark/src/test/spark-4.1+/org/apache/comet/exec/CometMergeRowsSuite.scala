@@ -82,11 +82,11 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       CometListenerBusUtils.waitUntilEmpty(spark.sparkContext)
 
       val executedPlans = captured.map(_.executedPlan)
-      val sparkMergeRows =
-        executedPlans.exists(plan => find(plan) { case node: MergeRowsExec => node }.nonEmpty)
+      val sparkMergeRows = executedPlans.exists(plan =>
+        find(plan) { case _: MergeRowsExec => true; case _ => false }.nonEmpty)
       val cometMergeRows = executedPlans
-        .flatMap(plan => find(plan) { case node: CometMergeRowsExec => node })
-        .headOption
+        .flatMap(plan => find(plan) { case _: CometMergeRowsExec => true; case _ => false })
+        .collectFirst { case node: CometMergeRowsExec => node }
 
       assert(
         cometMergeRows.nonEmpty,
