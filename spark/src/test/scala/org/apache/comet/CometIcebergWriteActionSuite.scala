@@ -986,10 +986,7 @@ class CometIcebergWriteActionSuite
       withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
         coalesceInsert(
           "native_mor_partition_delete",
-          Seq(
-            (1, "us", 10.0),
-            (2, "us", 20.0),
-            (3, "eu", 30.0)))
+          Seq((1, "us", 10.0), (2, "us", 20.0), (3, "eu", 30.0)))
       }
 
       val snapshot = withNativeEnabled {
@@ -1007,9 +1004,8 @@ class CometIcebergWriteActionSuite
       assertRows("native_mor_partition_delete", Seq(1, 3))
 
       val deletes = spark
-        .sql(
-          "SELECT file_path, delete_file_path, pos " +
-            s"FROM $catalog.$ns.native_mor_partition_delete.position_deletes")
+        .sql("SELECT file_path, delete_file_path, pos " +
+          s"FROM $catalog.$ns.native_mor_partition_delete.position_deletes")
         .collect()
         .toSeq
       assert(deletes.size == 1, s"expected one committed position delete, got $deletes")
@@ -1088,9 +1084,8 @@ class CometIcebergWriteActionSuite
 
       def positionDeletes(): Seq[Row] =
         spark
-          .sql(
-            "SELECT pos, file_path, delete_file_path " +
-              s"FROM $catalog.$ns.native_mor_file_rewrite.position_deletes ORDER BY pos")
+          .sql("SELECT pos, file_path, delete_file_path " +
+            s"FROM $catalog.$ns.native_mor_file_rewrite.position_deletes ORDER BY pos")
           .collect()
           .toSeq
 
@@ -1113,19 +1108,27 @@ class CometIcebergWriteActionSuite
       assert(
         secondDeleteFiles.head != firstDeleteFile,
         "second DELETE should replace, not retain, the prior file-scoped delete file")
-      assert(second.map(_.getLong(0)).distinct.size == 2, s"delete positions were not preserved: $second")
+      assert(
+        second.map(_.getLong(0)).distinct.size == 2,
+        s"delete positions were not preserved: $second")
 
       nativeDelete(4)
       assertRows("native_mor_file_rewrite", Seq(1))
       val third = positionDeletes()
-      assert(third.size == 3, s"expected three retained positions after second rewrite, got $third")
-      assert(third.forall(_.getString(1) == targetDataFile), s"unexpected target data file: $third")
+      assert(
+        third.size == 3,
+        s"expected three retained positions after second rewrite, got $third")
+      assert(
+        third.forall(_.getString(1) == targetDataFile),
+        s"unexpected target data file: $third")
       val thirdDeleteFiles = third.map(_.getString(2)).distinct
       assert(thirdDeleteFiles.size == 1, s"expected one replacement delete file, got $third")
       assert(
         thirdDeleteFiles.head != secondDeleteFiles.head,
         "third DELETE should replace the previous file-scoped delete file")
-      assert(third.map(_.getLong(0)).distinct.size == 3, s"delete positions were not preserved: $third")
+      assert(
+        third.map(_.getLong(0)).distinct.size == 3,
+        s"delete positions were not preserved: $third")
     }
   }
 
@@ -1168,7 +1171,9 @@ class CometIcebergWriteActionSuite
             "GROUP BY file_path, delete_file_path")
         .collect()
         .toSeq
-      assert(deletes.size == 2, s"expected one file-scoped delete file per target data file: $deletes")
+      assert(
+        deletes.size == 2,
+        s"expected one file-scoped delete file per target data file: $deletes")
       assert(
         deletes.map(_.getString(0)).distinct.size == 2,
         s"expected two distinct target data files: $deletes")

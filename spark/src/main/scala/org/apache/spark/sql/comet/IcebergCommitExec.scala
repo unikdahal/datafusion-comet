@@ -152,7 +152,8 @@ case class IcebergCommitExec(
    * A job failure happens before any commit is attempted. Iceberg's BatchWrite.abort therefore
    * owns cleanup of completed task files and, on every supported Iceberg version, deletes them
    * while cleanupOnAbort is still true. Only fall back to Comet's direct FileIO cleanup when the
-   * abort itself fails; otherwise a second delete would race/retry work Iceberg already completed.
+   * abort itself fails; otherwise a second delete would race/retry work Iceberg already
+   * completed.
    */
   private def abortAfterJobFailure(
       messages: Array[WriterCommitMessage],
