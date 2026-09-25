@@ -462,9 +462,9 @@ impl IcebergDeltaWriteExec {
         })?;
         if !matches!(
             command,
-            IcebergDeltaCommand::IcebergDeltaCommandDelete
-                | IcebergDeltaCommand::IcebergDeltaCommandUpdate
-                | IcebergDeltaCommand::IcebergDeltaCommandMerge
+            IcebergDeltaCommand::Delete
+                | IcebergDeltaCommand::Update
+                | IcebergDeltaCommand::Merge
         ) {
             return Err(DataFusionError::Plan(
                 "Native Iceberg delta requires a DELETE, UPDATE, or MERGE command".into(),
@@ -478,8 +478,8 @@ impl IcebergDeltaWriteExec {
                 ))
             })?;
         let file_granularity = match delete_granularity {
-            IcebergDeleteGranularity::IcebergDeleteGranularityPartition => false,
-            IcebergDeleteGranularity::IcebergDeleteGranularityFile => true,
+            IcebergDeleteGranularity::Partition => false,
+            IcebergDeleteGranularity::File => true,
         };
         if !file_granularity && !proto.previous_deletes_blob.is_empty() {
             return Err(DataFusionError::Plan(
@@ -567,7 +567,7 @@ impl IcebergDeltaWriteExec {
         let data_target_schema =
             Arc::new(iceberg::arrow::schema_to_arrow_schema(&iceberg_schema).map_err(iceberg_err)?);
         let delete_without_data_projection = command
-            == IcebergDeltaCommand::IcebergDeltaCommandDelete
+            == IcebergDeltaCommand::Delete
             && layout.data_ordinals.is_empty();
         if layout.data_ordinals.len() != data_target_schema.fields().len()
             && !delete_without_data_projection
@@ -840,6 +840,7 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
                 previous_deletes,
                 rewritten_delete_files: HashSet::new(),
                 delete_file_loader: PositionDeleteIndexLoader::new(file_io.clone()),
+                completed: HashMap::new(),
                 iceberg_schema: Arc::clone(&iceberg_schema),
                 historical_specs: historical_specs.clone(),
                 file_io: file_io.clone(),
@@ -911,7 +912,7 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
                                     ));
                                 }
                                 code if code == insert_operation => {
-                                    if command == IcebergDeltaCommand::IcebergDeltaCommandDelete {
+                                    if command == IcebergDeltaCommand::Delete {
                                         return Err(DataFusionError::Execution(
                                             "Native Iceberg DELETE input contains an INSERT row"
                                                 .into(),
@@ -920,7 +921,7 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
                                     data_rows.push(row);
                                 }
                                 code if reinsert_operation == Some(code) => {
-                                    if command == IcebergDeltaCommand::IcebergDeltaCommandDelete {
+                                    if command == IcebergDeltaCommand::Delete {
                                         return Err(DataFusionError::Execution(
                                             "Native Iceberg DELETE input contains a REINSERT row"
                                                 .into(),
@@ -1151,7 +1152,7 @@ fn project_partition(
 }
 
 async fn encode_delete_manifests(
-    files_by_spec: HashMap<i32, Vec<DataFile>>,
+    mut files_by_spec: HashMap<i32, Vec<DataFile>>,
     specs: HashMap<i32, HistoricalSpec>,
     schema: IcebergSchemaRef,
     partition_id: i32,

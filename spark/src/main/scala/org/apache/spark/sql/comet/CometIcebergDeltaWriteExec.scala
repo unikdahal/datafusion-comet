@@ -128,7 +128,7 @@ case class CometIcebergDeltaWriteExec(
       IcebergReflection.getOuterPositionDeltaWrite(batchWrite), "outer PositionDeltaWrite")
     val decodedWriteSchema = IcebergDeltaWriteExec.requireReflection(
       IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite),
-      "PositionDeltaWrite.Context.dataSchema")
+      "PositionDeltaWrite.Context.dataSchema").asInstanceOf[AnyRef]
     val sortOrderId = nativeOp.getIcebergDeltaWrite.getDataCommon.getSortOrderId
     val sortOrder = IcebergDeltaWriteExec.requireReflection(
       IcebergReflection.getSortOrderById(table, sortOrderId), s"sort order id=$sortOrderId")

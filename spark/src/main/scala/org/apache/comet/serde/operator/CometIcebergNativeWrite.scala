@@ -176,7 +176,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     }
     val positionDeltaWrite = IcebergReflection.getOuterPositionDeltaWrite(batchWrite).getOrElse {
       return Some("could not unwrap SparkPositionDeltaWrite")
-    }
+    }.asInstanceOf[AnyRef]
     val table = IcebergReflection.getTableFromPositionDeltaWrite(positionDeltaWrite).getOrElse {
       return Some("SparkPositionDeltaWrite.table is null")
     }
@@ -807,7 +807,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     val positionDeltaWrite = IcebergReflection.getOuterPositionDeltaWrite(batchWrite).getOrElse {
       withFallbackReason(op, "Could not unwrap SparkPositionDeltaWrite")
       return None
-    }
+    }.asInstanceOf[AnyRef]
     val table = IcebergReflection.getTableFromPositionDeltaWrite(positionDeltaWrite).getOrElse {
       withFallbackReason(op, "Could not extract Table from SparkPositionDeltaWrite")
       return None
