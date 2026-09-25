@@ -31,8 +31,8 @@ import org.apache.spark.sql.comet.util.{Utils => CometUtils}
 
 import com.google.protobuf.ByteString
 
-import org.apache.comet.ConfigEntry
 import org.apache.comet.CometSparkSessionExtensions.withFallbackReason
+import org.apache.comet.ConfigEntry
 import org.apache.comet.iceberg.{IcebergDeltaReflection, IcebergNativeWriteEnvironment, IcebergReflection, PlainIcebergWrite, PositionDeltaWrite, ReplaceDataWrite}
 import org.apache.comet.serde.{CometOperatorSerde, Compatible, OperatorOuterClass, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.Operator
@@ -669,7 +669,8 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
           .getOrElse(throw new IllegalStateException("Could not unwrap SparkPositionDeltaWrite"))
         val table = IcebergReflection
           .getTableFromPositionDeltaWrite(positionDeltaWrite)
-          .getOrElse(throw new IllegalStateException("SparkPositionDeltaWrite.table is unavailable"))
+          .getOrElse(
+            throw new IllegalStateException("SparkPositionDeltaWrite.table is unavailable"))
         val outputSpec = IcebergReflection
           .getPartitionSpec(table)
           .getOrElse(throw new IllegalStateException("Table.spec() is unavailable"))
@@ -817,17 +818,21 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     def stringValue(name: String): Option[String] = contextValue(name).map(_.toString)
     def longValue(name: String): Option[Long] = contextValue(name).map {
       case value: java.lang.Number => value.longValue()
-      case value => throw new IllegalArgumentException(s"PositionDeltaWrite.Context.$name is $value")
+      case value =>
+        throw new IllegalArgumentException(s"PositionDeltaWrite.Context.$name is $value")
     }
     def booleanValue(name: String): Option[Boolean] = contextValue(name).map {
       case value: java.lang.Boolean => value.booleanValue()
-      case value => throw new IllegalArgumentException(s"PositionDeltaWrite.Context.$name is $value")
+      case value =>
+        throw new IllegalArgumentException(s"PositionDeltaWrite.Context.$name is $value")
     }
 
-    val writeSchema = IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite).getOrElse {
-      withFallbackReason(op, "PositionDeltaWrite.Context.dataSchema reflection failed")
-      return None
-    }
+    val writeSchema = IcebergReflection
+      .getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite)
+      .getOrElse {
+        withFallbackReason(op, "PositionDeltaWrite.Context.dataSchema reflection failed")
+        return None
+      }
     val outputSpec = IcebergReflection.getPartitionSpec(table).getOrElse {
       withFallbackReason(op, "Table.spec() reflection failed for position delta")
       return None
@@ -849,7 +854,9 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       return None
     }
     if (targetDeleteFileSize <= 0) {
-      withFallbackReason(op, s"Invalid position-delta target delete file size $targetDeleteFileSize")
+      withFallbackReason(
+        op,
+        s"Invalid position-delta target delete file size $targetDeleteFileSize")
       return None
     }
     val useFanoutWriter = booleanValue("useFanoutWriter").getOrElse {
@@ -928,7 +935,8 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
           fieldId, {
             withFallbackReason(
               op,
-              s"Historical spec $specId partition field id $fieldId is absent from the union partition struct")
+              s"Historical spec $specId partition field id $fieldId is absent from " +
+                "the union partition struct")
             return None
           })
       }
@@ -967,7 +975,8 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
         if (!knownSpecIds.contains(file.partitionSpecId)) {
           withFallbackReason(
             op,
-            s"Rewritable delete ${file.location} uses unknown partition spec ${file.partitionSpecId}")
+            s"Rewritable delete ${file.location} uses unknown partition spec " +
+              s"${file.partitionSpecId}")
           return None
         }
         val fileBuilder = OperatorOuterClass.IcebergPreviousDeleteFileDescriptor
@@ -1003,7 +1012,8 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       .setOperationOrdinal(dispatch.operationOrdinal)
       .addAllDataOrdinals(dispatch.rowOrdinals.getOrElse(IndexedSeq.empty).map(Int.box).asJava)
       .addAllRowIdOrdinals(dispatch.rowIdOrdinals.map(Int.box).asJava)
-      .addAllMetadataOrdinals(dispatch.metadataOrdinals.getOrElse(IndexedSeq.empty).map(Int.box).asJava)
+      .addAllMetadataOrdinals(
+        dispatch.metadataOrdinals.getOrElse(IndexedSeq.empty).map(Int.box).asJava)
       .setDeleteOperation(dispatch.operationCodes.delete)
       .setUpdateOperation(dispatch.operationCodes.update)
       .setInsertOperation(dispatch.operationCodes.insert)

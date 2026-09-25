@@ -1006,7 +1006,8 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
                     }
                 };
             let data_rows_written = data_files.iter().map(DataFile::record_count).sum();
-            let data_bytes_written = data_files.iter().map(DataFile::file_size_in_bytes).sum();
+            let data_bytes_written: u64 =
+                data_files.iter().map(DataFile::file_size_in_bytes).sum();
             let delete_rows_written = delete_files
                 .values()
                 .flatten()

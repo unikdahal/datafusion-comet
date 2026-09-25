@@ -322,7 +322,9 @@ object IcebergReflection extends Logging {
       }
 
     for {
-      query <- member("query").collect { case value: org.apache.spark.sql.catalyst.plans.logical.LogicalPlan => value }
+      query <- member("query").collect {
+        case value: org.apache.spark.sql.catalyst.plans.logical.LogicalPlan => value
+      }
       table <- member("originalTable").orElse(member("table")).collect {
         case value: org.apache.spark.sql.catalyst.analysis.NamedRelation => value
       }

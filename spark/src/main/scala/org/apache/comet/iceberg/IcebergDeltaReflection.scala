@@ -124,10 +124,13 @@ object IcebergDeltaReflection {
           }
           val isScoped = isFileScoped.invoke(null, file).asInstanceOf[Boolean]
           val referenced = Option(referencedDataFile.invoke(file)).map(_.toString)
-          val offset = Option(contentOffset.invoke(file)).map(_.asInstanceOf[java.lang.Number].longValue())
-          val size = Option(contentSize.invoke(file)).map(_.asInstanceOf[java.lang.Number].longValue())
+          val offset = Option(contentOffset.invoke(file))
+            .map(_.asInstanceOf[java.lang.Number].longValue())
+          val size = Option(contentSize.invoke(file))
+            .map(_.asInstanceOf[java.lang.Number].longValue())
           val fileSizeInBytes = fileSize.invoke(file).asInstanceOf[java.lang.Number].longValue()
-          val deleteRecordCount = recordCount.invoke(file).asInstanceOf[java.lang.Number].longValue()
+          val deleteRecordCount =
+            recordCount.invoke(file).asInstanceOf[java.lang.Number].longValue()
           if (fileContent != "POSITION_DELETES" || format != "PARQUET" || !isScoped) {
             throw new IllegalArgumentException(
               s"Previous delete $location is not a file-scoped Parquet position delete " +
@@ -299,7 +302,10 @@ object IcebergDeltaReflection {
       referencedDataFiles = findMethodInHierarchy(taskCommitClass, "referencedDataFiles")
         .getOrElse(throw new NoSuchMethodException("DeltaTaskCommit.referencedDataFiles")),
       inMemoryFileIoConstructor = declaredCtor(inMemoryFileIo),
-      addInMemoryFile = inMemoryFileIo.getMethod("addFile", classOf[String], classOf[Array[Byte]]),
+      addInMemoryFile = inMemoryFileIo.getMethod(
+        "addFile",
+        classOf[String],
+        classOf[Array[Byte]]),
       inMemoryInputFileConstructor = inputFile.getConstructor(classOf[String], classOf[Array[Byte]]),
       genericManifestFileConstructor = genericManifestCtor,
       manifestContentField = contentField,
@@ -323,7 +329,8 @@ object IcebergDeltaReflection {
       None
     } catch {
       case NonFatal(e) =>
-        Some(s"Iceberg delta reflection did not resolve: ${e.getClass.getSimpleName}: ${e.getMessage}")
+        Some(
+          s"Iceberg delta reflection did not resolve: ${e.getClass.getSimpleName}: ${e.getMessage}")
     }
 
   def buildDeltaWriteResult(
@@ -351,7 +358,8 @@ object IcebergDeltaReflection {
     val h = handles()
     Seq(h.dataFiles, h.deleteFiles).flatMap { accessor =>
       accessor.invoke(message) match {
-        case files: Array[_] => files.toSeq.flatMap(file => IcebergReflection.extractFileLocation(file))
+        case files: Array[_] =>
+          files.toSeq.flatMap(file => IcebergReflection.extractFileLocation(file))
         case files: java.lang.Iterable[_] =>
           import scala.jdk.CollectionConverters._
           files.asScala.toSeq.flatMap(file => IcebergReflection.extractFileLocation(file))
@@ -373,7 +381,8 @@ object IcebergDeltaReflection {
     if (manifest.content == DeleteManifestContent) {
       return readManifest(manifest, specsById, deleteContent = true)
     }
-    throw new IllegalArgumentException(s"Unknown Iceberg transport manifest content ${manifest.content}")
+    throw new IllegalArgumentException(
+      s"Unknown Iceberg transport manifest content ${manifest.content}")
   }
 
   private def readManifest(
@@ -381,8 +390,8 @@ object IcebergDeltaReflection {
       specsById: java.util.Map[Integer, AnyRef],
       deleteContent: Boolean): java.util.List[AnyRef] = {
     val h = handles()
-    val location =
-      s"memory:comet-${if (deleteContent) "delete" else "data"}-manifest-${java.util.UUID.randomUUID()}.avro"
+    val contentName = if (deleteContent) "delete" else "data"
+    val location = s"memory:comet-$contentName-manifest-${java.util.UUID.randomUUID()}.avro"
     val inMemoryFileIo = h.inMemoryFileIoConstructor.newInstance().asInstanceOf[AnyRef]
     h.addInMemoryFile.invoke(inMemoryFileIo, location, transport.avroBytes)
     val inputFile = h.inMemoryInputFileConstructor

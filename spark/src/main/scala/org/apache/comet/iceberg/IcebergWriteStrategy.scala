@@ -200,7 +200,7 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
             Some(if (command.isDefined) IcebergCommitPlanShim.wrap(commit) else commit)
           }
         } catch {
-          case scala.util.control.NonFatal(e) =>
+          case scala.util.control.NonFatal(_) =>
             None
         }
       case _ => None

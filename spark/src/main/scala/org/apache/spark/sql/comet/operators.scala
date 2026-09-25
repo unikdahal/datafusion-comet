@@ -1745,14 +1745,26 @@ case class CometMergeRowsExec(
   override lazy val metrics: Map[String, SQLMetric] = {
     val mergeMetrics = IcebergSemanticMetricsShim.mergeMetrics(sparkContext)
     val semanticMetrics = if (mergeMetrics.nonEmpty) mergeMetrics else Map(
-      "numTargetRowsCopied" -> SQLMetrics.createMetric(sparkContext, "number of target rows copied"),
-      "numTargetRowsInserted" -> SQLMetrics.createMetric(sparkContext, "number of target rows inserted"),
-      "numTargetRowsDeleted" -> SQLMetrics.createMetric(sparkContext, "number of target rows deleted"),
-      "numTargetRowsUpdated" -> SQLMetrics.createMetric(sparkContext, "number of target rows updated"),
-      "numTargetRowsMatchedUpdated" -> SQLMetrics.createMetric(sparkContext, "number of matched target rows updated"),
-      "numTargetRowsMatchedDeleted" -> SQLMetrics.createMetric(sparkContext, "number of matched target rows deleted"),
-      "numTargetRowsNotMatchedBySourceUpdated" -> SQLMetrics.createMetric(sparkContext, "number of not matched by source target rows updated"),
-      "numTargetRowsNotMatchedBySourceDeleted" -> SQLMetrics.createMetric(sparkContext, "number of not matched by source target rows deleted"))
+      "numTargetRowsCopied" ->
+        SQLMetrics.createMetric(sparkContext, "number of target rows copied"),
+      "numTargetRowsInserted" ->
+        SQLMetrics.createMetric(sparkContext, "number of target rows inserted"),
+      "numTargetRowsDeleted" ->
+        SQLMetrics.createMetric(sparkContext, "number of target rows deleted"),
+      "numTargetRowsUpdated" ->
+        SQLMetrics.createMetric(sparkContext, "number of target rows updated"),
+      "numTargetRowsMatchedUpdated" ->
+        SQLMetrics.createMetric(sparkContext, "number of matched target rows updated"),
+      "numTargetRowsMatchedDeleted" ->
+        SQLMetrics.createMetric(sparkContext, "number of matched target rows deleted"),
+      "numTargetRowsNotMatchedBySourceUpdated" ->
+        SQLMetrics.createMetric(
+          sparkContext,
+          "number of not matched by source target rows updated"),
+      "numTargetRowsNotMatchedBySourceDeleted" ->
+        SQLMetrics.createMetric(
+          sparkContext,
+          "number of not matched by source target rows deleted"))
     CometMetricNode.baselineMetrics(sparkContext) ++ Map(
       "output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches")) ++
       semanticMetrics

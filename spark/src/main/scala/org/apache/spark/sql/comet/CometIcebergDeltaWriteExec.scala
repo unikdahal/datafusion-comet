@@ -30,7 +30,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, UnsafeProjection}
 import org.apache.spark.sql.comet.execution.arrow.CometArrowStream
 import org.apache.spark.sql.comet.util.{Utils => CometUtils}
-import org.apache.spark.sql.connector.write.{BatchWrite, WriterCommitMessage}
+import org.apache.spark.sql.connector.write.BatchWrite
 import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.types.BinaryType
@@ -44,12 +44,12 @@ import org.apache.comet.iceberg.{DeltaDelete, DeltaMerge, DeltaUpdate, IcebergSe
 import org.apache.comet.iceberg.{
   DataManifestContent,
   DeleteManifestContent,
-  IcebergReflection,
   IcebergDeltaReflection,
+  IcebergReflection,
   TransportManifest
 }
-import org.apache.comet.serde.OperatorOuterClass.Operator
 import org.apache.comet.serde.OperatorOuterClass.IcebergDeltaCommand
+import org.apache.comet.serde.OperatorOuterClass.Operator
 
 /** Native executor-side writer for Iceberg V2 PositionDeltaWrite task output. */
 case class CometIcebergDeltaWriteExec(
@@ -104,7 +104,9 @@ case class CometIcebergDeltaWriteExec(
     "numDeleteRecords" -> SQLMetrics.createMetric(sparkContext, "number of delete records"),
     "numReferencedDataFiles" -> SQLMetrics.createMetric(sparkContext, "referenced data files"),
     "bytesWritten" -> SQLMetrics.createSizeMetric(sparkContext, "written output"),
-    "write_time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in native Iceberg writer")) ++
+    "write_time" -> SQLMetrics.createNanoTimingMetric(
+      sparkContext,
+      "time in native Iceberg writer")) ++
     IcebergSemanticMetricsShim.deltaMetrics(sparkContext, semanticCommand)
 
   override def doExecute(): RDD[InternalRow] = {
@@ -148,7 +150,9 @@ case class CometIcebergDeltaWriteExec(
       cleanup.own(locations)
       val payload = org.apache.comet.serde.OperatorOuterClass.IcebergDeltaTaskPayload
         .parseFrom(payloadBytes)
-      require(payload.getSchemaRevision == 1, s"Unsupported Iceberg delta payload revision ${payload.getSchemaRevision}")
+      require(
+        payload.getSchemaRevision == 1,
+        s"Unsupported Iceberg delta payload revision ${payload.getSchemaRevision}")
       longMetric("numOutputRows").add(payload.getInputRows)
 
       val dataFiles = new ArrayList[AnyRef]()
@@ -169,10 +173,14 @@ case class CometIcebergDeltaWriteExec(
         }
         if (content == DataManifestContent && manifest.getPartitionSpecId != outputSpecId) {
           throw new IllegalArgumentException(
-            s"DATA manifest uses spec ${manifest.getPartitionSpecId}, expected current output spec $outputSpecId")
+            s"DATA manifest uses spec ${manifest.getPartitionSpecId}, " +
+              s"expected current output spec $outputSpecId")
         }
         manifests.add(
-          TransportManifest(content, manifest.getPartitionSpecId, manifest.getAvroManifest.toByteArray))
+          TransportManifest(
+            content,
+            manifest.getPartitionSpecId,
+            manifest.getAvroManifest.toByteArray))
       }
       val manifestIterator = manifests.iterator()
       while (manifestIterator.hasNext) {
@@ -285,8 +293,12 @@ case class CometIcebergDeltaWriteExec(
     val batch = batches.next()
     val payload =
       try {
-        require(batch.numRows() == 1, s"iceberg_delta_write expected one row, got ${batch.numRows()}")
-        require(batch.numCols() == 2, s"iceberg_delta_write expected two columns, got ${batch.numCols()}")
+        require(
+          batch.numRows() == 1,
+          s"iceberg_delta_write expected one row, got ${batch.numRows()}")
+        require(
+          batch.numCols() == 2,
+          s"iceberg_delta_write expected two columns, got ${batch.numCols()}")
         val bytes = batch.column(0).getBinary(0)
         val locations = CometIcebergWriteExec.decodeLocations(batch.column(1).getBinary(0))
         (bytes, locations)
@@ -298,11 +310,13 @@ case class CometIcebergDeltaWriteExec(
 
 private object IcebergDeltaWriteExec {
   def requireReflection[A](value: Option[A], description: String): A =
-    value.getOrElse(throw new IllegalStateException(s"Native Iceberg delta write: $description unavailable"))
+    value.getOrElse(
+      throw new IllegalStateException(s"Native Iceberg delta write: $description unavailable"))
 
   def decodePreviousDeleteFiles(bytes: Array[Byte]): Map[String, AnyRef] = {
     if (bytes.isEmpty) return Map.empty
-    val transport = org.apache.comet.serde.OperatorOuterClass.IcebergPreviousDeletes.parseFrom(bytes)
+    val transport =
+      org.apache.comet.serde.OperatorOuterClass.IcebergPreviousDeletes.parseFrom(bytes)
     val groups = transport.getGroupsList.asScala.toSeq
     val expected = groups
       .map { group =>

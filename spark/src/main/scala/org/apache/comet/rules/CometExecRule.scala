@@ -54,8 +54,8 @@ import org.apache.spark.sql.types._
 
 import org.apache.comet.{CometConf, CometExplainInfo, ExtendedExplainInfo}
 import org.apache.comet.CometConf.{COMET_SPARK_TO_ARROW_ENABLED, COMET_SPARK_TO_ARROW_SUPPORTED_OPERATOR_LIST}
-import org.apache.comet.iceberg.PositionDeltaWrite
 import org.apache.comet.CometSparkSessionExtensions._
+import org.apache.comet.iceberg.PositionDeltaWrite
 import org.apache.comet.rules.CometExecRule.allExecs
 import org.apache.comet.serde._
 import org.apache.comet.serde.operator._

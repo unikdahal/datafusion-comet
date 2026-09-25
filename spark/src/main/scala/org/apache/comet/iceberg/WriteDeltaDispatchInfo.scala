@@ -90,8 +90,8 @@ private[iceberg] object WriteDeltaDispatchInfo {
     }
 
     def uniqueIndex(schema: StructType, name: String): Option[Int] = {
-      val matches = schema.fields.zipWithIndex.collect { case (field, index) if field.name == name =>
-        index
+      val matches = schema.fields.zipWithIndex.collect {
+        case (field, index) if field.name == name => index
       }
       if (matches.length == 1) Some(matches.head) else None
     }
