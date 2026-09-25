@@ -349,12 +349,6 @@ impl DeleteRouter {
                             .await
                             .map_err(iceberg_err)?;
                         for position in positions.iter() {
-                            let position = i64::try_from(position).map_err(|_| {
-                                DataFusionError::Execution(format!(
-                                    "Previous position delete {} contains position {position} above i64::MAX",
-                                    descriptor.location
-                                ))
-                            })?;
                             writer
                                 .write_delete(data_file_path.clone(), position)
                                 .map_err(iceberg_err)?;
