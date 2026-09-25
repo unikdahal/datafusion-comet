@@ -226,11 +226,11 @@ case class CometExecRule(session: SparkSession)
   /**
    * Whether a write child is known to produce Arrow-backed columnar batches.
    *
-   * AQE keeps [[AQEShuffleReadExec]] / [[ShuffleQueryStageExec]] wrappers around a Comet
-   * shuffle, so requiring the immediate child itself to be a [[CometNativeExec]] incorrectly
-   * rejects native writes after Spark inserts a write distribution. Walk only the known
-   * passthrough wrappers and stop at an explicitly Arrow-producing Comet node; arbitrary Spark
-   * columnar operators are deliberately not admitted because they may use on-heap vectors.
+   * AQE keeps [[AQEShuffleReadExec]] / [[ShuffleQueryStageExec]] wrappers around a Comet shuffle,
+   * so requiring the immediate child itself to be a [[CometNativeExec]] incorrectly rejects
+   * native writes after Spark inserts a write distribution. Walk only the known passthrough
+   * wrappers and stop at an explicitly Arrow-producing Comet node; arbitrary Spark columnar
+   * operators are deliberately not admitted because they may use on-heap vectors.
    */
   private def producesArrowBatches(plan: SparkPlan): Boolean = plan match {
     case _: CometNativeExec => true
@@ -246,8 +246,8 @@ case class CometExecRule(session: SparkSession)
    * Whether a Spark shuffle is row-based only because Comet had to decline the shuffle itself,
    * while its immediate producer is still a Comet columnar plan.
    *
-   * Iceberg FILE-granularity position deletes repartition by (_spec_id, _partition, _file).
-   * For an unpartitioned table, _partition is an empty struct. Comet shuffle deliberately rejects
+   * Iceberg FILE-granularity position deletes repartition by (_spec_id, _partition, _file). For
+   * an unpartitioned table, _partition is an empty struct. Comet shuffle deliberately rejects
    * empty structs, so Spark inserts a row shuffle after CometColumnarToRow. The delta writer can
    * still run natively by converting that shuffle output back to Arrow at the write boundary.
    *
