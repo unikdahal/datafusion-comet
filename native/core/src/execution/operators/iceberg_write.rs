@@ -154,10 +154,7 @@ pub(super) struct AbortOnDrop {
     armed: bool,
 }
 
-pub(super) fn abort_guard(
-    file_io: FileIO,
-    generator: TrackingLocationGenerator,
-) -> AbortOnDrop {
+pub(super) fn abort_guard(file_io: FileIO, generator: TrackingLocationGenerator) -> AbortOnDrop {
     AbortOnDrop {
         file_io,
         locations: generator.shared_locations(),
@@ -1290,7 +1287,9 @@ pub(super) fn build_output_batch(
 /// (which has no footer-stat truncation). Iceberg's metrics modes
 /// (`write.metadata.metrics.*`) do not apply here: they shape the *manifest* metrics, which
 /// the JVM re-derives from the footer with Iceberg's own `MetricsConfig` logic before commit.
-pub(super) fn build_writer_properties(settings: &IcebergParquetWriteSettings) -> DFResult<WriterProperties> {
+pub(super) fn build_writer_properties(
+    settings: &IcebergParquetWriteSettings,
+) -> DFResult<WriterProperties> {
     let compression = compression_from_proto(settings.compression, settings.compression_level)?;
     Ok(WriterProperties::builder()
         .set_compression(compression)

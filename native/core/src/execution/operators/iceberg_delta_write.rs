@@ -33,15 +33,17 @@ use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
     PlanProperties, SendableRecordBatchStream,
 };
 use futures::TryStreamExt;
-use iceberg::arrow::{arrow_struct_to_literal, type_to_arrow_type};
 use iceberg::arrow::delete_file_loader::PositionDeleteIndexLoader;
+use iceberg::arrow::{arrow_struct_to_literal, type_to_arrow_type};
 use iceberg::io::FileIO;
 use iceberg::scan::FileScanTaskDeleteFile;
 use iceberg::spec::{
@@ -70,9 +72,9 @@ use crate::cloud::s3::credential_bridge::AccessMode;
 use crate::execution::operators::iceberg_common::load_file_io;
 use crate::execution::operators::iceberg_partition_path::CometLocationGenerator;
 use crate::execution::operators::iceberg_write::{
-    abort_guard_with_shared_locations, build_output_schema,
-    build_writer_properties, file_name_prefix, manifest_partition_spec, parse_iceberg_schema,
-    parse_partition_spec, run_write_task, TrackingLocationGenerator,
+    abort_guard_with_shared_locations, build_output_schema, build_writer_properties,
+    file_name_prefix, manifest_partition_spec, parse_iceberg_schema, parse_partition_spec,
+    run_write_task, TrackingLocationGenerator,
 };
 
 type DeleteRollingBuilder = RollingFileWriterBuilder<
@@ -80,8 +82,11 @@ type DeleteRollingBuilder = RollingFileWriterBuilder<
     TrackingLocationGenerator,
     DefaultFileNameGenerator,
 >;
-type OrderedDeleteWriter =
-    PositionDeleteFileWriter<ParquetWriterBuilder, TrackingLocationGenerator, DefaultFileNameGenerator>;
+type OrderedDeleteWriter = PositionDeleteFileWriter<
+    ParquetWriterBuilder,
+    TrackingLocationGenerator,
+    DefaultFileNameGenerator,
+>;
 type SortingDeleteWriter = SortingPositionOnlyDeleteWriter<
     ParquetWriterBuilder,
     TrackingLocationGenerator,
@@ -146,7 +151,8 @@ impl DeleteRouter {
         let paths = downcast::<StringArray>(batch.column(layout.file_path), "_file")?;
         let positions = downcast::<Int64Array>(batch.column(layout.row_position), "_pos")?;
         let spec_ids = downcast::<Int32Array>(batch.column(layout.spec_id), "_spec_id")?;
-        let partition_values = downcast::<StructArray>(batch.column(layout.partition), "_partition")?;
+        let partition_values =
+            downcast::<StructArray>(batch.column(layout.partition), "_partition")?;
 
         // Validate and project the whole batch before opening or writing any file for it.
         let mut rows = Vec::with_capacity(delete_rows.len());
@@ -259,7 +265,8 @@ impl DeleteRouter {
                     return Ok(());
                 }
             }
-            self.last_position.insert(key.clone(), (path.clone(), position));
+            self.last_position
+                .insert(key.clone(), (path.clone(), position));
         }
 
         if !self.writers.contains_key(&key) {
@@ -268,7 +275,10 @@ impl DeleteRouter {
         }
         match self.writers.get_mut(&key).expect("writer was inserted") {
             DeleteWriter::Ordered(writer) => {
-                let schema = Arc::new(iceberg::arrow::schema_to_arrow_schema(&position_delete_schema()).map_err(iceberg_err)?);
+                let schema = Arc::new(
+                    iceberg::arrow::schema_to_arrow_schema(&position_delete_schema())
+                        .map_err(iceberg_err)?,
+                );
                 let batch = RecordBatch::try_new(
                     schema,
                     vec![
@@ -279,7 +289,9 @@ impl DeleteRouter {
                 .map_err(DataFusionError::from)?;
                 writer.write(batch).await.map_err(iceberg_err)
             }
-            DeleteWriter::Sorting(writer) => writer.write_delete(path, position).map_err(iceberg_err),
+            DeleteWriter::Sorting(writer) => {
+                writer.write_delete(path, position).map_err(iceberg_err)
+            }
         }
     }
 
@@ -353,19 +365,23 @@ impl DeleteRouter {
         } else if self.ordered {
             let builder = PositionDeleteFileWriterBuilder::new(rolling_builder);
             Ok(DeleteWriter::Ordered(
-                builder.build(Some(partition_key)).await.map_err(iceberg_err)?,
+                builder
+                    .build(Some(partition_key))
+                    .await
+                    .map_err(iceberg_err)?,
             ))
         } else {
             let builder = SortingPositionOnlyDeleteWriterBuilder::new(rolling_builder);
             Ok(DeleteWriter::Sorting(
-                builder.build(Some(partition_key)).await.map_err(iceberg_err)?,
+                builder
+                    .build(Some(partition_key))
+                    .await
+                    .map_err(iceberg_err)?,
             ))
         }
     }
 
-    async fn close(
-        mut self,
-    ) -> DFResult<(HashMap<i32, Vec<DataFile>>, Vec<String>, Vec<String>)> {
+    async fn close(mut self) -> DFResult<(HashMap<i32, Vec<DataFile>>, Vec<String>, Vec<String>)> {
         for (key, mut writer) in self.writers.drain() {
             let files = match &mut writer {
                 DeleteWriter::Ordered(writer) => writer.close().await,
@@ -431,9 +447,10 @@ impl IcebergDeltaWriteExec {
     pub fn try_new(input: Arc<dyn ExecutionPlan>, proto: IcebergDeltaWrite) -> DFResult<Self> {
         use datafusion_comet_proto::spark_operator::IcebergDeleteGranularity;
 
-        let common = proto.data_common.clone().ok_or_else(|| {
-            DataFusionError::Plan("IcebergDeltaWrite missing data_common".into())
-        })?;
+        let common = proto
+            .data_common
+            .clone()
+            .ok_or_else(|| DataFusionError::Plan("IcebergDeltaWrite missing data_common".into()))?;
         if proto.format_version != 2 {
             return Err(DataFusionError::Plan(format!(
                 "IcebergDeltaWrite requires format version 2, got {}",
@@ -464,9 +481,7 @@ impl IcebergDeltaWriteExec {
             IcebergDeleteGranularity::IcebergDeleteGranularityPartition => false,
             IcebergDeleteGranularity::IcebergDeleteGranularityFile => true,
         };
-        if !file_granularity
-            && !proto.previous_deletes_blob.is_empty()
-        {
+        if !file_granularity && !proto.previous_deletes_blob.is_empty() {
             return Err(DataFusionError::Plan(
                 "IcebergDeltaWrite carries previous deletes for PARTITION granularity".into(),
             ));
@@ -491,8 +506,7 @@ impl IcebergDeltaWriteExec {
         let row_id = layout.row_id_ordinals.as_slice();
         let metadata_ordinals = layout.metadata_ordinals.as_slice();
         let file_path = projected_ordinal(row_id, metadata.file_path_index, width, "_file")?;
-        let row_position =
-            projected_ordinal(row_id, metadata.row_position_index, width, "_pos")?;
+        let row_position = projected_ordinal(row_id, metadata.row_position_index, width, "_pos")?;
         let spec_id_index = metadata.spec_id_index.ok_or_else(|| {
             DataFusionError::Plan("IcebergDeltaWrite missing _spec_id projection".into())
         })?;
@@ -500,8 +514,7 @@ impl IcebergDeltaWriteExec {
             DataFusionError::Plan("IcebergDeltaWrite missing _partition projection".into())
         })?;
         let spec_id = projected_ordinal(metadata_ordinals, spec_id_index, width, "_spec_id")?;
-        let partition =
-            projected_ordinal(metadata_ordinals, partition_index, width, "_partition")?;
+        let partition = projected_ordinal(metadata_ordinals, partition_index, width, "_partition")?;
         expect_type(&input_schema, operation, &DataType::Int32, "operation")?;
         expect_type(&input_schema, file_path, &DataType::Utf8, "_file")?;
         expect_type(&input_schema, row_position, &DataType::Int64, "_pos")?;
@@ -543,19 +556,19 @@ impl IcebergDeltaWriteExec {
             DataFusionError::Plan("IcebergDeltaWrite data_common missing parquet_settings".into())
         })?;
         let data_writer_properties = Arc::new(build_writer_properties(data_settings)?);
-        let data_writer_mode = ProtoIcebergWriterMode::try_from(common.writer_mode).map_err(|_| {
-            DataFusionError::Plan(format!(
-                "Unknown IcebergWriterMode proto value: {}",
-                common.writer_mode
-            ))
-        })?;
+        let data_writer_mode =
+            ProtoIcebergWriterMode::try_from(common.writer_mode).map_err(|_| {
+                DataFusionError::Plan(format!(
+                    "Unknown IcebergWriterMode proto value: {}",
+                    common.writer_mode
+                ))
+            })?;
         let iceberg_schema = parse_iceberg_schema(&common.iceberg_schema_json)?;
-        let data_target_schema = Arc::new(
-            iceberg::arrow::schema_to_arrow_schema(&iceberg_schema).map_err(iceberg_err)?,
-        );
-        let delete_without_data_projection =
-            command == IcebergDeltaCommand::IcebergDeltaCommandDelete
-                && layout.data_ordinals.is_empty();
+        let data_target_schema =
+            Arc::new(iceberg::arrow::schema_to_arrow_schema(&iceberg_schema).map_err(iceberg_err)?);
+        let delete_without_data_projection = command
+            == IcebergDeltaCommand::IcebergDeltaCommandDelete
+            && layout.data_ordinals.is_empty();
         if layout.data_ordinals.len() != data_target_schema.fields().len()
             && !delete_without_data_projection
         {
@@ -571,7 +584,10 @@ impl IcebergDeltaWriteExec {
             .map(|ordinal| checked_ordinal(*ordinal, width, "data projection"))
             .collect::<DFResult<Vec<_>>>()?;
         let mut unique_data_columns = HashSet::with_capacity(data_columns.len());
-        if data_columns.iter().any(|ordinal| !unique_data_columns.insert(*ordinal)) {
+        if data_columns
+            .iter()
+            .any(|ordinal| !unique_data_columns.insert(*ordinal))
+        {
             return Err(DataFusionError::Plan(
                 "IcebergDeltaWrite data projection contains a duplicate input ordinal".into(),
             ));
@@ -850,7 +866,10 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
             let insert_operation = input_layout.insert_operation;
             let reinsert_operation = input_layout.reinsert_operation;
             let command = IcebergDeltaCommand::try_from(proto.command).map_err(|_| {
-                DataFusionError::Internal(format!("Unknown Iceberg delta command {}", proto.command))
+                DataFusionError::Internal(format!(
+                    "Unknown Iceberg delta command {}",
+                    proto.command
+                ))
             })?;
             let data_input_schema_for_stream = Arc::clone(&data_input_schema);
             let input_row_count = Arc::new(AtomicU64::new(0));
@@ -871,10 +890,8 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
                 async move {
                     while let Some(batch) = source.try_next().await? {
                         input_row_count.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
-                        let operations = downcast::<Int32Array>(
-                            batch.column(operation_ordinal),
-                            "operation",
-                        )?;
+                        let operations =
+                            downcast::<Int32Array>(batch.column(operation_ordinal), "operation")?;
                         let mut delete_rows = Vec::new();
                         let mut data_rows = Vec::new();
                         let mut updated_rows = 0usize;
@@ -896,7 +913,8 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
                                 code if code == insert_operation => {
                                     if command == IcebergDeltaCommand::IcebergDeltaCommandDelete {
                                         return Err(DataFusionError::Execution(
-                                            "Native Iceberg DELETE input contains an INSERT row".into(),
+                                            "Native Iceberg DELETE input contains an INSERT row"
+                                                .into(),
                                         ));
                                     }
                                     data_rows.push(row);
@@ -904,7 +922,8 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
                                 code if reinsert_operation == Some(code) => {
                                     if command == IcebergDeltaCommand::IcebergDeltaCommandDelete {
                                         return Err(DataFusionError::Execution(
-                                            "Native Iceberg DELETE input contains a REINSERT row".into(),
+                                            "Native Iceberg DELETE input contains a REINSERT row"
+                                                .into(),
                                         ));
                                     }
                                     updated_rows += 1;
@@ -981,13 +1000,13 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
             })?;
             let (delete_files, referenced_data_files, rewritten_delete_file_locations) =
                 match router.close().await {
-                Ok(result) => result,
-                Err(error) => {
-                    data_guard.abort().await;
-                    delete_guard.abort().await;
-                    return Err(error);
-                }
-            };
+                    Ok(result) => result,
+                    Err(error) => {
+                        data_guard.abort().await;
+                        delete_guard.abort().await;
+                        return Err(error);
+                    }
+                };
             let data_rows_written = data_files.iter().map(DataFile::record_count).sum();
             let data_bytes_written = data_files.iter().map(DataFile::file_size_in_bytes).sum();
             let delete_rows_written = delete_files
@@ -1121,8 +1140,8 @@ fn project_partition(
         arrays.push(cast);
     }
     let projected = Arc::new(StructArray::try_new(target_fields, arrays, None)?) as ArrayRef;
-    let values = arrow_struct_to_literal(&projected, &historical.partition_type)
-        .map_err(iceberg_err)?;
+    let values =
+        arrow_struct_to_literal(&projected, &historical.partition_type).map_err(iceberg_err)?;
     match values.into_iter().next().flatten() {
         Some(Literal::Struct(value)) => Ok(value),
         _ => Err(DataFusionError::Execution(
@@ -1256,7 +1275,9 @@ fn project_data_rows(
 
 fn checked_ordinal(value: i32, width: usize, label: &str) -> DFResult<usize> {
     let ordinal = usize::try_from(value).map_err(|_| {
-        DataFusionError::Plan(format!("IcebergDeltaWrite {label} ordinal {value} is negative"))
+        DataFusionError::Plan(format!(
+            "IcebergDeltaWrite {label} ordinal {value} is negative"
+        ))
     })?;
     if ordinal >= width {
         return Err(DataFusionError::Plan(format!(
@@ -1266,22 +1287,26 @@ fn checked_ordinal(value: i32, width: usize, label: &str) -> DFResult<usize> {
     Ok(ordinal)
 }
 
-fn projected_ordinal(
-    projection: &[i32],
-    index: i32,
-    width: usize,
-    label: &str,
-) -> DFResult<usize> {
+fn projected_ordinal(projection: &[i32], index: i32, width: usize, label: &str) -> DFResult<usize> {
     let index = usize::try_from(index).map_err(|_| {
-        DataFusionError::Plan(format!("IcebergDeltaWrite {label} projection index is negative"))
+        DataFusionError::Plan(format!(
+            "IcebergDeltaWrite {label} projection index is negative"
+        ))
     })?;
     let value = *projection.get(index).ok_or_else(|| {
-        DataFusionError::Plan(format!("IcebergDeltaWrite {label} projection is missing index {index}"))
+        DataFusionError::Plan(format!(
+            "IcebergDeltaWrite {label} projection is missing index {index}"
+        ))
     })?;
     checked_ordinal(value, width, label)
 }
 
-fn expect_type(schema: &SchemaRef, ordinal: usize, expected: &DataType, label: &str) -> DFResult<()> {
+fn expect_type(
+    schema: &SchemaRef,
+    ordinal: usize,
+    expected: &DataType,
+    label: &str,
+) -> DFResult<()> {
     if schema.field(ordinal).data_type() != expected {
         return Err(DataFusionError::Plan(format!(
             "IcebergDeltaWrite {label} column must be {expected:?}, got {:?}",
@@ -1293,7 +1318,9 @@ fn expect_type(schema: &SchemaRef, ordinal: usize, expected: &DataType, label: &
 
 fn downcast<'a, T: 'static>(array: &'a ArrayRef, label: &str) -> DFResult<&'a T> {
     array.as_any().downcast_ref::<T>().ok_or_else(|| {
-        DataFusionError::Execution(format!("IcebergDeltaWrite {label} column has an invalid Arrow array"))
+        DataFusionError::Execution(format!(
+            "IcebergDeltaWrite {label} column has an invalid Arrow array"
+        ))
     })
 }
 

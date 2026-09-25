@@ -35,17 +35,17 @@ mod lance_scan;
 use crate::execution::operators::init_csv_datasource_exec;
 use crate::execution::operators::AlignedArrowStreamReader;
 use crate::execution::operators::DynamicFilterJoinExec;
+use crate::execution::operators::IcebergDeltaWriteExec;
 use crate::execution::operators::IcebergScanExec;
 use crate::execution::operators::IcebergWriteExec;
-use crate::execution::operators::IcebergDeltaWriteExec;
 use crate::execution::operators::{PartitionedRankLimitExec, WindowFnKind};
 use crate::execution::{
     expressions::list_positions::ListPositionsExpr,
     expressions::subquery::Subquery,
     operators::{
         CometFilterExec, ExecutionError, ExpandExec, ExplodeExec, MergeActionContext,
-        MergeInstructionExec, MergeRowsExec,
-        ParquetCompression, ParquetWriterExec, SampleExec, ScanExec, ShuffleScanExec,
+        MergeInstructionExec, MergeRowsExec, ParquetCompression, ParquetWriterExec, SampleExec,
+        ScanExec, ShuffleScanExec,
     },
     planner::expression_registry::ExpressionRegistry,
     planner::operator_registry::OperatorRegistry,

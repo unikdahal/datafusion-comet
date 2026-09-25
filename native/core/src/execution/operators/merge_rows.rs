@@ -192,9 +192,7 @@ impl MergeConfig {
                 }
                 let valid_context = match instruction.outputs.len() {
                     0 | 2 => instruction.context.is_none(),
-                    1 => {
-                        instruction.context.is_some() || !self.semantic_metrics_required
-                    }
+                    1 => instruction.context.is_some() || !self.semantic_metrics_required,
                     _ => false,
                 };
                 if !valid_context {
@@ -1209,8 +1207,8 @@ mod tests {
             vec![true, true, true, true, false, true],
             vec![true, true, true, true, true, false],
         );
-        let clause = |value: i32, outputs: Vec<Vec<Arc<dyn PhysicalExpr>>>, context| {
-            MergeInstructionExec {
+        let clause =
+            |value: i32, outputs: Vec<Vec<Arc<dyn PhysicalExpr>>>, context| MergeInstructionExec {
                 condition: binary(
                     col("val", &test_schema()).unwrap(),
                     DFOperator::Eq,
@@ -1220,29 +1218,20 @@ mod tests {
                 .unwrap(),
                 outputs,
                 context,
-            }
-        };
+            };
         let value_projection = || vec![col("val", &test_schema()).unwrap()];
         let config = MergeConfig {
             is_source_row_present: col("source_present", &test_schema()).unwrap(),
             is_target_row_present: col("target_present", &test_schema()).unwrap(),
             matched_instructions: vec![
-                clause(
-                    10,
-                    vec![value_projection()],
-                    Some(MergeActionContext::Copy),
-                ),
+                clause(10, vec![value_projection()], Some(MergeActionContext::Copy)),
                 clause(11, vec![], None),
                 clause(
                     12,
                     vec![value_projection()],
                     Some(MergeActionContext::Update),
                 ),
-                clause(
-                    13,
-                    vec![vec![lit(13i32)], vec![lit(13i32)]],
-                    None,
-                ),
+                clause(13, vec![vec![lit(13i32)], vec![lit(13i32)]], None),
             ],
             not_matched_instructions: vec![clause(
                 14,
