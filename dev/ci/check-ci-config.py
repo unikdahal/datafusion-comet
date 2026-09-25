@@ -431,6 +431,7 @@ NIGHTLY_JOBS = {
     "lint": "publishes the profile matrix that linux-test reads",
     "build-native": "builds the native library the matrix loads",
     "linux-test": "the matrix itself",
+    "linux-test-spark-4-2-iceberg-transaction": "runs the Spark 4.2-only transaction suite, which the default Spark 4.1 profile cannot compile",
 }
 NIGHTLY_GUARD = re.compile(r"^    if:.*inputs\.profiles\s*!=\s*'nightly'")
 # The `schedule` case in ci.yml's `Detect changes` script, and what has to be
