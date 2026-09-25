@@ -671,8 +671,8 @@ impl IcebergDeltaWriteExec {
             let mut seen_locations = HashSet::with_capacity(group.delete_files.len());
             for delete_file in &group.delete_files {
                 if delete_file.location.is_empty()
-                    || delete_file.format.to_ascii_uppercase() != "PARQUET"
-                    || delete_file.file_size_in_bytes <= 0
+                    || !delete_file.format.eq_ignore_ascii_case("PARQUET")
+                    || delete_file.file_size_in_bytes == 0
                     || delete_file.record_count < 0
                     || delete_file.key_metadata.is_some()
                     || delete_file.content_offset.is_some()
@@ -1213,12 +1213,7 @@ fn build_delta_output_batch(
 fn previous_delete_scan_task(
     descriptor: &IcebergPreviousDeleteFileDescriptor,
 ) -> DFResult<FileScanTaskDeleteFile> {
-    let file_size = u64::try_from(descriptor.file_size_in_bytes).map_err(|_| {
-        DataFusionError::Plan(format!(
-            "Previous delete file {} has an invalid file size {}",
-            descriptor.location, descriptor.file_size_in_bytes
-        ))
-    })?;
+    let file_size = descriptor.file_size_in_bytes;
     let record_count = u64::try_from(descriptor.record_count).map_err(|_| {
         DataFusionError::Plan(format!(
             "Previous delete file {} has an invalid record count {}",
