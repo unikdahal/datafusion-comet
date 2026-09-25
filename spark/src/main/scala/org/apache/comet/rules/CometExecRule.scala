@@ -243,6 +243,38 @@ case class CometExecRule(session: SparkSession)
   }
 
   /**
+   * Whether a Spark shuffle is row-based only because Comet had to decline the shuffle itself,
+   * while its immediate producer is still a Comet columnar plan.
+   *
+   * Iceberg FILE-granularity position deletes repartition by (_spec_id, _partition, _file).
+   * For an unpartitioned table, _partition is an empty struct. Comet shuffle deliberately rejects
+   * empty structs, so Spark inserts a row shuffle after CometColumnarToRow. The delta writer can
+   * still run natively by converting that shuffle output back to Arrow at the write boundary.
+   *
+   * Keep this test deliberately narrow: a shuffle over an arbitrary Spark operator (notably a
+   * Spark MergeRowsExec) must not make the native delta writer eligible.
+   */
+  private def isSparkShuffleOverComet(plan: SparkPlan): Boolean = plan match {
+    case shuffle: ShuffleExchangeExec =>
+      shuffle.child match {
+        case _: CometColumnarToRowExec | _: CometNativeColumnarToRowExec => true
+        case WholeStageCodegenExec(_: CometColumnarToRowExec) => true
+        case _ => false
+      }
+    case read: AQEShuffleReadExec => isSparkShuffleOverComet(read.child)
+    case stage: ShuffleQueryStageExec => isSparkShuffleOverComet(stage.plan)
+    case ReusedExchangeExec(_, child) => isSparkShuffleOverComet(child)
+    case _ => false
+  }
+
+  private def bridgeIcebergDeltaShuffle(op: IcebergWriteExec): IcebergWriteExec =
+    if (!producesArrowBatches(op.child) && isSparkShuffleOverComet(op.child)) {
+      op.copy(child = CometSparkToColumnarExec(op.child))
+    } else {
+      op
+    }
+
+  /**
    * Restore a Spark Partial while retaining its current children. The tag prevents reconversion
    * when AQE replans the exchange without its Final, and records why the Partial stays in Spark.
    */
@@ -475,7 +507,8 @@ case class CometExecRule(session: SparkSession)
       case op: IcebergWriteExec
           if op.dispatch.isInstanceOf[PositionDeltaWrite] &&
             CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.get(op.conf) =>
-        convertToComet(op, CometIcebergNativeWrite).getOrElse(op)
+        val candidate = bridgeIcebergDeltaShuffle(op)
+        convertToComet(candidate, CometIcebergNativeWrite).getOrElse(op)
 
       case op: IcebergWriteExec
           if !op.dispatch.isInstanceOf[PositionDeltaWrite] &&
