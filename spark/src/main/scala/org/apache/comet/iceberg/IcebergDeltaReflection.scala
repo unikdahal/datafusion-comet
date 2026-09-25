@@ -193,7 +193,6 @@ object IcebergDeltaReflection {
       deltaTaskCommitConstructor: Constructor[_],
       dataFiles: Method,
       deleteFiles: Method,
-      referencedDataFiles: Method,
       inMemoryFileIoConstructor: Constructor[_],
       addInMemoryFile: Method,
       inMemoryInputFileConstructor: Constructor[_],
@@ -304,8 +303,6 @@ object IcebergDeltaReflection {
         throw new NoSuchMethodException("DeltaTaskCommit.dataFiles")),
       deleteFiles = findMethodInHierarchy(taskCommitClass, "deleteFiles").getOrElse(
         throw new NoSuchMethodException("DeltaTaskCommit.deleteFiles")),
-      referencedDataFiles = findMethodInHierarchy(taskCommitClass, "referencedDataFiles")
-        .getOrElse(throw new NoSuchMethodException("DeltaTaskCommit.referencedDataFiles")),
       inMemoryFileIoConstructor = declaredCtor(inMemoryFileIo),
       addInMemoryFile =
         inMemoryFileIo.getMethod("addFile", classOf[String], classOf[Array[Byte]]),
