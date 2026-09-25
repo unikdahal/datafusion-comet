@@ -21,7 +21,10 @@ package org.apache.spark.sql.comet
 
 import java.util.ArrayList
 
+import scala.jdk.CollectionConverters._
+
 import org.apache.spark.TaskContext
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, UnsafeProjection}
@@ -32,10 +35,12 @@ import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.types.BinaryType
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.util.Utils
 
-import com.google.protobuf.CodedOutputStream
+import com.google.protobuf.{ByteString, CodedOutputStream}
 
 import org.apache.comet.CometExecIterator
+import org.apache.comet.iceberg.{DeltaDelete, DeltaMerge, DeltaUpdate, IcebergSemanticMetricsShim}
 import org.apache.comet.iceberg.{
   DataManifestContent,
   DeleteManifestContent,
@@ -44,6 +49,7 @@ import org.apache.comet.iceberg.{
   TransportManifest
 }
 import org.apache.comet.serde.OperatorOuterClass.Operator
+import org.apache.comet.serde.OperatorOuterClass.IcebergDeltaCommand
 
 /** Native executor-side writer for Iceberg V2 PositionDeltaWrite task output. */
 case class CometIcebergDeltaWriteExec(
@@ -52,7 +58,8 @@ case class CometIcebergDeltaWriteExec(
     @transient batchWrite: BatchWrite,
     @transient table: AnyRef,
     outputSpecId: Int,
-    @transient specsById: java.util.Map[Integer, AnyRef])
+    @transient specsById: java.util.Map[Integer, AnyRef],
+    previousDeletesBroadcast: Option[Broadcast[Array[Byte]]] = None)
     extends CometNativeExec
     with UnaryExecNode {
 
@@ -81,14 +88,24 @@ case class CometIcebergDeltaWriteExec(
     Iterator(output, s"${delta.getDataCommon.getDataLocation}, ${delta.getDeleteGranularity}")
   }
 
+  private def semanticCommand =
+    nativeOp.getIcebergDeltaWrite.getCommand match {
+      case IcebergDeltaCommand.ICEBERG_DELTA_COMMAND_DELETE => Some(DeltaDelete)
+      case IcebergDeltaCommand.ICEBERG_DELTA_COMMAND_UPDATE => Some(DeltaUpdate)
+      case IcebergDeltaCommand.ICEBERG_DELTA_COMMAND_MERGE => Some(DeltaMerge)
+      case _ => None
+    }
+
   override lazy val metrics: Map[String, SQLMetric] = Map(
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of input delta rows"),
     "numDataFiles" -> SQLMetrics.createMetric(sparkContext, "number of data files written"),
     "numDataRowsWritten" -> SQLMetrics.createMetric(sparkContext, "number of data rows written"),
     "numDeleteFiles" -> SQLMetrics.createMetric(sparkContext, "number of delete files written"),
     "numDeleteRecords" -> SQLMetrics.createMetric(sparkContext, "number of delete records"),
     "numReferencedDataFiles" -> SQLMetrics.createMetric(sparkContext, "referenced data files"),
     "bytesWritten" -> SQLMetrics.createSizeMetric(sparkContext, "written output"),
-    "write_time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in native Iceberg writer"))
+    "write_time" -> SQLMetrics.createNanoTimingMetric(sparkContext, "time in native Iceberg writer")) ++
+    IcebergSemanticMetricsShim.deltaMetrics(sparkContext, semanticCommand)
 
   override def doExecute(): RDD[InternalRow] = {
     val columnarRdd = doExecuteColumnar()
@@ -116,6 +133,7 @@ case class CometIcebergDeltaWriteExec(
     val sortOrder = IcebergDeltaWriteExec.requireReflection(
       IcebergReflection.getSortOrderById(table, sortOrderId), s"sort order id=$sortOrderId")
     val capturedSpecs = specsById
+    val capturedPreviousDeletes = previousDeletesBroadcast
 
     columnarRdd.mapPartitionsInternal { batches =>
       IcebergDeltaReflection.executorReflectionUnresolved().foreach { reason =>
@@ -123,11 +141,15 @@ case class CometIcebergDeltaWriteExec(
       }
       val cleanup = new CometIcebergWriteExec.WrittenFileCleanup(tableIO)
       Option(TaskContext.get()).foreach(_.addTaskFailureListener(cleanup))
+      val previousDeleteFiles = capturedPreviousDeletes
+        .map(broadcast => decodePreviousDeleteFiles(broadcast.value))
+        .getOrElse(Map.empty[String, AnyRef])
       val (payloadBytes, locations) = drainNativePayload(batches)
       cleanup.own(locations)
       val payload = org.apache.comet.serde.OperatorOuterClass.IcebergDeltaTaskPayload
         .parseFrom(payloadBytes)
       require(payload.getSchemaRevision == 1, s"Unsupported Iceberg delta payload revision ${payload.getSchemaRevision}")
+      longMetric("numOutputRows").add(payload.getInputRows)
 
       val dataFiles = new ArrayList[AnyRef]()
       val deleteFiles = new ArrayList[AnyRef]()
@@ -145,6 +167,10 @@ case class CometIcebergDeltaWriteExec(
           throw new IllegalArgumentException(
             s"Task payload references unknown partition spec ${manifest.getPartitionSpecId}")
         }
+        if (content == DataManifestContent && manifest.getPartitionSpecId != outputSpecId) {
+          throw new IllegalArgumentException(
+            s"DATA manifest uses spec ${manifest.getPartitionSpecId}, expected current output spec $outputSpecId")
+        }
         manifests.add(
           TransportManifest(content, manifest.getPartitionSpecId, manifest.getAvroManifest.toByteArray))
       }
@@ -157,9 +183,19 @@ case class CometIcebergDeltaWriteExec(
         while (fileIterator.hasNext) target.add(fileIterator.next())
       }
 
-      if (!payload.getRewrittenDeleteFileLocationsList.isEmpty) {
-        throw new IllegalStateException(
-          "Native Iceberg delta payload returned rewritten delete files before FILE rewrite support is enabled")
+      val rewrittenDeleteFiles = new ArrayList[AnyRef]()
+      val rewrittenLocations = new java.util.HashSet[String]()
+      val rewrittenIterator = payload.getRewrittenDeleteFileLocationsList.iterator()
+      while (rewrittenIterator.hasNext) {
+        val location = rewrittenIterator.next()
+        require(
+          rewrittenLocations.add(location),
+          s"Native Iceberg delta payload repeated rewritten delete file $location")
+        val original = previousDeleteFiles.getOrElse(
+          location,
+          throw new IllegalArgumentException(
+            s"Native Iceberg delta payload rewrote unknown delete file $location"))
+        rewrittenDeleteFiles.add(original)
       }
 
       val dataSpec = outputSpec.asInstanceOf[AnyRef]
@@ -171,12 +207,13 @@ case class CometIcebergDeltaWriteExec(
         decodedWriteSchema,
         sortOrder)
       val referencedDataFiles = new ArrayList[CharSequence](payload.getReferencedDataFilesCount)
-      payload.getReferencedDataFilesList.forEach(path => referencedDataFiles.add(path))
+      val referencedIterator = payload.getReferencedDataFilesList.iterator()
+      while (referencedIterator.hasNext) referencedDataFiles.add(referencedIterator.next())
       val writeResult = IcebergDeltaReflection.buildDeltaWriteResult(
         rebuiltData,
         deleteFiles,
         referencedDataFiles,
-        new ArrayList[AnyRef]())
+        rewrittenDeleteFiles)
       val commit = IcebergDeltaReflection.buildDeltaTaskCommit(writeResult)
 
       val (dataRows, dataBytes) = IcebergReflection.sumDataFileMetrics(rebuiltData)
@@ -206,15 +243,20 @@ case class CometIcebergDeltaWriteExec(
           child.getClass.getName)
     val partitions = childRDD.getNumPartitions
     val capturedNativeOp = nativeOp
+    val capturedPreviousDeletes = previousDeletesBroadcast
     childRDD.mapPartitionsInternal { batches =>
       IcebergDeltaReflection.executorReflectionUnresolved().foreach { reason =>
         throw new IllegalStateException(reason)
       }
       val partitionId = TaskContext.getPartitionId()
       val taskAttemptId = TaskContext.get().taskAttemptId()
+      val previousBlob = capturedPreviousDeletes
+        .map(broadcast => ByteString.copyFrom(broadcast.value))
+        .getOrElse(ByteString.EMPTY)
       val delta = capturedNativeOp.getIcebergDeltaWrite.toBuilder
         .setPartitionId(partitionId)
         .setTaskAttemptId(taskAttemptId)
+        .setPreviousDeletesBlob(previousBlob)
         .build()
       val taskNativeOp = capturedNativeOp.toBuilder.setIcebergDeltaWrite(delta).build()
       val bytes = new Array[Byte](taskNativeOp.getSerializedSize)
@@ -257,5 +299,47 @@ case class CometIcebergDeltaWriteExec(
 private object IcebergDeltaWriteExec {
   def requireReflection[A](value: Option[A], description: String): A =
     value.getOrElse(throw new IllegalStateException(s"Native Iceberg delta write: $description unavailable"))
+
+  def decodePreviousDeleteFiles(bytes: Array[Byte]): Map[String, AnyRef] = {
+    if (bytes.isEmpty) return Map.empty
+    val transport = org.apache.comet.serde.OperatorOuterClass.IcebergPreviousDeletes.parseFrom(bytes)
+    val groups = transport.getGroupsList.asScala.toSeq
+    val expected = groups
+      .map { group =>
+        require(group.getDataFile.nonEmpty, "Previous delete transport has an empty data file path")
+        group.getDataFile -> group.getDeleteFilesList.asScala.map(_.getLocation).toSeq
+      }
+    require(
+      expected.map(_._1).distinct.size == expected.size,
+      "Previous delete transport repeats a data file group")
+    val expectedByDataFile = expected.toMap
+    val serialized = transport.getSerializedDeleteFiles.toByteArray
+    require(serialized.nonEmpty, "Previous delete transport is missing original DeleteFile objects")
+    val original = Utils.deserialize[Map[String, Seq[AnyRef]]](
+      serialized,
+      Utils.getContextOrSparkClassLoader)
+    require(
+      original.keySet == expectedByDataFile.keySet,
+      "Previous delete transport group keys disagree")
+
+    val byLocation = scala.collection.mutable.HashMap.empty[String, AnyRef]
+    expectedByDataFile.foreach { case (dataFile, locations) =>
+      val files = original(dataFile)
+      val actualLocations = files.map(file =>
+        IcebergReflection.extractFileLocation(file).getOrElse {
+          throw new IllegalArgumentException("Original DeleteFile has no location()/path()")
+        })
+      require(
+        actualLocations.sorted == locations.sorted,
+        s"Previous delete transport locations disagree for data file $dataFile")
+      files.foreach { file =>
+        val location = IcebergReflection.extractFileLocation(file).get
+        require(
+          byLocation.put(location, file).isEmpty,
+          s"Previous delete transport repeats location $location")
+      }
+    }
+    byLocation.toMap
+  }
 
 }

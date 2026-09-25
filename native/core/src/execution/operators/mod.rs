@@ -40,7 +40,7 @@ mod iceberg_scan;
 mod iceberg_write;
 pub use iceberg_write::IcebergWriteExec;
 mod merge_rows;
-pub use merge_rows::{MergeInstructionExec, MergeRowsExec};
+pub use merge_rows::{MergeActionContext, MergeInstructionExec, MergeRowsExec};
 mod iceberg_delta_write;
 pub use iceberg_delta_write::IcebergDeltaWriteExec;
 mod parquet_writer;

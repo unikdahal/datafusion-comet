@@ -54,6 +54,7 @@ import org.apache.spark.sql.types._
 
 import org.apache.comet.{CometConf, CometExplainInfo, ExtendedExplainInfo}
 import org.apache.comet.CometConf.{COMET_SPARK_TO_ARROW_ENABLED, COMET_SPARK_TO_ARROW_SUPPORTED_OPERATOR_LIST}
+import org.apache.comet.iceberg.PositionDeltaWrite
 import org.apache.comet.CometSparkSessionExtensions._
 import org.apache.comet.rules.CometExecRule.allExecs
 import org.apache.comet.serde._
@@ -447,10 +448,19 @@ case class CometExecRule(session: SparkSession)
       // AQE re-fires the Iceberg write planning on every stage materialisation, so a
       // partitioned write's physical sub-tree may already contain a `CometIcebergWriteExec`.
       // Unwrap to avoid a double conversion.
-      case op: IcebergWriteExec if op.child.isInstanceOf[CometIcebergWriteExec] =>
+      case op: IcebergWriteExec
+          if op.child.isInstanceOf[CometIcebergWriteExec] ||
+            op.child.isInstanceOf[CometIcebergDeltaWriteExec] =>
         op.child
 
-      case op: IcebergWriteExec if CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED.get(op.conf) =>
+      case op: IcebergWriteExec
+          if op.dispatch.isInstanceOf[PositionDeltaWrite] &&
+            CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.get(op.conf) =>
+        convertToComet(op, CometIcebergNativeWrite).getOrElse(op)
+
+      case op: IcebergWriteExec
+          if !op.dispatch.isInstanceOf[PositionDeltaWrite] &&
+            CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED.get(op.conf) =>
         convertToComet(op, CometIcebergNativeWrite).getOrElse(op)
 
       // For AQE broadcast stage on a Comet broadcast exchange
@@ -857,6 +867,7 @@ case class CometExecRule(session: SparkSession)
           // needs its own serialization. Reset the flag so children can start their own native
           // execution blocks.
           if (op.isInstanceOf[CometNativeWriteExec] || op.isInstanceOf[CometIcebergWriteExec] ||
+            op.isInstanceOf[CometIcebergDeltaWriteExec] ||
             op.isInstanceOf[CometWriteFilesExec]) {
             firstNativeOp = true
           }

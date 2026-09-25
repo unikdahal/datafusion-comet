@@ -21,15 +21,13 @@ package org.apache.comet.iceberg
 
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
-import org.apache.comet.CometSparkSessionExtensions.isSpark42Plus
-
-/** Spark 4.2 row-level writes stay on Spark until its transaction and summary contract is handled. */
+/** Spark 4.x uses the version-neutral WriteDelta descriptor for Iceberg row-level writes. */
 private[iceberg] object IcebergDeltaLogicalShim extends IcebergDeltaLogicalShim {
   private val writeDeltaClass = "org.apache.spark.sql.catalyst.plans.logical.WriteDelta"
 
   override def extract(plan: LogicalPlan): Option[DeltaLogicalFields] =
-    if (!isSpark42Plus && plan.getClass.getName == writeDeltaClass) {
-      IcebergReflection.extractDeltaLogicalFields(plan)
+    if (plan.getClass.getName == writeDeltaClass) {
+      IcebergDeltaLogicalFieldsShim.extract(plan)
     } else {
       None
     }

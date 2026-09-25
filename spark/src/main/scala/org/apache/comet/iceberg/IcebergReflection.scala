@@ -329,7 +329,36 @@ object IcebergReflection extends Logging {
       projections <- member("projections").collect {
         case value: org.apache.spark.sql.catalyst.util.WriteDeltaProjections => value
       }
-    } yield DeltaLogicalFields(query, table, projections, optionalWrite(member("write")))
+    } yield {
+      def enumCommand(value: AnyRef): Option[DeltaCommand] = {
+        val name = value.toString.toUpperCase(java.util.Locale.ROOT)
+        name match {
+          case "DELETE" => Some(DeltaDelete)
+          case "UPDATE" => Some(DeltaUpdate)
+          case "MERGE" => Some(DeltaMerge)
+          case _ => None
+        }
+      }
+
+      val command = member("operation").flatMap { operation =>
+        findMethodInHierarchy(operation.getClass, "command")
+          .flatMap(method => Option(method.invoke(operation).asInstanceOf[AnyRef]))
+          .flatMap(enumCommand)
+      }
+      val tableForName = member("table").orElse(member("originalTable"))
+      val tableName = tableForName.flatMap { relation =>
+        findMethodInHierarchy(relation.getClass, "name")
+          .flatMap(method => Option(method.invoke(relation).asInstanceOf[AnyRef]))
+          .map(_.toString)
+      }
+      DeltaLogicalFields(
+        query,
+        table,
+        projections,
+        optionalWrite(member("write")),
+        command,
+        tableName)
+    }
   }
 
   def getOuterSparkWrite(batchWrite: Any): Option[Any] = {

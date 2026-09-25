@@ -17,20 +17,18 @@
  * under the License.
  */
 
-package org.apache.spark.sql.comet
+package org.apache.comet.iceberg
 
-import org.apache.spark.sql.connector.write.{BatchWrite, WriterCommitMessage}
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.catalyst.analysis.NamedRelation
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.connector.write.Write
 
-import org.apache.comet.iceberg.DeltaCommand
+private[iceberg] final case class InsertOnlyMergeFields(
+    table: NamedRelation,
+    query: LogicalPlan,
+    write: Option[Write],
+    tableName: String)
 
-/** The `BatchWrite.commit(messages, summary)` overload only exists on Spark 4.1+. */
-private[comet] object IcebergWriteSummaryShim {
-  def commit(
-      batchWrite: BatchWrite,
-      messages: Array[WriterCommitMessage],
-      query: SparkPlan,
-      command: Option[DeltaCommand] = None): Unit = {
-    batchWrite.commit(messages)
-  }
+private[iceberg] trait IcebergInsertOnlyMergeShim {
+  def extract(plan: LogicalPlan): Option[InsertOnlyMergeFields]
 }

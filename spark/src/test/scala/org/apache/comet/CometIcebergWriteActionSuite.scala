@@ -37,7 +37,13 @@ import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.comet.{CometIcebergWriteExec, CometMergeRowsExec, IcebergCommitExec, IcebergWriteExec}
+import org.apache.spark.sql.comet.{
+  CometIcebergDeltaWriteExec,
+  CometIcebergWriteExec,
+  CometMergeRowsExec,
+  IcebergCommitExec,
+  IcebergWriteExec,
+}
 import org.apache.spark.sql.connector.catalog.InMemoryTableCatalog
 import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, PhysicalWriteInfo, Write, WriterCommitMessage}
 import org.apache.spark.sql.execution.{ColumnarToRowTransition, LeafExecNode, SparkPlan}
@@ -431,14 +437,26 @@ class CometIcebergWriteActionSuite
         properties = Some("'write.merge.mode'='copy-on-write'"))
       coalesceInsert("merge_summary", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
 
-      spark.sql(s"""
-        |MERGE INTO $catalog.$ns.merge_summary t
-        |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
-        |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
-        |ON t.id = s.id
-        |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
-        |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
-        |""".stripMargin)
+      val write = captureWrite("merge_summary") {
+        withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
+          withNativeEnabled {
+            spark.sql(s"""
+              |MERGE INTO $catalog.$ns.merge_summary t
+              |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
+              |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
+              |ON t.id = s.id
+              |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
+              |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
+              |""".stripMargin)
+          }
+        }
+      }
+      val nativeMergeRows = write.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case merge: CometMergeRowsExec => merge }
+      }
+      assert(
+        nativeMergeRows.nonEmpty,
+        "Spark 4.1 should use CometMergeRowsExec while creating the merge snapshot")
 
       val summary = spark
         .sql(s"SELECT summary FROM $catalog.$ns.merge_summary.snapshots " +
@@ -893,9 +911,8 @@ class CometIcebergWriteActionSuite
     }
   }
 
-  test("native acceleration: ReplaceData (CoW MERGE) runs MergeRows and writer natively") {
+  test("native MergeRows supports Iceberg CoW MERGE with the versioned delta writer") {
     assumeNativeAcceleration()
-    assume(isSpark35Plus && !isSpark41Plus, "native MergeRows requires Spark 3.5 through 4.0")
     withIcebergCatalog { warehouseDir =>
       createTable(
         warehouseDir,
@@ -939,13 +956,80 @@ class CometIcebergWriteActionSuite
       }
       assert(
         nativeWrites.nonEmpty,
-        "expected Iceberg MERGE to feed CometIcebergWriteExec. Plans:\n" +
+        "expected Iceberg MERGE to feed Comet's Iceberg write wrapper. Plans:\n" +
           writeSnapshot.plans.mkString("\n--\n"))
+      val nativeDeltaWrites = writeSnapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
+      }
+      if (isSpark35Plus) {
+        assert(
+          nativeDeltaWrites.nonEmpty,
+          "Spark 3.5+ native MERGE should use CometIcebergDeltaWriteExec. Plans:\n" +
+            writeSnapshot.plans.mkString("\n--\n"))
+      } else {
+        assert(
+          nativeDeltaWrites.isEmpty,
+          "Spark 3.4 MERGE should retain Iceberg's JVM DeltaWriter. Plans:\n" +
+            writeSnapshot.plans.mkString("\n--\n"))
+      }
       assertRows("native_cow_merge", expectedIds = Seq(1, 2, 3))
       val updated = spark
         .sql(s"SELECT amount FROM $catalog.$ns.native_cow_merge WHERE id = 2")
         .collect()
       assert(updated.length == 1 && updated.head.getDouble(0) == 200.0)
+    }
+  }
+
+  test("Spark 3.4 native Iceberg MERGE preserves cardinality exception compatibility") {
+    assume(!isSpark35Plus, "Spark 3.4 uses Iceberg's extension MergeRowsExec")
+    assume(icebergAvailable && icebergVersionAtLeast(1, 8), "requires Iceberg 1.8+")
+    withIcebergCatalog { warehouseDir =>
+      createTable(
+        warehouseDir,
+        "merge_cardinality_34",
+        partitionSpec = "",
+        properties = Some("'write.merge.mode'='copy-on-write'"))
+      coalesceInsert("merge_cardinality_34", Seq((1, "us-east", 10.0)))
+      val mergeSql =
+        """
+          |MERGE INTO cat.db.merge_cardinality_34 t
+          |USING (
+          |  SELECT 1 AS id, 'us-east' AS region, 20.0 AS amount
+          |  UNION ALL
+          |  SELECT 1 AS id, 'us-east' AS region, 30.0 AS amount
+          |) s
+          |ON t.id = s.id
+          |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
+          |""".stripMargin
+
+      val (_, stockFailure) = captureFailedPlans(spark) {
+        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+          spark.sql(mergeSql).collect()
+        }
+      }
+      val stockError = stockFailure.getOrElse(fail("Spark MERGE unexpectedly succeeded"))
+
+      val (nativePlans, nativeFailure) = captureFailedPlans(spark) {
+        withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
+          withNativeEnabled {
+            spark.sql(mergeSql).collect()
+          }
+        }
+      }
+      val nativeError = nativeFailure.getOrElse(fail("native MERGE unexpectedly succeeded"))
+      val engaged = nativePlans.exists { plan =>
+        collectWithSubqueries(plan) { case _: CometMergeRowsExec => true }.nonEmpty
+      }
+      assert(engaged, s"Spark 3.4 Iceberg MergeRows did not convert natively: $nativePlans")
+      assert(
+        nativeError.getClass == stockError.getClass,
+        s"expected ${stockError.getClass.getName}, got ${nativeError.getClass.getName}")
+      val compatibilityMessage = "matched a single row from the target table"
+      assert(
+        Option(nativeError.getMessage).exists(_.contains(compatibilityMessage)) &&
+          Option(stockError.getMessage).exists(_.contains(compatibilityMessage)),
+        s"expected both paths to retain the legacy cardinality message; stock=$stockError, " +
+          s"native=$nativeError")
     }
   }
 

@@ -52,7 +52,8 @@ case class WriteDeltaDispatchInfo(
     operationCodes: DeltaOperationCodes,
     rowProjection: Option[ProjectingInternalRow],
     rowIdProjection: ProjectingInternalRow,
-    metadataProjection: Option[ProjectingInternalRow])
+    metadataProjection: Option[ProjectingInternalRow],
+    command: Option[DeltaCommand] = None)
 
 private[iceberg] object WriteDeltaDispatchInfo {
 
@@ -64,7 +65,8 @@ private[iceberg] object WriteDeltaDispatchInfo {
   def build(
       projections: org.apache.spark.sql.catalyst.util.WriteDeltaProjections,
       childOutput: Seq[org.apache.spark.sql.catalyst.expressions.Attribute],
-      operationCodes: DeltaOperationCodes): Option[WriteDeltaDispatchInfo] = {
+      operationCodes: DeltaOperationCodes,
+      command: Option[DeltaCommand] = None): Option[WriteDeltaDispatchInfo] = {
     val rowIdProjection = projections.rowIdProjection
     val rowProjection = projections.rowProjection
     val metadataProjection = projections.metadataProjection
@@ -132,6 +134,7 @@ private[iceberg] object WriteDeltaDispatchInfo {
       operationCodes = operationCodes,
       rowProjection = rowProjection,
       rowIdProjection = rowIdProjection,
-      metadataProjection = metadataProjection)
+      metadataProjection = metadataProjection,
+      command = command)
   }
 }

@@ -28,7 +28,7 @@ import org.apache.spark.sql.execution.{SparkPlan, SQLExecution, UnaryExecNode}
 import org.apache.spark.sql.execution.datasources.v2.V2CommandExec
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
-import org.apache.comet.iceberg.{IcebergDeltaReflection, IcebergDriverMetricsShim, IcebergReflection}
+import org.apache.comet.iceberg.{DeltaCommand, IcebergDeltaReflection, IcebergDriverMetricsShim, IcebergReflection}
 
 sealed trait CreatedTaskFilesExtractor {
   def locations(message: WriterCommitMessage): Seq[String]
@@ -53,7 +53,9 @@ case class IcebergCommitExec(
     @transient write: Write,
     @transient refreshCache: IcebergCommitExec.RefreshCache,
     child: SparkPlan,
-    createdFilesExtractor: CreatedTaskFilesExtractor = OrdinaryIcebergCreatedFiles)
+    createdFilesExtractor: CreatedTaskFilesExtractor = OrdinaryIcebergCreatedFiles,
+    command: Option[DeltaCommand] = None,
+    tableName: Option[String] = None)
     extends V2CommandExec
     with UnaryExecNode
     with Logging {
@@ -71,12 +73,21 @@ case class IcebergCommitExec(
   // Exactly-once relies on V2CommandExec memoizing run() via its `result` lazy val and on
   // the writer executing once inside the AQE bubble anchored by IcebergWriteLogical; pinned
   // by the AQE re-plan test in CometIcebergWriteActionSuite.
-  override protected def run(): Seq[InternalRow] = {
-    try {
+  override protected def run(): Seq[InternalRow] = runWithHooks(() => ())
+
+  /**
+   * Runs the Iceberg job and batch commit, reports write metrics, commits an attached catalog
+   * transaction, and refreshes cache in Spark 4.2's required order.
+   */
+  private[comet] final def runWithHooks(commitAttachedTransaction: () => Unit): Seq[InternalRow] = {
+    val result = try {
       collectAndCommit()
     } finally {
       postDriverMetrics()
     }
+    commitAttachedTransaction()
+    refreshCache()
+    result
   }
 
   private def collectAndCommit(): Seq[InternalRow] = {
@@ -118,7 +129,7 @@ case class IcebergCommitExec(
 
     try {
       messages.foreach(batchWrite.onDataWriterCommit)
-      IcebergWriteSummaryShim.commit(batchWrite, messages, child)
+      IcebergWriteSummaryShim.commit(batchWrite, messages, child, command)
       logInfo(s"Iceberg commit succeeded with ${messages.length} task message(s)")
     } catch {
       case cause: Throwable =>
@@ -126,7 +137,6 @@ case class IcebergCommitExec(
         throw abortAfter(messages, cause)
     }
 
-    refreshCache()
     Nil
   }
 
@@ -193,7 +203,8 @@ case class IcebergCommitExec(
   override protected def withNewChildInternal(newChild: SparkPlan): IcebergCommitExec =
     copy(child = newChild)
 
-  override def nodeName: String = "IcebergCommit"
+  override def nodeName: String =
+    tableName.filter(_.nonEmpty).map(name => s"IcebergCommit $name").getOrElse("IcebergCommit")
 }
 
 object IcebergCommitExec {

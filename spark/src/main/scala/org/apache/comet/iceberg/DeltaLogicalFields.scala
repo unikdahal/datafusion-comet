@@ -24,12 +24,24 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.util.WriteDeltaProjections
 import org.apache.spark.sql.connector.write.Write
 
+sealed trait DeltaCommand extends Product with Serializable
+case object DeltaDelete extends DeltaCommand
+case object DeltaUpdate extends DeltaCommand
+case object DeltaMerge extends DeltaCommand
+
 case class DeltaLogicalFields(
     query: LogicalPlan,
     originalTable: NamedRelation,
     projections: WriteDeltaProjections,
-    write: Option[Write])
+    write: Option[Write],
+    command: Option[DeltaCommand] = None,
+    tableName: Option[String] = None)
 
 private[iceberg] trait IcebergDeltaLogicalShim {
+  def extract(plan: LogicalPlan): Option[DeltaLogicalFields]
+}
+
+/** Version-specific extraction of Spark's public WriteDelta logical node. */
+private[iceberg] trait IcebergDeltaLogicalFieldsShim {
   def extract(plan: LogicalPlan): Option[DeltaLogicalFields]
 }

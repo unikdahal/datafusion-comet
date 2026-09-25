@@ -31,7 +31,7 @@ import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.types.{BinaryType, StructField, StructType}
 import org.apache.spark.util.Utils
 
-import org.apache.comet.iceberg.{IcebergWriteDispatch, PlainIcebergWrite, PositionDeltaWrite, ReplaceDataWrite}
+import org.apache.comet.iceberg.{IcebergSemanticMetricsShim, IcebergWriteDispatch, PlainIcebergWrite, PositionDeltaWrite, ReplaceDataWrite}
 
 /**
  * Executor-side file writer for Comet's split-operator Iceberg V2 write.
@@ -51,7 +51,12 @@ case class IcebergWriteExec(
   // through the driver-side commit report, and its DataWriters expose no task-level values.
   // Registering them here too would double-count them in the SQL UI.
   override lazy val metrics: Map[String, SQLMetric] =
-    Map("numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    Map("numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows")) ++
+      (dispatch match {
+        case PositionDeltaWrite(info) =>
+          IcebergSemanticMetricsShim.deltaMetrics(sparkContext, info.command)
+        case _ => Map.empty[String, SQLMetric]
+      })
 
   override protected def doExecute(): RDD[InternalRow] = {
     val rdd = {
@@ -73,6 +78,7 @@ case class IcebergWriteExec(
     val rowsMetric = longMetric("numOutputRows")
     val schemaTypes = output.map(_.dataType).toArray
     val capturedDispatch = dispatch
+    val semanticMetrics = metrics -- Set("numOutputRows")
     rdd.mapPartitionsInternal { iter =>
       val partId = TaskContext.getPartitionId()
       val taskId = TaskContext.get().taskAttemptId()
@@ -83,7 +89,8 @@ case class IcebergWriteExec(
         iter,
         rowsMetric,
         projection,
-        capturedDispatch)
+        capturedDispatch,
+        semanticMetrics)
     }
   }
 
@@ -106,7 +113,8 @@ object IcebergWriteExec {
       iter: Iterator[InternalRow],
       rowsMetric: SQLMetric,
       projection: UnsafeProjection,
-      dispatch: IcebergWriteDispatch): Iterator[InternalRow] = {
+      dispatch: IcebergWriteDispatch,
+      semanticMetrics: Map[String, SQLMetric] = Map.empty): Iterator[InternalRow] = {
     val iterWithMetrics = new IteratorWithMetrics(iter, rowsMetric)
     // Serialization happens inside the guarded block: if the commit message cannot be
     // serialised the task must abort so the already-finalised data files get deleted.
@@ -124,11 +132,21 @@ object IcebergWriteExec {
               throw new IllegalStateException(
                 s"Expected DeltaWriter for position delta write, got ${other.getClass.getName}")
           }
+          var numUpdatedRows = 0L
+          var numDeletedRows = 0L
           while (iterWithMetrics.hasNext) {
             val row = iterWithMetrics.next()
             val operation = row.getInt(info.operationOrdinal)
+            if (operation == info.operationCodes.delete) {
+              numDeletedRows += 1L
+            } else if (operation == info.operationCodes.update ||
+              info.operationCodes.reinsert.contains(operation)) {
+              numUpdatedRows += 1L
+            }
             IcebergDeltaWriterShim.writeOperation(deltaWriter, operation, row, info)
           }
+          semanticMetrics.get("numUpdatedRows").foreach(_.add(numUpdatedRows))
+          semanticMetrics.get("numDeletedRows").foreach(_.add(numDeletedRows))
       }
       serializeMessage(writer.commit())
     })(

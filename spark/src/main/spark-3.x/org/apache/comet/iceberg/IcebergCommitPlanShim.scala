@@ -17,20 +17,20 @@
  * under the License.
  */
 
-package org.apache.spark.sql.comet
+package org.apache.comet.iceberg
 
-import org.apache.spark.sql.connector.write.{BatchWrite, WriterCommitMessage}
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.comet.IcebergCommitExec
 
-import org.apache.comet.iceberg.DeltaCommand
-
-/** The `BatchWrite.commit(messages, summary)` overload only exists on Spark 4.1+. */
-private[comet] object IcebergWriteSummaryShim {
-  def commit(
-      batchWrite: BatchWrite,
-      messages: Array[WriterCommitMessage],
-      query: SparkPlan,
-      command: Option[DeltaCommand] = None): Unit = {
-    batchWrite.commit(messages)
-  }
+/** Version-specific planning hooks for transactional Iceberg commit nodes. */
+private[iceberg] object IcebergCommitPlanShim {
+  def wrap(commit: IcebergCommitExec): SparkPlan = commit
 }
+
+/** Spark lines before 4.2 do not expose InsertOnlyMerge as a logical command. */
+private[iceberg] object IcebergInsertOnlyMergeShim extends IcebergInsertOnlyMergeShim {
+  override def extract(plan: LogicalPlan): Option[InsertOnlyMergeFields] = None
+}
+
+

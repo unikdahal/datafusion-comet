@@ -49,6 +49,17 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
     }
 
     plan match {
+      case plan if IcebergInsertOnlyMergeShim.extract(plan).isDefined =>
+        IcebergInsertOnlyMergeShim.extract(plan)
+          .flatMap(fields =>
+            matchedSparkWrite(
+              fields.table,
+              fields.write,
+              fields.query,
+              PlainIcebergWrite,
+              Some(DeltaMerge),
+              Some(fields.tableName)))
+          .toList
       case ad: AppendData =>
         matchedSparkWrite(ad.table, ad.write, ad.query, PlainIcebergWrite).toList
       case obe: OverwriteByExpression =>
@@ -86,13 +97,16 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
                 val dispatch = WriteDeltaDispatchInfo.build(
                   fields.projections,
                   fields.query.output,
-                  IcebergDeltaWriterShim.OperationCodes)
+                  IcebergDeltaWriterShim.OperationCodes,
+                  fields.command)
                 dispatch.flatMap { info =>
                   buildDeltaTwoOp(
                     deltaWrite,
                     fields.originalTable,
                     fields.query,
-                    PositionDeltaWrite(info))
+                    PositionDeltaWrite(info),
+                    fields.command,
+                    fields.tableName)
                 }
               }
             }
@@ -109,12 +123,14 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
       table: org.apache.spark.sql.catalyst.analysis.NamedRelation,
       write: Option[Write],
       query: LogicalPlan,
-      dispatch: IcebergWriteDispatch): Option[SparkPlan] = {
+      dispatch: IcebergWriteDispatch,
+      command: Option[DeltaCommand] = None,
+      tableName: Option[String] = None): Option[SparkPlan] = {
     table match {
       case rel: DataSourceV2Relation =>
         write.flatMap { w =>
           if (IcebergReflection.isIcebergSparkWrite(w)) {
-            buildTwoOp(w, rel, query, dispatch)
+            buildTwoOp(w, rel, query, dispatch, command, tableName.orElse(Some(rel.name)))
           } else {
             None
           }
@@ -138,7 +154,9 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
       write: Write,
       rel: DataSourceV2Relation,
       query: LogicalPlan,
-      dispatch: IcebergWriteDispatch): Option[SparkPlan] = {
+      dispatch: IcebergWriteDispatch,
+      command: Option[DeltaCommand],
+      tableName: Option[String]): Option[SparkPlan] = {
     val batchWrite = write.toBatch
     if (batchWrite.useCommitCoordinator()) {
       return None
@@ -146,19 +164,23 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
     // To mirror Spark ReplaceData semantics we invalidate our cache of the state of
     // `originalTable`.
     val refresh: () => Unit = () => IcebergRefreshCacheShim.refreshCache(session, rel)
-    Some(
-      IcebergCommitExec(
-        batchWrite,
-        write,
-        refresh,
-        planLater(IcebergWriteLogical(query, batchWrite, dispatch))))
+    val commit = IcebergCommitExec(
+      batchWrite,
+      write,
+      refresh,
+      planLater(IcebergWriteLogical(query, batchWrite, dispatch)),
+      command = command,
+      tableName = tableName)
+    Some(if (command.isDefined) IcebergCommitPlanShim.wrap(commit) else commit)
   }
 
   private def buildDeltaTwoOp(
       write: Write,
       table: org.apache.spark.sql.catalyst.analysis.NamedRelation,
       query: LogicalPlan,
-      dispatch: IcebergWriteDispatch): Option[SparkPlan] = {
+      dispatch: IcebergWriteDispatch,
+      command: Option[DeltaCommand],
+      tableName: Option[String]): Option[SparkPlan] = {
     table match {
       case rel: DataSourceV2Relation =>
         try {
@@ -168,13 +190,15 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
             None
           } else {
             val refresh: () => Unit = () => IcebergRefreshCacheShim.refreshCache(session, rel)
-            Some(
-              IcebergCommitExec(
-                batchWrite,
-                write,
-                refresh,
-                planLater(IcebergWriteLogical(query, batchWrite, dispatch)),
-                PositionDeltaCreatedFiles))
+            val commit = IcebergCommitExec(
+              batchWrite,
+              write,
+              refresh,
+              planLater(IcebergWriteLogical(query, batchWrite, dispatch)),
+              PositionDeltaCreatedFiles,
+              command,
+              tableName.orElse(fieldsTableName(table)))
+            Some(if (command.isDefined) IcebergCommitPlanShim.wrap(commit) else commit)
           }
         } catch {
           case scala.util.control.NonFatal(e) =>
@@ -183,4 +207,11 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
       case _ => None
     }
   }
+
+  private def fieldsTableName(
+      table: org.apache.spark.sql.catalyst.analysis.NamedRelation): Option[String] =
+    table match {
+      case rel: DataSourceV2Relation => Some(rel.name)
+      case _ => None
+    }
 }

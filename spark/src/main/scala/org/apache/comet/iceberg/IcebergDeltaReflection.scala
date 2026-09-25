@@ -21,8 +21,10 @@ package org.apache.comet.iceberg
 
 import java.lang.ref.WeakReference
 import java.lang.reflect.{Constructor, Method}
+import java.nio.ByteBuffer
 import java.util.WeakHashMap
 
+import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import org.apache.spark.sql.connector.write.WriterCommitMessage
@@ -48,8 +50,132 @@ final case class IcebergDeltaTaskPayload(
     referencedDataFiles: Seq[String],
     rewrittenDeleteFileLocations: Seq[String])
 
+final case class PreviousPositionDeleteFile(
+    location: String,
+    fileSizeInBytes: Long,
+    format: String,
+    partitionSpecId: Int,
+    keyMetadata: Option[Array[Byte]],
+    referencedDataFile: Option[String],
+    contentOffset: Option[Long],
+    contentSizeInBytes: Option[Long],
+    recordCount: Long,
+    originalFile: AnyRef)
+
+final case class PreviousPositionDeletesForDataFile(
+    dataFile: String,
+    deleteFiles: Seq[PreviousPositionDeleteFile])
+
 /** Reflection seam for Iceberg's package-private DeltaTaskCommit constructor and manifest APIs. */
 object IcebergDeltaReflection {
+
+  /**
+   * Reads the command scan's own rewritableDeletes(false) map. This is Iceberg's source of truth
+   * for FILE-granularity position-delete replacement; a new table scan here could observe a
+   * different snapshot than the one used by the row-level command.
+   */
+  def rewritablePositionDeletes(
+      positionDeltaWrite: AnyRef): Either[String, Seq[PreviousPositionDeletesForDataFile]] =
+    try {
+      val scan = IcebergReflection
+        .getPositionDeltaWriteValue(positionDeltaWrite, "scan")
+        .getOrElse(return Left("SparkPositionDeltaWrite.scan reflection failed"))
+      val method = IcebergReflection
+        .findMethodInHierarchy(scan.getClass, "rewritableDeletes", java.lang.Boolean.TYPE)
+        .getOrElse(return Left("SparkBatchQueryScan.rewritableDeletes(boolean) is unavailable"))
+      val rewritable = method.invoke(scan, java.lang.Boolean.FALSE)
+        .asInstanceOf[java.util.Map[String, AnyRef]]
+      if (rewritable == null || rewritable.isEmpty) return Right(Seq.empty)
+
+      val contentFileClass = loadClass("org.apache.iceberg.ContentFile")
+      val deleteFileClass = loadClass("org.apache.iceberg.DeleteFile")
+      val contentFileUtil = loadClass("org.apache.iceberg.util.ContentFileUtil")
+      val isFileScoped = contentFileUtil.getMethods
+        .find(m =>
+          m.getName == "isFileScoped" && m.getParameterCount == 1 &&
+            m.getParameterTypes.head.isAssignableFrom(deleteFileClass))
+        .getOrElse(throw new NoSuchMethodException("ContentFileUtil.isFileScoped(DeleteFile)"))
+      isFileScoped.setAccessible(true)
+      val content = contentFileClass.getMethod("content")
+      val specId = contentFileClass.getMethod("specId")
+      val fileSize = contentFileClass.getMethod("fileSizeInBytes")
+      val keyMetadata = contentFileClass.getMethod("keyMetadata")
+      val recordCount = contentFileClass.getMethod("recordCount")
+      val referencedDataFile = deleteFileClass.getMethod("referencedDataFile")
+      val contentOffset = deleteFileClass.getMethod("contentOffset")
+      val contentSize = deleteFileClass.getMethod("contentSizeInBytes")
+
+      val groups = rewritable.asScala.toSeq.sortBy(_._1).map { case (dataFile, fileSet) =>
+        val files = fileSet match {
+          case iterable: java.lang.Iterable[_] => iterable.asScala.toSeq
+          case other =>
+            throw new IllegalArgumentException(
+              s"SparkBatchQueryScan.rewritableDeletes returned ${other.getClass.getName}, " +
+                "expected an iterable DeleteFileSet")
+        }
+        val descriptors = files.map { value =>
+          val file = value.asInstanceOf[AnyRef]
+          val location = IcebergReflection.extractFileLocation(file).getOrElse {
+            throw new NoSuchMethodException("DeleteFile.location()/path()")
+          }
+          val fileContent = content.invoke(file).toString
+          val format = IcebergReflection.getFileFormat(contentFileClass, file).getOrElse {
+            throw new NoSuchMethodException("ContentFile.format()")
+          }
+          val isScoped = isFileScoped.invoke(null, file).asInstanceOf[Boolean]
+          val referenced = Option(referencedDataFile.invoke(file)).map(_.toString)
+          val offset = Option(contentOffset.invoke(file)).map(_.asInstanceOf[java.lang.Number].longValue())
+          val size = Option(contentSize.invoke(file)).map(_.asInstanceOf[java.lang.Number].longValue())
+          val fileSizeInBytes = fileSize.invoke(file).asInstanceOf[java.lang.Number].longValue()
+          val deleteRecordCount = recordCount.invoke(file).asInstanceOf[java.lang.Number].longValue()
+          if (fileContent != "POSITION_DELETES" || format != "PARQUET" || !isScoped) {
+            throw new IllegalArgumentException(
+              s"Previous delete $location is not a file-scoped Parquet position delete " +
+                s"(content=$fileContent, format=$format, fileScoped=$isScoped)")
+          }
+          if (referenced.exists(_ != dataFile) || offset.nonEmpty || size.nonEmpty) {
+            throw new IllegalArgumentException(
+              s"Previous delete $location has unsupported file reference or split metadata")
+          }
+          val metadata = Option(keyMetadata.invoke(file)).map { value =>
+            val source = value.asInstanceOf[ByteBuffer].duplicate()
+            val bytes = new Array[Byte](source.remaining())
+            source.get(bytes)
+            bytes
+          }
+          if (metadata.isDefined) {
+            throw new IllegalArgumentException(
+              s"Previous delete $location uses encryption metadata unsupported by native reads")
+          }
+          if (fileSizeInBytes <= 0 || deleteRecordCount < 0) {
+            throw new IllegalArgumentException(
+              s"Previous delete $location has invalid file size or record count " +
+                s"($fileSizeInBytes bytes, $deleteRecordCount records)")
+          }
+          PreviousPositionDeleteFile(
+            location = location,
+            fileSizeInBytes = fileSizeInBytes,
+            format = format,
+            partitionSpecId = specId.invoke(file).asInstanceOf[java.lang.Number].intValue(),
+            keyMetadata = metadata,
+            referencedDataFile = referenced,
+            contentOffset = offset,
+            contentSizeInBytes = size,
+            recordCount = deleteRecordCount,
+            originalFile = file)
+        }
+        PreviousPositionDeletesForDataFile(dataFile, descriptors)
+      }
+      val locations = groups.flatMap(_.deleteFiles.map(_.location))
+      if (locations.distinct.size != locations.size) {
+        throw new IllegalArgumentException(
+          "Spark rewritable delete map contains the same delete file under multiple data files")
+      }
+      groups
+    } catch {
+      case NonFatal(e) =>
+        Left(s"Could not resolve compatible rewritable position deletes: ${e.getMessage}")
+    }
 
   private final case class Handles(
       writeResultBuilder: Method,

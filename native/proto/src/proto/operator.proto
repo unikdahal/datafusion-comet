@@ -815,6 +815,30 @@ message IcebergDeltaPartitionSpec {
   repeated int32 target_partition_field_ids = 4;
 }
 
+message IcebergPreviousDeleteFileDescriptor {
+  string location = 1;
+  uint64 file_size_in_bytes = 2;
+  string format = 3;
+  int32 partition_spec_id = 4;
+  optional bytes key_metadata = 5;
+  optional string referenced_data_file = 6;
+  optional int64 content_offset = 7;
+  optional int64 content_size_in_bytes = 8;
+  int64 record_count = 9;
+}
+
+message IcebergPreviousDeletesForDataFile {
+  string data_file = 1;
+  repeated IcebergPreviousDeleteFileDescriptor delete_files = 2;
+}
+
+message IcebergPreviousDeletes {
+  repeated IcebergPreviousDeletesForDataFile groups = 1;
+  // Lossless Java serialization of Map[String, Seq[DeleteFile]]. Rust ignores this field; the
+  // executor wrapper uses it to put the exact original DeleteFile objects into DeltaTaskCommit.
+  bytes serialized_delete_files = 2;
+}
+
 message DeltaMetadataLayout {
   int32 file_path_index = 1;
   int32 row_position_index = 2;
@@ -847,6 +871,7 @@ message IcebergDeltaWrite {
   string delete_data_location = 10;
   IcebergDeltaCommand command = 11;
   int32 format_version = 12;
+  bytes previous_deletes_blob = 13;
 }
 
 message IcebergTaskManifest {
@@ -864,6 +889,10 @@ message IcebergDeltaTaskPayload {
   repeated IcebergTaskManifest manifests = 2;
   repeated string referenced_data_files = 3;
   repeated string rewritten_delete_file_locations = 4;
+  uint64 input_rows = 5;
+  uint64 data_rows_written = 6;
+  uint64 delete_rows_written = 7;
+  uint64 bytes_written = 8;
 }
 
 message Projection {
@@ -1036,6 +1065,18 @@ message MergeRows {
 
   // Schema of the emitted rows, matching `MergeRowsExec.output`.
   repeated spark.spark_expression.DataType output_types = 7;
+
+  // True when the caller requires every Keep instruction to retain its Spark action context.
+  // Spark 4.1 uses this information to build the semantic MergeSummary passed to BatchWrite.
+  bool semantic_metrics_required = 8;
+}
+
+enum MergeActionContext {
+  MERGE_ACTION_CONTEXT_UNSPECIFIED = 0;
+  MERGE_ACTION_COPY = 1;
+  MERGE_ACTION_DELETE = 2;
+  MERGE_ACTION_INSERT = 3;
+  MERGE_ACTION_UPDATE = 4;
 }
 
 message MergeInstruction {
@@ -1043,6 +1084,8 @@ message MergeInstruction {
   spark.spark_expression.Expr condition = 1;
   // 0 output rows = Discard, 1 = Keep, 2 = Split.
   repeated MergeOutputRow outputs = 2;
+  // Present only for a one-row Keep. Required when semantic_metrics_required is true.
+  optional MergeActionContext context = 3;
 }
 
 message MergeOutputRow {
