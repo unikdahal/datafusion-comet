@@ -29,7 +29,7 @@ import org.apache.spark.sql.comet.{CometIcebergWriteExec, CometNativeExec, Icebe
 
 import org.apache.comet.{CometConf, ConfigEntry}
 import org.apache.comet.CometSparkSessionExtensions.withFallbackReason
-import org.apache.comet.iceberg.IcebergReflection
+import org.apache.comet.iceberg.{IcebergReflection, PlainIcebergWrite, PositionDeltaWrite, ReplaceDataWrite}
 import org.apache.comet.objectstore.NativeConfig
 import org.apache.comet.serde.{CometOperatorSerde, Compatible, OperatorOuterClass, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.Operator
@@ -129,6 +129,11 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     }
 
   private def checkTriggers(op: IcebergWriteExec): Option[String] = {
+    op.dispatch match {
+      case PositionDeltaWrite(_) =>
+        return Some("native Iceberg delta task ABI is not enabled for this plan")
+      case _ =>
+    }
     val batchWrite = op.batchWrite
     if (!IcebergReflection.isIcebergBatchWrite(batchWrite)) {
       return Some(s"not an Iceberg SparkWrite: ${batchWrite.getClass.getName}")
@@ -491,7 +496,13 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     // tables are gated out: on format-version >= 3 Iceberg's writer reads row-lineage fields
     // from the metadata columns (`ExtractRowLineage`), which this projection discards. Revisit
     // together with `requireFormatVersionAtMostTwo`.
-    if (op.replaceDataDispatch.isEmpty) return Some(scan)
+    op.dispatch match {
+      case PlainIcebergWrite => return Some(scan)
+      case PositionDeltaWrite(_) =>
+        withFallbackReason(op, "native Iceberg delta task ABI is not enabled for this plan")
+        return None
+      case ReplaceDataWrite(_) =>
+    }
 
     val sparkWrite = IcebergReflection.getOuterSparkWrite(op.batchWrite).getOrElse {
       withFallbackReason(op, "Could not unwrap outer SparkWrite for ReplaceData projection")

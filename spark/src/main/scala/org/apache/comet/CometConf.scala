@@ -141,6 +141,17 @@ object CometConf extends ShimCometConf {
       .booleanConf
       .createWithDefault(false)
 
+  val COMET_ICEBERG_DELTA_WRITE_ENABLED: ConfigEntry[Boolean] =
+    conf("spark.comet.iceberg.delta.write.enabled")
+      .category(CATEGORY_TESTING)
+      .doc(
+        "Whether to use Comet's native Iceberg V2 position-delta task writer when the row-level " +
+          "command, delete granularity, table metadata, and runtime Iceberg compatibility checks " +
+          "all pass. Spark and Iceberg continue to own planning and driver-side RowDelta commit. " +
+          "This feature is experimental and off by default.")
+      .booleanConf
+      .createWithDefault(false)
+
   val COMET_ICEBERG_DATA_FILE_CONCURRENCY_LIMIT: ConfigEntry[Int] =
     conf("spark.comet.scan.icebergNative.dataFileConcurrencyLimit")
       .category(CATEGORY_SCAN)

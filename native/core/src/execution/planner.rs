@@ -37,6 +37,7 @@ use crate::execution::operators::AlignedArrowStreamReader;
 use crate::execution::operators::DynamicFilterJoinExec;
 use crate::execution::operators::IcebergScanExec;
 use crate::execution::operators::IcebergWriteExec;
+use crate::execution::operators::IcebergDeltaWriteExec;
 use crate::execution::operators::{PartitionedRankLimitExec, WindowFnKind};
 use crate::execution::{
     expressions::list_positions::ListPositionsExpr,
@@ -2002,6 +2003,24 @@ impl PhysicalPlanner {
                 let exec = Arc::new(IcebergWriteExec::try_new(
                     Arc::clone(&child.native_plan),
                     iceberg_write.clone(),
+                )?);
+                Ok((
+                    scans,
+                    shuffle_scans,
+                    Arc::new(SparkPlan::new(
+                        spark_plan.plan_id,
+                        exec,
+                        vec![Arc::clone(&child)],
+                    )),
+                ))
+            }
+            OpStruct::IcebergDeltaWrite(delta_write) => {
+                assert_eq!(children.len(), 1);
+                let (scans, shuffle_scans, child) =
+                    self.create_plan(&children[0], inputs, partition_count)?;
+                let exec = Arc::new(IcebergDeltaWriteExec::try_new(
+                    Arc::clone(&child.native_plan),
+                    delta_write.clone(),
                 )?);
                 Ok((
                     scans,

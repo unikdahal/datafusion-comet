@@ -28,7 +28,21 @@ import org.apache.spark.sql.execution.{SparkPlan, SQLExecution, UnaryExecNode}
 import org.apache.spark.sql.execution.datasources.v2.V2CommandExec
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
-import org.apache.comet.iceberg.{IcebergDriverMetricsShim, IcebergReflection}
+import org.apache.comet.iceberg.{IcebergDeltaReflection, IcebergDriverMetricsShim, IcebergReflection}
+
+sealed trait CreatedTaskFilesExtractor {
+  def locations(message: WriterCommitMessage): Seq[String]
+}
+
+case object OrdinaryIcebergCreatedFiles extends CreatedTaskFilesExtractor {
+  override def locations(message: WriterCommitMessage): Seq[String] =
+    IcebergReflection.taskCommitFileLocations(message)
+}
+
+case object PositionDeltaCreatedFiles extends CreatedTaskFilesExtractor {
+  override def locations(message: WriterCommitMessage): Seq[String] =
+    IcebergDeltaReflection.deltaTaskCommitCreatedFileLocations(message)
+}
 
 /**
  * Driver-side committer for Comet's split-operator Iceberg V2 write.
@@ -38,7 +52,8 @@ case class IcebergCommitExec(
     @transient batchWrite: BatchWrite,
     @transient write: Write,
     @transient refreshCache: IcebergCommitExec.RefreshCache,
-    child: SparkPlan)
+    child: SparkPlan,
+    createdFilesExtractor: CreatedTaskFilesExtractor = OrdinaryIcebergCreatedFiles)
     extends V2CommandExec
     with UnaryExecNode
     with Logging {
@@ -133,11 +148,19 @@ case class IcebergCommitExec(
     }
 
   private def deleteCompletedTaskFiles(completed: Array[WriterCommitMessage]): Unit = {
-    val locations = completed.toSeq.flatMap(m => IcebergReflection.taskCommitFileLocations(m))
+    val locations = completed.toSeq.flatMap(m => createdFilesExtractor.locations(m))
     if (locations.nonEmpty) {
-      val io = IcebergReflection
-        .getOuterSparkWrite(batchWrite)
-        .flatMap(IcebergReflection.getTableFromSparkWrite)
+      val table = createdFilesExtractor match {
+        case PositionDeltaCreatedFiles =>
+          IcebergReflection
+            .getOuterPositionDeltaWrite(batchWrite)
+            .flatMap(IcebergReflection.getTableFromPositionDeltaWrite)
+        case OrdinaryIcebergCreatedFiles =>
+          IcebergReflection
+            .getOuterSparkWrite(batchWrite)
+            .flatMap(IcebergReflection.getTableFromSparkWrite)
+      }
+      val io = table
         .flatMap(IcebergReflection.getTableIO)
       io match {
         case Some(fileIO) =>

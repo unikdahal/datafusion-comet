@@ -41,6 +41,8 @@ mod iceberg_write;
 pub use iceberg_write::IcebergWriteExec;
 mod merge_rows;
 pub use merge_rows::{MergeInstructionExec, MergeRowsExec};
+mod iceberg_delta_write;
+pub use iceberg_delta_write::IcebergDeltaWriteExec;
 mod parquet_writer;
 pub use parquet_writer::{ParquetCompression, ParquetWriterExec};
 mod csv_scan;
