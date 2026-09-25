@@ -1151,8 +1151,7 @@ class CometIcebergWriteActionSuite
 
       val snapshot = withNativeEnabled {
         captureWrite("native_mor_file_scope") {
-          spark.sql(
-            s"DELETE FROM $catalog.$ns.native_mor_file_scope WHERE id IN (2, 4)")
+          spark.sql(s"DELETE FROM $catalog.$ns.native_mor_file_scope WHERE id IN (2, 4)")
         }
       }
       val deltaWrites = snapshot.plans.flatMap { plan =>
