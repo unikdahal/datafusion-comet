@@ -1008,7 +1008,7 @@ class CometIcebergWriteActionSuite
 
       val deletes = spark
         .sql(
-          s"SELECT file_path, delete_file_path, pos " +
+          "SELECT file_path, delete_file_path, pos " +
             s"FROM $catalog.$ns.native_mor_partition_delete.position_deletes")
         .collect()
         .toSeq
@@ -1089,7 +1089,7 @@ class CometIcebergWriteActionSuite
       def positionDeletes(): Seq[Row] =
         spark
           .sql(
-            s"SELECT pos, file_path, delete_file_path " +
+            "SELECT pos, file_path, delete_file_path " +
               s"FROM $catalog.$ns.native_mor_file_rewrite.position_deletes ORDER BY pos")
           .collect()
           .toSeq
@@ -1163,7 +1163,7 @@ class CometIcebergWriteActionSuite
 
       val deletes = spark
         .sql(
-          s"SELECT file_path, delete_file_path, count(*) AS positions " +
+          "SELECT file_path, delete_file_path, count(*) AS positions " +
             s"FROM $catalog.$ns.native_mor_file_scope.position_deletes " +
             "GROUP BY file_path, delete_file_path")
         .collect()
