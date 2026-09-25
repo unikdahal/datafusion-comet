@@ -1745,8 +1745,9 @@ case class CometMergeRowsExec(
   override lazy val metrics: Map[String, SQLMetric] = {
     val mergeMetrics = IcebergSemanticMetricsShim.mergeMetrics(sparkContext)
     val semanticMetrics =
-      if (mergeMetrics.nonEmpty) mergeMetrics
-      else
+      if (mergeMetrics.nonEmpty) {
+        mergeMetrics
+      } else {
         Map(
           "numTargetRowsCopied" ->
             SQLMetrics.createMetric(sparkContext, "number of target rows copied"),
@@ -1768,6 +1769,7 @@ case class CometMergeRowsExec(
             SQLMetrics.createMetric(
               sparkContext,
               "number of not matched by source target rows deleted"))
+      }
     CometMetricNode.baselineMetrics(sparkContext) ++ Map(
       "output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches")) ++
       semanticMetrics

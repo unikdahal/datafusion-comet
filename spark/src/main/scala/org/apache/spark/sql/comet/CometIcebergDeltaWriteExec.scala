@@ -244,11 +244,13 @@ case class CometIcebergDeltaWriteExec(
 
   override def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val childRDD =
-      if (child.supportsColumnar) child.executeColumnar()
-      else
+      if (child.supportsColumnar) {
+        child.executeColumnar()
+      } else {
         throw new UnsupportedOperationException(
           "CometIcebergDeltaWriteExec requires a columnar Comet-native child; got " +
             child.getClass.getName)
+      }
     val partitions = childRDD.getNumPartitions
     val capturedNativeOp = nativeOp
     val capturedPreviousDeletes = previousDeletesBroadcast
