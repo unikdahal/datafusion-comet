@@ -25,9 +25,9 @@ import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.spark.sql.comet.{CometIcebergDeltaWriteExec, CometIcebergWriteExec, CometNativeExec, IcebergWriteExec}
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.util.Utils
+import org.apache.spark.sql.comet.{CometIcebergDeltaWriteExec, CometIcebergWriteExec, CometNativeExec, IcebergWriteExec}
+import org.apache.spark.sql.comet.util.{Utils => CometUtils}
 
 import com.google.protobuf.ByteString
 
@@ -991,7 +991,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
           group.dataFile -> group.deleteFiles.map(_.originalFile)
         }.toMap
         previousDeletesBuilder
-          .setSerializedDeleteFiles(ByteString.copyFrom(Utils.serialize(originals)))
+          .setSerializedDeleteFiles(ByteString.copyFrom(CometUtils.serialize(originals)))
           .build()
           .toByteString
       } else {

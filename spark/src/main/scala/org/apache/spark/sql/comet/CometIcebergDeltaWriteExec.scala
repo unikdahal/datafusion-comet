@@ -142,7 +142,7 @@ case class CometIcebergDeltaWriteExec(
       val cleanup = new CometIcebergWriteExec.WrittenFileCleanup(tableIO)
       Option(TaskContext.get()).foreach(_.addTaskFailureListener(cleanup))
       val previousDeleteFiles = capturedPreviousDeletes
-        .map(broadcast => decodePreviousDeleteFiles(broadcast.value))
+        .map(broadcast => IcebergDeltaWriteExec.decodePreviousDeleteFiles(broadcast.value))
         .getOrElse(Map.empty[String, AnyRef])
       val (payloadBytes, locations) = drainNativePayload(batches)
       cleanup.own(locations)

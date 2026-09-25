@@ -20,6 +20,7 @@
 package org.apache.comet.iceberg
 
 import org.apache.spark.sql.catalyst.ProjectingInternalRow
+import org.apache.spark.sql.comet.util.Utils
 import org.apache.spark.sql.types.StructType
 
 case class DeltaOperationCodes(
@@ -78,7 +79,7 @@ private[iceberg] object WriteDeltaDispatchInfo {
       if (ordinals.length != schema.length ||
         ordinals.exists(index => index < 0 || index >= childOutput.length) ||
         ordinals.zip(schema.fields).exists { case (index, field) =>
-          !org.apache.spark.sql.types.DataType.equalsIgnoreCompatibleNullability(
+          !Utils.equalsIgnoreCompatibleNullability(
             childOutput(index).dataType,
             field.dataType)
         }) {

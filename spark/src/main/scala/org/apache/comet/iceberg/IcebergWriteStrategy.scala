@@ -23,7 +23,6 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, ReplaceData}
 import org.apache.spark.sql.comet.{
   IcebergCommitExec,
-  IcebergDeltaWriterShim,
   IcebergWriteExec,
   PositionDeltaCreatedFiles
 }

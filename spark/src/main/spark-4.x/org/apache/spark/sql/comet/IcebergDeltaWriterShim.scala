@@ -17,15 +17,13 @@
  * under the License.
  */
 
-package org.apache.spark.sql.comet
+package org.apache.comet.iceberg
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.DeltaWriter
 
-import org.apache.comet.iceberg.{DeltaOperationCodes, WriteDeltaDispatchInfo}
-
 /** Spark 4.0 and 4.1 add REINSERT to the WriteDelta operation stream. */
-private[comet] object IcebergDeltaWriterShim {
+object IcebergDeltaWriterShim {
   val OperationCodes: DeltaOperationCodes =
     DeltaOperationCodes(delete = 1, update = 2, insert = 3, reinsert = Some(4))
 
@@ -34,7 +32,10 @@ private[comet] object IcebergDeltaWriterShim {
       operation: Int,
       row: InternalRow,
       info: WriteDeltaDispatchInfo): Unit = {
-    val metadata = info.metadataProjection.map(_.project(row)).orNull
+    val metadata: InternalRow = info.metadataProjection.map { projection =>
+      projection.project(row)
+      projection
+    }.orNull
     operation match {
       case code if code == info.operationCodes.delete =>
         info.rowIdProjection.project(row)

@@ -171,7 +171,7 @@ object IcebergDeltaReflection {
         throw new IllegalArgumentException(
           "Spark rewritable delete map contains the same delete file under multiple data files")
       }
-      groups
+      Right(groups)
     } catch {
       case NonFatal(e) =>
         Left(s"Could not resolve compatible rewritable position deletes: ${e.getMessage}")
@@ -351,10 +351,10 @@ object IcebergDeltaReflection {
     val h = handles()
     Seq(h.dataFiles, h.deleteFiles).flatMap { accessor =>
       accessor.invoke(message) match {
-        case files: Array[_] => files.toSeq.flatMap(IcebergReflection.extractFileLocation)
+        case files: Array[_] => files.toSeq.flatMap(file => IcebergReflection.extractFileLocation(file))
         case files: java.lang.Iterable[_] =>
           import scala.jdk.CollectionConverters._
-          files.asScala.toSeq.flatMap(IcebergReflection.extractFileLocation)
+          files.asScala.toSeq.flatMap(file => IcebergReflection.extractFileLocation(file))
         case _ => Nil
       }
     }
