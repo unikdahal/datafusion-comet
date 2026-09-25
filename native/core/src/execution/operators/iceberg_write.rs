@@ -114,6 +114,11 @@ impl TrackingLocationGenerator {
         Self { inner, locations }
     }
 
+    #[cfg(test)]
+    pub(super) fn locations(&self) -> Vec<String> {
+        read_tracked_locations(&self.locations)
+    }
+
     pub(super) fn shared_locations(&self) -> Arc<Mutex<Vec<String>>> {
         Arc::clone(&self.locations)
     }
