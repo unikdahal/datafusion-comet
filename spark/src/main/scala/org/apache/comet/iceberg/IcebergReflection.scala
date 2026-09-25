@@ -214,7 +214,8 @@ object IcebergReflection extends Logging {
 
   /** True only for the BatchWrite enclosed by Iceberg's SparkPositionDeltaWrite. */
   def isIcebergPositionDeltaBatchWrite(batchWrite: Any): Boolean =
-    batchWrite != null && batchWrite.getClass.getName.startsWith(positionDeltaBatchWriteClassPrefix)
+    batchWrite != null && batchWrite.getClass.getName.startsWith(
+      positionDeltaBatchWriteClassPrefix)
 
   def getOuterPositionDeltaWrite(batchWrite: Any): Option[Any] =
     if (!isIcebergPositionDeltaBatchWrite(batchWrite)) None
@@ -268,7 +269,8 @@ object IcebergReflection extends Logging {
       Some(fields.asScala.toSeq.map(fieldId))
     } catch {
       case e: Exception =>
-        logError(s"Iceberg reflection failure: Partitioning.partitionType(table): ${e.getMessage}")
+        logError(
+          s"Iceberg reflection failure: Partitioning.partitionType(table): ${e.getMessage}")
         None
     }
 
@@ -303,16 +305,18 @@ object IcebergReflection extends Logging {
     getPositionDeltaWriteContextValue(write, "dataSchema")
 
   /**
-   * Extract the version-specific logical WriteDelta contract. Spark 3.4's Iceberg extension
-   * node and Spark's stock WriteDelta both expose these case-class members, though their table
-   * member is named differently (`originalTable` vs `table`).
+   * Extract the version-specific logical WriteDelta contract. Spark 3.4's Iceberg extension node
+   * and Spark's stock WriteDelta both expose these case-class members, though their table member
+   * is named differently (`originalTable` vs `table`).
    */
-  def extractDeltaLogicalFields(
-      plan: org.apache.spark.sql.catalyst.plans.logical.LogicalPlan): Option[DeltaLogicalFields] = {
+  def extractDeltaLogicalFields(plan: org.apache.spark.sql.catalyst.plans.logical.LogicalPlan)
+      : Option[DeltaLogicalFields] = {
     def member(name: String): Option[AnyRef] =
-      findMethodInHierarchy(plan.getClass, name).flatMap { method =>
-        Option(method.invoke(plan).asInstanceOf[AnyRef])
-      }.orElse(reflectField(plan, name))
+      findMethodInHierarchy(plan.getClass, name)
+        .flatMap { method =>
+          Option(method.invoke(plan).asInstanceOf[AnyRef])
+        }
+        .orElse(reflectField(plan, name))
 
     def optionalWrite(value: Option[AnyRef]): Option[Write] =
       value.flatMap {

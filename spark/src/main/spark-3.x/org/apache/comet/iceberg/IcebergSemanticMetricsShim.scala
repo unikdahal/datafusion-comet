@@ -24,7 +24,8 @@ import org.apache.spark.sql.execution.metric.SQLMetric
 
 /** Retry-aware row-level metrics are added in Spark 4.2. */
 object IcebergSemanticMetricsShim {
-  def deltaMetrics(sc: SparkContext, command: Option[DeltaCommand]): Map[String, SQLMetric] = Map.empty
+  def deltaMetrics(sc: SparkContext, command: Option[DeltaCommand]): Map[String, SQLMetric] =
+    Map.empty
   def mergeMetrics(sc: SparkContext): Map[String, SQLMetric] = Map.empty
   def value(metric: SQLMetric): Long = metric.value
 }

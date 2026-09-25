@@ -21,17 +21,18 @@ package org.apache.comet.shims
 
 import org.apache.spark.sql.execution.SparkPlan
 
-import org.apache.comet.serde.CometOperatorSerde
 import org.apache.comet.iceberg.Iceberg34MergeRowsReflection
+import org.apache.comet.serde.CometOperatorSerde
 import org.apache.comet.serde.operator.CometIceberg34MergeRows
 
 /**
- * Spark 3.4 has no core MergeRowsExec. Register Iceberg 1.8's extension implementation only
- * when that optional runtime class is present.
+ * Spark 3.4 has no core MergeRowsExec. Register Iceberg 1.8's extension implementation only when
+ * that optional runtime class is present.
  */
 object ShimCometMergeRows {
   val nativeExecs: Map[Class[_ <: SparkPlan], CometOperatorSerde[_]] =
     Iceberg34MergeRowsReflection.mergeRowsExecClass
-      .map(clazz => Map[Class[_ <: SparkPlan], CometOperatorSerde[_]](clazz -> CometIceberg34MergeRows))
+      .map(clazz =>
+        Map[Class[_ <: SparkPlan], CometOperatorSerde[_]](clazz -> CometIceberg34MergeRows))
       .getOrElse(Map.empty)
 }

@@ -31,15 +31,7 @@ import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.types.{BinaryType, StructField, StructType}
 import org.apache.spark.util.Utils
 
-import org.apache.comet.iceberg.{
-  IcebergDeltaWriterShim,
-  IcebergSemanticMetricsShim,
-  IcebergWriteDispatch,
-  PlainIcebergWrite,
-  PositionDeltaWrite,
-  ReplaceDataDispatchInfo,
-  ReplaceDataWrite
-}
+import org.apache.comet.iceberg.{IcebergDeltaWriterShim, IcebergSemanticMetricsShim, IcebergWriteDispatch, PlainIcebergWrite, PositionDeltaWrite, ReplaceDataDispatchInfo, ReplaceDataWrite}
 
 /**
  * Executor-side file writer for Comet's split-operator Iceberg V2 write.

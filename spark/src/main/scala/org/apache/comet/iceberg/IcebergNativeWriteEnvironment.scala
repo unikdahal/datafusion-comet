@@ -64,7 +64,8 @@ private[comet] object IcebergNativeWriteEnvironment {
       targetDataFileSize: Long,
       useFanoutWriter: Boolean,
       sortOrderId: Int,
-      resolvedWriteProperties: Map[String, String]): Either[String, IcebergNativeWriteEnvironment] =
+      resolvedWriteProperties: Map[String, String])
+      : Either[String, IcebergNativeWriteEnvironment] =
     try {
       val tableProperties = IcebergReflection
         .getTableProperties(table)

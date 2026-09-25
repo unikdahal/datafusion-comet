@@ -48,7 +48,9 @@ object IcebergSemanticMetricsShim {
     }
 
   def mergeMetrics(sc: SparkContext): Map[String, SQLMetric] =
-    mergeMetricNames.map { case (key, name) => key -> SQLLastAttemptMetrics.createMetric(sc, name) }.toMap
+    mergeMetricNames.map { case (key, name) =>
+      key -> SQLLastAttemptMetrics.createMetric(sc, name)
+    }.toMap
 
   def value(metric: SQLMetric): Long = metric match {
     case lastAttempt: SQLLastAttemptMetric =>

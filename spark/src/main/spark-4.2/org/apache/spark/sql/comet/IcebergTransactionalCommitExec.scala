@@ -44,7 +44,8 @@ private[org] final class IcebergTransactionalCommitExec private (
   override protected def run(): Seq[InternalRow] =
     runWithHooks(() => transaction.foreach(TransactionUtils.commit))
 
-  override protected def withNewChildInternal(newChild: SparkPlan): IcebergTransactionalCommitExec =
+  override protected def withNewChildInternal(
+      newChild: SparkPlan): IcebergTransactionalCommitExec =
     copyWith(child = newChild)
 
   private def copyWith(

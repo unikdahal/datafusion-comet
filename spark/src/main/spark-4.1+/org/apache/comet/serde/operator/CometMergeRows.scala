@@ -31,12 +31,7 @@ import org.apache.comet.CometConf
 import org.apache.comet.CometSparkSessionExtensions.withFallbackReason
 import org.apache.comet.ConfigEntry
 import org.apache.comet.serde.{CometOperatorSerde, Compatible, OperatorOuterClass, SupportLevel, Unsupported}
-import org.apache.comet.serde.OperatorOuterClass.{
-  MergeActionContext,
-  MergeInstruction,
-  MergeOutputRow,
-  Operator,
-}
+import org.apache.comet.serde.OperatorOuterClass.{MergeActionContext, MergeInstruction, MergeOutputRow, Operator}
 import org.apache.comet.serde.QueryPlanSerde.{exprToProto, serializeDataType}
 
 /**
@@ -224,18 +219,18 @@ object CometMergeRows extends CometOperatorSerde[MergeRowsExec] {
     }
   }
 
-  private def mergeActionContext(
-      instruction: MergeRows.Instruction): Option[MergeActionContext] = instruction match {
-    case MergeRows.Keep(MergeRows.Copy, _, _) =>
-      Some(MergeActionContext.MERGE_ACTION_COPY)
-    case MergeRows.Keep(MergeRows.Delete, _, _) =>
-      Some(MergeActionContext.MERGE_ACTION_DELETE)
-    case MergeRows.Keep(MergeRows.Insert, _, _) =>
-      Some(MergeActionContext.MERGE_ACTION_INSERT)
-    case MergeRows.Keep(MergeRows.Update, _, _) =>
-      Some(MergeActionContext.MERGE_ACTION_UPDATE)
-    case _: MergeRows.Discard | _: MergeRows.Split => None
-  }
+  private def mergeActionContext(instruction: MergeRows.Instruction): Option[MergeActionContext] =
+    instruction match {
+      case MergeRows.Keep(MergeRows.Copy, _, _) =>
+        Some(MergeActionContext.MERGE_ACTION_COPY)
+      case MergeRows.Keep(MergeRows.Delete, _, _) =>
+        Some(MergeActionContext.MERGE_ACTION_DELETE)
+      case MergeRows.Keep(MergeRows.Insert, _, _) =>
+        Some(MergeActionContext.MERGE_ACTION_INSERT)
+      case MergeRows.Keep(MergeRows.Update, _, _) =>
+        Some(MergeActionContext.MERGE_ACTION_UPDATE)
+      case _: MergeRows.Discard | _: MergeRows.Split => None
+    }
 
   /** Spark-compatible type comparison that permits only safe nested-nullability widening. */
   private def dataTypeCompatible(actual: DataType, expected: DataType): Boolean =

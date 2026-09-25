@@ -23,8 +23,8 @@ import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.{CometListenerBusUtils, SparkConf}
 import org.apache.spark.sql.CometTestBase
-import org.apache.spark.sql.connector.catalog.InMemoryRowLevelOperationTableCatalog
 import org.apache.spark.sql.comet.CometMergeRowsExec
+import org.apache.spark.sql.connector.catalog.InMemoryRowLevelOperationTableCatalog
 import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
@@ -82,10 +82,11 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       CometListenerBusUtils.waitUntilEmpty(spark.sparkContext)
 
       val executedPlans = captured.map(_.executedPlan)
-      val sparkMergeRows = executedPlans.exists(plan =>
-        find(plan) { case node: MergeRowsExec => node }.nonEmpty)
-      val cometMergeRows = executedPlans.flatMap(plan =>
-        find(plan) { case node: CometMergeRowsExec => node }).headOption
+      val sparkMergeRows =
+        executedPlans.exists(plan => find(plan) { case node: MergeRowsExec => node }.nonEmpty)
+      val cometMergeRows = executedPlans
+        .flatMap(plan => find(plan) { case node: CometMergeRowsExec => node })
+        .headOption
 
       assert(
         cometMergeRows.nonEmpty,

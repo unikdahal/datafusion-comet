@@ -66,7 +66,9 @@ final case class PreviousPositionDeletesForDataFile(
     dataFile: String,
     deleteFiles: Seq[PreviousPositionDeleteFile])
 
-/** Reflection seam for Iceberg's package-private DeltaTaskCommit constructor and manifest APIs. */
+/**
+ * Reflection seam for Iceberg's package-private DeltaTaskCommit constructor and manifest APIs.
+ */
 object IcebergDeltaReflection {
 
   /**
@@ -83,7 +85,8 @@ object IcebergDeltaReflection {
       val method = IcebergReflection
         .findMethodInHierarchy(scan.getClass, "rewritableDeletes", java.lang.Boolean.TYPE)
         .getOrElse(return Left("SparkBatchQueryScan.rewritableDeletes(boolean) is unavailable"))
-      val rewritable = method.invoke(scan, java.lang.Boolean.FALSE)
+      val rewritable = method
+        .invoke(scan, java.lang.Boolean.FALSE)
         .asInstanceOf[java.util.Map[String, AnyRef]]
       if (rewritable == null || rewritable.isEmpty) return Right(Seq.empty)
 
@@ -226,7 +229,8 @@ object IcebergDeltaReflection {
       method
     }
     def method(clazz: Class[_], name: String, count: Int): Method =
-      clazz.getMethods.find(m => m.getName == name && m.getParameterCount == count)
+      clazz.getMethods
+        .find(m => m.getName == name && m.getParameterCount == count)
         .map(accessible)
         .getOrElse(throw new NoSuchMethodException(s"${clazz.getName}.$name/$count"))
     def iterableMethod(clazz: Class[_], name: String): Method =
@@ -278,11 +282,9 @@ object IcebergDeltaReflection {
     val writeResultBuilder = method(writeResultClass, "builder", 0)
     val writeResultBuilderValue = writeResultBuilder.invoke(null)
     val actualBuilderClass = writeResultBuilderValue.getClass
-    val writeResultBuilderMethods = Seq(
-      "addDataFiles",
-      "addDeleteFiles",
-      "addReferencedDataFiles",
-      "addRewrittenDeleteFiles").map(iterableMethod(actualBuilderClass, _))
+    val writeResultBuilderMethods =
+      Seq("addDataFiles", "addDeleteFiles", "addReferencedDataFiles", "addRewrittenDeleteFiles")
+        .map(iterableMethod(actualBuilderClass, _))
     val iteratorMethod = readerClass.getMethod("iterator")
     val closeMethod = readerClass.getMethod("close")
     Handles(
@@ -302,13 +304,10 @@ object IcebergDeltaReflection {
       referencedDataFiles = findMethodInHierarchy(taskCommitClass, "referencedDataFiles")
         .getOrElse(throw new NoSuchMethodException("DeltaTaskCommit.referencedDataFiles")),
       inMemoryFileIoConstructor = declaredCtor(inMemoryFileIo),
-      addInMemoryFile = inMemoryFileIo.getMethod(
-        "addFile",
-        classOf[String],
-        classOf[Array[Byte]]),
-      inMemoryInputFileConstructor = inputFile.getConstructor(
-        classOf[String],
-        classOf[Array[Byte]]),
+      addInMemoryFile =
+        inMemoryFileIo.getMethod("addFile", classOf[String], classOf[Array[Byte]]),
+      inMemoryInputFileConstructor =
+        inputFile.getConstructor(classOf[String], classOf[Array[Byte]]),
       genericManifestFileConstructor = genericManifestCtor,
       manifestContentField = contentField,
       manifestSnapshotIdField = snapshotField,
@@ -350,7 +349,9 @@ object IcebergDeltaReflection {
   }
 
   def buildDeltaTaskCommit(writeResult: AnyRef): WriterCommitMessage =
-    handles().deltaTaskCommitConstructor.newInstance(writeResult).asInstanceOf[WriterCommitMessage]
+    handles().deltaTaskCommitConstructor
+      .newInstance(writeResult)
+      .asInstanceOf[WriterCommitMessage]
 
   def deltaTaskCommitCreatedFileLocations(message: WriterCommitMessage): Seq[String] = {
     if (message == null ||

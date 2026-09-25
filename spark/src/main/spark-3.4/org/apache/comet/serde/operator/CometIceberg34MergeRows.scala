@@ -103,7 +103,9 @@ object CometIceberg34MergeRows extends CometOperatorSerde[SparkPlan] {
       }
     }
 
-    val matchedProto = matched.map { case (condition, outputs) => instruction(condition, outputs) }
+    val matchedProto = matched.map { case (condition, outputs) =>
+      instruction(condition, outputs)
+    }
     val notMatchedProto = fields.notMatchedConditions.zip(fields.notMatchedOutputs).map {
       case (condition, output) => instruction(condition, Seq(output))
     }
@@ -136,9 +138,9 @@ object CometIceberg34MergeRows extends CometOperatorSerde[SparkPlan] {
   }
 
   override def createExec(nativeOp: Operator, op: SparkPlan): CometNativeExec = {
-    val fields = Iceberg34MergeRowsReflection.extract(op).fold(
-      reason => throw new IllegalStateException(reason),
-      identity)
+    val fields = Iceberg34MergeRowsReflection
+      .extract(op)
+      .fold(reason => throw new IllegalStateException(reason), identity)
     val matchedExpressions =
       fields.matchedConditions ++ fields.matchedOutputs.flatten.flatten ++
         (if (fields.emitNotMatchedTargetRows) fields.targetOutput else Seq.empty)
@@ -188,8 +190,8 @@ object CometIceberg34MergeRows extends CometOperatorSerde[SparkPlan] {
     "Native Iceberg 1.8 MERGE preserves row values but may differ in physical output ordering"
 
   private def rowIdOrdinal(fields: Iceberg34MergeRowsFields): Option[Int] = {
-    val ordinal = fields.child.output.indexWhere(
-      attribute => attribute.name == "__row_id" && attribute.dataType == LongType)
+    val ordinal = fields.child.output.indexWhere(attribute =>
+      attribute.name == "__row_id" && attribute.dataType == LongType)
     if (ordinal >= 0) Some(ordinal) else None
   }
 }

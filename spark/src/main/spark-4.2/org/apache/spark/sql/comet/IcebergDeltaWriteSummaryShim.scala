@@ -34,18 +34,20 @@ private[comet] object IcebergDeltaWriteSummaryShim extends AdaptiveSparkPlanHelp
       messages: Array[WriterCommitMessage],
       query: SparkPlan,
       command: Option[DeltaCommand]): Boolean = command match {
-    case Some(DeltaUpdate) => deltaWriterMetrics(query).exists { metrics =>
-      batchWrite.commit(
-        messages,
-        UpdateSummaryImpl(value(metrics, "numUpdatedRows"), value(metrics, "numCopiedRows")))
-      true
-    }
-    case Some(DeltaDelete) => deltaWriterMetrics(query).exists { metrics =>
-      batchWrite.commit(
-        messages,
-        DeleteSummaryImpl(value(metrics, "numDeletedRows"), value(metrics, "numCopiedRows")))
-      true
-    }
+    case Some(DeltaUpdate) =>
+      deltaWriterMetrics(query).exists { metrics =>
+        batchWrite.commit(
+          messages,
+          UpdateSummaryImpl(value(metrics, "numUpdatedRows"), value(metrics, "numCopiedRows")))
+        true
+      }
+    case Some(DeltaDelete) =>
+      deltaWriterMetrics(query).exists { metrics =>
+        batchWrite.commit(
+          messages,
+          DeleteSummaryImpl(value(metrics, "numDeletedRows"), value(metrics, "numCopiedRows")))
+        true
+      }
     case Some(DeltaMerge) =>
       val mergeMetrics = collectFirst(query) {
         case merge: MergeRowsExec => merge.metrics

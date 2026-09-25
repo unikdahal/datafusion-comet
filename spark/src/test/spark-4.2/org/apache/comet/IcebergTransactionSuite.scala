@@ -29,7 +29,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.comet.{IcebergCommitExec, IcebergTransactionalCommitExec, OrdinaryIcebergCreatedFiles}
 import org.apache.spark.sql.connector.catalog.transactions.Transaction
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
-import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, PhysicalWriteInfo, WriterCommitMessage, Write}
+import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, PhysicalWriteInfo, Write, WriterCommitMessage}
 import org.apache.spark.sql.execution.LeafExecNode
 import org.apache.spark.sql.execution.datasources.v2.TransactionalExec
 
@@ -70,9 +70,8 @@ class IcebergTransactionSuite extends CometTestBase {
     val write = recordingWrite(batchWrite, events)
     val transactional = IcebergTransactionalCommitExec(commitExec(batchWrite, write, events))
       .asInstanceOf[TransactionalExec]
-      .withTransaction(Some(recordingTransaction(
-        events,
-        Some(new RuntimeException("transaction commit failed")))))
+      .withTransaction(Some(
+        recordingTransaction(events, Some(new RuntimeException("transaction commit failed")))))
 
     intercept[RuntimeException](transactional.executeCollect())
     assert(events.toSeq == Seq("batchCommit", "driverMetrics", "transactionCommit"))
@@ -106,14 +105,15 @@ class IcebergTransactionSuite extends CometTestBase {
     }
   }
 
-  private def recordingWrite(batchWrite: BatchWrite, events: ArrayBuffer[String]): Write = new Write {
-    override def toBatch: BatchWrite = batchWrite
-    override def supportedCustomMetrics(): Array[CustomMetric] = Array.empty
-    override def reportDriverMetrics(): Array[CustomTaskMetric] = {
-      events += "driverMetrics"
-      Array.empty
+  private def recordingWrite(batchWrite: BatchWrite, events: ArrayBuffer[String]): Write =
+    new Write {
+      override def toBatch: BatchWrite = batchWrite
+      override def supportedCustomMetrics(): Array[CustomMetric] = Array.empty
+      override def reportDriverMetrics(): Array[CustomTaskMetric] = {
+        events += "driverMetrics"
+        Array.empty
+      }
     }
-  }
 
   private def recordingTransaction(
       events: ArrayBuffer[String],
@@ -143,7 +143,8 @@ class IcebergTransactionSuite extends CometTestBase {
   }
 }
 
-private case class EmptyWriteLeaf(rdd: org.apache.spark.rdd.RDD[InternalRow]) extends LeafExecNode {
+private case class EmptyWriteLeaf(rdd: org.apache.spark.rdd.RDD[InternalRow])
+    extends LeafExecNode {
   override def output: Seq[org.apache.spark.sql.catalyst.expressions.Attribute] = Nil
   override protected def doExecute(): org.apache.spark.rdd.RDD[InternalRow] = rdd
 }

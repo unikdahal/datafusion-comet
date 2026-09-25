@@ -20,8 +20,8 @@
 package org.apache.comet.iceberg
 
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.comet.IcebergCommitExec
+import org.apache.spark.sql.execution.SparkPlan
 
 /** Version-specific planning hooks for transactional Iceberg commit nodes. */
 private[iceberg] object IcebergCommitPlanShim {
@@ -32,4 +32,3 @@ private[iceberg] object IcebergCommitPlanShim {
 private[iceberg] object IcebergInsertOnlyMergeShim extends IcebergInsertOnlyMergeShimApi {
   override def extract(plan: LogicalPlan): Option[InsertOnlyMergeFields] = None
 }
-

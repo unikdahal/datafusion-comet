@@ -23,11 +23,7 @@ import org.apache.spark.sql.catalyst.ProjectingInternalRow
 import org.apache.spark.sql.comet.util.Utils
 import org.apache.spark.sql.types.StructType
 
-case class DeltaOperationCodes(
-    delete: Int,
-    update: Int,
-    insert: Int,
-    reinsert: Option[Int])
+case class DeltaOperationCodes(delete: Int, update: Int, insert: Int, reinsert: Option[Int])
 
 case class DeltaMetadataLayout(
     filePathIndex: Int,
@@ -72,16 +68,13 @@ private[iceberg] object WriteDeltaDispatchInfo {
     val rowProjection = projections.rowProjection
     val metadataProjection = projections.metadataProjection
 
-    def descriptor(
-        projection: ProjectingInternalRow): Option[(IndexedSeq[Int], StructType)] = {
+    def descriptor(projection: ProjectingInternalRow): Option[(IndexedSeq[Int], StructType)] = {
       val ordinals = projection.colOrdinals.toIndexedSeq
       val schema = projection.schema
       if (ordinals.length != schema.length ||
         ordinals.exists(index => index < 0 || index >= childOutput.length) ||
         ordinals.zip(schema.fields).exists { case (index, field) =>
-          !Utils.equalsIgnoreCompatibleNullability(
-            childOutput(index).dataType,
-            field.dataType)
+          !Utils.equalsIgnoreCompatibleNullability(childOutput(index).dataType, field.dataType)
         }) {
         None
       } else {
@@ -127,11 +120,8 @@ private[iceberg] object WriteDeltaDispatchInfo {
       rowSchema = rowDescriptor.map(_._2),
       rowIdSchema = rowIdDescriptor._2,
       metadataSchema = metadataDescriptor.map(_._2),
-      metadataLayout = DeltaMetadataLayout(
-        filePathIndex,
-        rowPositionIndex,
-        specIdIndex,
-        partitionIndex),
+      metadataLayout =
+        DeltaMetadataLayout(filePathIndex, rowPositionIndex, specIdIndex, partitionIndex),
       operationCodes = operationCodes,
       rowProjection = rowProjection,
       rowIdProjection = rowIdProjection,

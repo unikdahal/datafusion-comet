@@ -21,7 +21,9 @@ package org.apache.comet.iceberg
 
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 
-/** Spark 3.4 has a stock WriteDelta for DELETE and Iceberg's WriteIcebergDelta for UPDATE/MERGE. */
+/**
+ * Spark 3.4 has a stock WriteDelta for DELETE and Iceberg's WriteIcebergDelta for UPDATE/MERGE.
+ */
 private[iceberg] object IcebergDeltaLogicalShim extends IcebergDeltaLogicalShimApi {
   private val supportedPlans = Set(
     "org.apache.spark.sql.catalyst.plans.logical.WriteDelta",

@@ -21,11 +21,7 @@ package org.apache.comet.iceberg
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, ReplaceData}
-import org.apache.spark.sql.comet.{
-  IcebergCommitExec,
-  IcebergWriteExec,
-  PositionDeltaCreatedFiles
-}
+import org.apache.spark.sql.comet.{IcebergCommitExec, IcebergWriteExec, PositionDeltaCreatedFiles}
 import org.apache.spark.sql.connector.write.Write
 import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
@@ -49,7 +45,8 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
 
     plan match {
       case plan if IcebergInsertOnlyMergeShim.extract(plan).isDefined =>
-        IcebergInsertOnlyMergeShim.extract(plan)
+        IcebergInsertOnlyMergeShim
+          .extract(plan)
           .flatMap(fields =>
             matchedSparkWrite(
               fields.table,

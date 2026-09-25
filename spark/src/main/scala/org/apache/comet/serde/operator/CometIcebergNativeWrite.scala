@@ -174,9 +174,12 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     if (!IcebergReflection.isIcebergPositionDeltaBatchWrite(batchWrite)) {
       return Some(s"not an Iceberg PositionDeltaBatchWrite: ${batchWrite.getClass.getName}")
     }
-    val positionDeltaWrite = IcebergReflection.getOuterPositionDeltaWrite(batchWrite).getOrElse {
-      return Some("could not unwrap SparkPositionDeltaWrite")
-    }.asInstanceOf[AnyRef]
+    val positionDeltaWrite = IcebergReflection
+      .getOuterPositionDeltaWrite(batchWrite)
+      .getOrElse {
+        return Some("could not unwrap SparkPositionDeltaWrite")
+      }
+      .asInstanceOf[AnyRef]
     val table = IcebergReflection.getTableFromPositionDeltaWrite(positionDeltaWrite).getOrElse {
       return Some("SparkPositionDeltaWrite.table is null")
     }
@@ -448,7 +451,8 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   // instead of a mid-write task failure.
   private val requireExecutorReflectionResolvable: TriggerRule = ctx =>
     if (ctx.isDelta) {
-      IcebergDeltaReflection.executorReflectionUnresolved()
+      IcebergDeltaReflection
+        .executorReflectionUnresolved()
         .orElse(IcebergReflection.executorReflectionUnresolved)
     } else {
       IcebergReflection.executorReflectionUnresolved
@@ -696,27 +700,26 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
           specs,
           previousDeletesBroadcast)
       case _ =>
-    val sparkWrite = IcebergReflection
-      .getOuterSparkWrite(op.batchWrite)
-      .getOrElse(
-        throw new IllegalStateException(
-          "Native Iceberg write conversion: could not unwrap outer SparkWrite from BatchWrite"))
-    val table = IcebergReflection
-      .getTableFromSparkWrite(sparkWrite)
-      .getOrElse(
-        throw new IllegalStateException(
-          "Native Iceberg write conversion: SparkWrite.table reflection failed"))
-    val outputSpecId = IcebergReflection
-      .getOutputSpecIdFromSparkWrite(sparkWrite)
-      .getOrElse(
-        throw new IllegalStateException(
-          "Native Iceberg write conversion: SparkWrite.outputSpecId reflection failed"))
-    CometIcebergWriteExec(
-      nativeOp,
-      op.child,
-      op.batchWrite,
-      table.asInstanceOf[AnyRef],
-      outputSpecId)
+        val sparkWrite = IcebergReflection
+          .getOuterSparkWrite(op.batchWrite)
+          .getOrElse(throw new IllegalStateException(
+            "Native Iceberg write conversion: could not unwrap outer SparkWrite from BatchWrite"))
+        val table = IcebergReflection
+          .getTableFromSparkWrite(sparkWrite)
+          .getOrElse(
+            throw new IllegalStateException(
+              "Native Iceberg write conversion: SparkWrite.table reflection failed"))
+        val outputSpecId = IcebergReflection
+          .getOutputSpecIdFromSparkWrite(sparkWrite)
+          .getOrElse(
+            throw new IllegalStateException(
+              "Native Iceberg write conversion: SparkWrite.outputSpecId reflection failed"))
+        CometIcebergWriteExec(
+          nativeOp,
+          op.child,
+          op.batchWrite,
+          table.asInstanceOf[AnyRef],
+          outputSpecId)
     }
   }
 
@@ -805,10 +808,13 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       dispatch: org.apache.comet.iceberg.WriteDeltaDispatchInfo)
       : Option[OperatorOuterClass.IcebergDeltaWrite] = {
     val batchWrite = op.batchWrite
-    val positionDeltaWrite = IcebergReflection.getOuterPositionDeltaWrite(batchWrite).getOrElse {
-      withFallbackReason(op, "Could not unwrap SparkPositionDeltaWrite")
-      return None
-    }.asInstanceOf[AnyRef]
+    val positionDeltaWrite = IcebergReflection
+      .getOuterPositionDeltaWrite(batchWrite)
+      .getOrElse {
+        withFallbackReason(op, "Could not unwrap SparkPositionDeltaWrite")
+        return None
+      }
+      .asInstanceOf[AnyRef]
     val table = IcebergReflection.getTableFromPositionDeltaWrite(positionDeltaWrite).getOrElse {
       withFallbackReason(op, "Could not extract Table from SparkPositionDeltaWrite")
       return None

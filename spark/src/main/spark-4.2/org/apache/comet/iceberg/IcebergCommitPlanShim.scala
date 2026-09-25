@@ -20,9 +20,9 @@
 package org.apache.comet.iceberg
 
 import org.apache.spark.sql.catalyst.plans.logical.{InsertOnlyMerge, LogicalPlan}
+import org.apache.spark.sql.comet.{IcebergCommitExec, IcebergTransactionalCommitExec}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
-import org.apache.spark.sql.comet.{IcebergCommitExec, IcebergTransactionalCommitExec}
 
 /** Spark 4.2 injects transactions only into physical TransactionalExec nodes. */
 private[iceberg] object IcebergCommitPlanShim {

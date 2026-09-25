@@ -26,8 +26,9 @@ import org.apache.comet.serde.CometOperatorSerde
 import org.apache.comet.serde.operator.CometMergeRows
 
 /**
- * Spark 4.1+ derives row-level write summaries from semantic action counters. Comet preserves those
- * counters on its native MergeRows wrapper and supplies the same summary-aware V2 commit contract.
+ * Spark 4.1+ derives row-level write summaries from semantic action counters. Comet preserves
+ * those counters on its native MergeRows wrapper and supplies the same summary-aware V2 commit
+ * contract.
  */
 object ShimCometMergeRows {
   val nativeExecs: Map[Class[_ <: SparkPlan], CometOperatorSerde[_]] =

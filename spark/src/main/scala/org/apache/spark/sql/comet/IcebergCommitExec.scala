@@ -79,12 +79,14 @@ case class IcebergCommitExec(
    * Runs the Iceberg job and batch commit, reports write metrics, commits an attached catalog
    * transaction, and refreshes cache in Spark 4.2's required order.
    */
-  private[comet] final def runWithHooks(commitAttachedTransaction: () => Unit): Seq[InternalRow] = {
-    val result = try {
-      collectAndCommit()
-    } finally {
-      postDriverMetrics()
-    }
+  private[comet] final def runWithHooks(
+      commitAttachedTransaction: () => Unit): Seq[InternalRow] = {
+    val result =
+      try {
+        collectAndCommit()
+      } finally {
+        postDriverMetrics()
+      }
     commitAttachedTransaction()
     refreshCache()
     result

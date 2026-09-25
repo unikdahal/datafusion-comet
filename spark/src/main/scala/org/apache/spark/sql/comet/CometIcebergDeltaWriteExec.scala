@@ -40,14 +40,8 @@ import org.apache.spark.util.Utils
 import com.google.protobuf.{ByteString, CodedOutputStream}
 
 import org.apache.comet.CometExecIterator
+import org.apache.comet.iceberg.{DataManifestContent, DeleteManifestContent, IcebergDeltaReflection, IcebergReflection, TransportManifest}
 import org.apache.comet.iceberg.{DeltaDelete, DeltaMerge, DeltaUpdate, IcebergSemanticMetricsShim}
-import org.apache.comet.iceberg.{
-  DataManifestContent,
-  DeleteManifestContent,
-  IcebergDeltaReflection,
-  IcebergReflection,
-  TransportManifest
-}
 import org.apache.comet.serde.OperatorOuterClass.IcebergDeltaCommand
 import org.apache.comet.serde.OperatorOuterClass.Operator
 
@@ -119,21 +113,26 @@ case class CometIcebergDeltaWriteExec(
     val bytesMetric = longMetric("bytesWritten")
     val schemaTypes = output.map(_.dataType).toArray
 
-    val tableIO = IcebergDeltaWriteExec.requireReflection(
-      IcebergReflection.getTableIO(table), "Table.io()")
+    val tableIO =
+      IcebergDeltaWriteExec.requireReflection(IcebergReflection.getTableIO(table), "Table.io()")
     val outputSpec = IcebergDeltaWriteExec.requireReflection(
       IcebergReflection.getPartitionSpecById(table, outputSpecId),
       s"partition spec id=$outputSpecId")
     val metricsConfig = IcebergDeltaWriteExec.requireReflection(
-      IcebergReflection.metricsConfigForTable(table), "MetricsConfig.forTable")
+      IcebergReflection.metricsConfigForTable(table),
+      "MetricsConfig.forTable")
     val positionDeltaWrite = IcebergDeltaWriteExec.requireReflection(
-      IcebergReflection.getOuterPositionDeltaWrite(batchWrite), "outer PositionDeltaWrite")
-    val decodedWriteSchema = IcebergDeltaWriteExec.requireReflection(
-      IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite),
-      "PositionDeltaWrite.Context.dataSchema").asInstanceOf[AnyRef]
+      IcebergReflection.getOuterPositionDeltaWrite(batchWrite),
+      "outer PositionDeltaWrite")
+    val decodedWriteSchema = IcebergDeltaWriteExec
+      .requireReflection(
+        IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite),
+        "PositionDeltaWrite.Context.dataSchema")
+      .asInstanceOf[AnyRef]
     val sortOrderId = nativeOp.getIcebergDeltaWrite.getDataCommon.getSortOrderId
     val sortOrder = IcebergDeltaWriteExec.requireReflection(
-      IcebergReflection.getSortOrderById(table, sortOrderId), s"sort order id=$sortOrderId")
+      IcebergReflection.getSortOrderById(table, sortOrderId),
+      s"sort order id=$sortOrderId")
     val capturedSpecs = specsById
     val capturedPreviousDeletes = previousDeletesBroadcast
 
@@ -165,7 +164,8 @@ case class CometIcebergDeltaWriteExec(
         val content = manifest.getContentValue match {
           case 0 => DataManifestContent
           case 1 => DeleteManifestContent
-          case value => throw new IllegalArgumentException(s"Unknown task manifest content $value")
+          case value =>
+            throw new IllegalArgumentException(s"Unknown task manifest content $value")
         }
         if (!capturedSpecs.containsKey(Integer.valueOf(manifest.getPartitionSpecId))) {
           throw new IllegalArgumentException(
@@ -238,17 +238,17 @@ case class CometIcebergDeltaWriteExec(
         outputMetrics.setRecordsWritten(dataRows + deleteRows)
       }
       val projection = UnsafeProjection.create(schemaTypes)
-      Iterator.single(
-        projection(InternalRow(IcebergWriteExec.serializeMessage(commit))).copy())
+      Iterator.single(projection(InternalRow(IcebergWriteExec.serializeMessage(commit))).copy())
     }
   }
 
   override def doExecuteColumnar(): RDD[ColumnarBatch] = {
     val childRDD =
       if (child.supportsColumnar) child.executeColumnar()
-      else throw new UnsupportedOperationException(
-        "CometIcebergDeltaWriteExec requires a columnar Comet-native child; got " +
-          child.getClass.getName)
+      else
+        throw new UnsupportedOperationException(
+          "CometIcebergDeltaWriteExec requires a columnar Comet-native child; got " +
+            child.getClass.getName)
     val partitions = childRDD.getNumPartitions
     val capturedNativeOp = nativeOp
     val capturedPreviousDeletes = previousDeletesBroadcast
@@ -287,8 +287,7 @@ case class CometIcebergDeltaWriteExec(
     }
   }
 
-  private def drainNativePayload(
-      batches: Iterator[ColumnarBatch]): (Array[Byte], Seq[String]) = {
+  private def drainNativePayload(batches: Iterator[ColumnarBatch]): (Array[Byte], Seq[String]) = {
     require(batches.hasNext, "iceberg_delta_write produced no output batch for this task")
     val batch = batches.next()
     val payload =
@@ -320,7 +319,9 @@ private object IcebergDeltaWriteExec {
     val groups = transport.getGroupsList.asScala.toSeq
     val expected = groups
       .map { group =>
-        require(group.getDataFile.nonEmpty, "Previous delete transport has an empty data file path")
+        require(
+          group.getDataFile.nonEmpty,
+          "Previous delete transport has an empty data file path")
         group.getDataFile -> group.getDeleteFilesList.asScala.map(_.getLocation).toSeq
       }
     require(
@@ -328,10 +329,11 @@ private object IcebergDeltaWriteExec {
       "Previous delete transport repeats a data file group")
     val expectedByDataFile = expected.toMap
     val serialized = transport.getSerializedDeleteFiles.toByteArray
-    require(serialized.nonEmpty, "Previous delete transport is missing original DeleteFile objects")
-    val original = Utils.deserialize[Map[String, Seq[AnyRef]]](
-      serialized,
-      Utils.getContextOrSparkClassLoader)
+    require(
+      serialized.nonEmpty,
+      "Previous delete transport is missing original DeleteFile objects")
+    val original =
+      Utils.deserialize[Map[String, Seq[AnyRef]]](serialized, Utils.getContextOrSparkClassLoader)
     require(
       original.keySet == expectedByDataFile.keySet,
       "Previous delete transport group keys disagree")

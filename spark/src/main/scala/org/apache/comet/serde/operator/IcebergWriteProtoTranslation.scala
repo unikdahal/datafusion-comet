@@ -41,7 +41,6 @@ object IcebergWriteProtoTranslation {
   case object DataContent extends IcebergFileContentKind
   case object PositionDeleteContent extends IcebergFileContentKind
 
-
   /**
    * Iceberg `TableProperties` constants the translation depends on. Resolved lazily through the
    * reflection bridge so we always quote Iceberg's canonical names rather than duplicating

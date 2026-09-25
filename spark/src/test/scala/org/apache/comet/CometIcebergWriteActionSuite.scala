@@ -37,13 +37,7 @@ import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.comet.{
-  CometIcebergDeltaWriteExec,
-  CometIcebergWriteExec,
-  CometMergeRowsExec,
-  IcebergCommitExec,
-  IcebergWriteExec,
-}
+import org.apache.spark.sql.comet.{CometIcebergDeltaWriteExec, CometIcebergWriteExec, CometMergeRowsExec, IcebergCommitExec, IcebergWriteExec}
 import org.apache.spark.sql.connector.catalog.InMemoryTableCatalog
 import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, PhysicalWriteInfo, Write, WriterCommitMessage}
 import org.apache.spark.sql.execution.{ColumnarToRowTransition, LeafExecNode, SparkPlan}
