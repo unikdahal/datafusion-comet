@@ -2821,11 +2821,12 @@ class CometIcebergWriteActionSuite
   }
 
   /**
-   * Flip [[CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED]] for the duration of `action`.
+   * Enable both native Iceberg data writes and the separately gated position-delta writer for the
+   * duration of `action`.
    *
    * We also enable [[CometConf.COMET_EXEC_LOCAL_TABLE_SCAN_ENABLED]] (default off) so VALUES-
    * driven INSERTs have a Comet-native upstream -- `requiresNativeChildren = true` would
-   * otherwise short-circuit the conversion to `CometIcebergWriteExec` because Spark emits a bare
+   * otherwise short-circuit native write conversion because Spark emits a bare
    * `LocalTableScanExec` for inline `VALUES`. Using `sessionState.conf.setConfString` directly
    * (rather than `withSQLConf`) keeps the override visible to the columnar rule across some Spark
    * version / session-state combinations where `withSQLConf` loses the override before the rule
@@ -2836,10 +2837,13 @@ class CometIcebergWriteActionSuite
     session.sessionState.conf
       .setConfString(CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED.key, "true")
     session.sessionState.conf
+      .setConfString(CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.key, "true")
+    session.sessionState.conf
       .setConfString(CometConf.COMET_EXEC_LOCAL_TABLE_SCAN_ENABLED.key, "true")
     try action
     finally {
       session.sessionState.conf.unsetConf(CometConf.COMET_EXEC_LOCAL_TABLE_SCAN_ENABLED.key)
+      session.sessionState.conf.unsetConf(CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.key)
       session.sessionState.conf.unsetConf(CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED.key)
     }
   }
