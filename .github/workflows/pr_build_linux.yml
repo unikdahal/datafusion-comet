@@ -454,7 +454,7 @@ jobs:
     # `lint` is already upstream via build-native; it is listed here so this
     # job can read its `profile-matrix` output.
     needs: [lint, build-native]
-    if: ${{ !inputs.cache-refresh-only && (matrix.suite.name != 'spark-4.2-iceberg-transaction' || matrix.profile.name == 'Spark 4.2, JDK 17') }}
+    if: ${{ !inputs.cache-refresh-only }}
     strategy:
       matrix:
         # The Spark profiles live in dev/ci/linux-test-profiles.py and are
@@ -491,9 +491,6 @@ jobs:
               org.apache.comet.CometFuzzTestSuite
               org.apache.comet.CometFuzzIcebergSuite
               org.apache.comet.DataGeneratorSuite
-          - name: "spark-4.2-iceberg-transaction"
-            value: |
-              org.apache.comet.IcebergTransactionSuite
           - name: "shuffle"
             value: |
               org.apache.comet.exec.CometShuffleSuite
@@ -663,6 +660,41 @@ jobs:
           artifact_name: ${{ matrix.profile.name }}-${{ matrix.suite.name }}-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
           suites: ${{ matrix.suite.value }}
           maven_opts: ${{ matrix.profile.maven_opts }}
+          upload-test-reports: true
+          skip-native-build: true
+
+  # Spark 4.2-only transaction APIs are tested in their own job so the suite
+  # is never selected with a profile that does not compile its source tree.
+  linux-test-spark-4-2-iceberg-transaction:
+    needs: [lint, build-native]
+    if: ${{ !inputs.cache-refresh-only && inputs.profiles != 'pr' }}
+    name: Spark 4.2 [Iceberg transaction]
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+      env:
+        JAVA_TOOL_OPTIONS: '--add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust & Java toolchain
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: ${{ env.RUST_VERSION }}
+          jdk-version: "17"
+
+      - name: Download native library
+        uses: ./.github/actions/download-artifact-retry
+        with:
+          name: native-lib-linux
+          path: native/target/release/
+
+      - name: Java test steps
+        uses: ./.github/actions/java-test
+        with:
+          artifact_name: Spark-4.2-iceberg-transaction-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
+          suites: org.apache.comet.IcebergTransactionSuite
+          maven_opts: -Pspark-4.2
           upload-test-reports: true
           skip-native-build: true
 
