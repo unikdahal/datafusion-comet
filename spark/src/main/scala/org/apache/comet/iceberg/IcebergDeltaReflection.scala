@@ -188,12 +188,11 @@ object IcebergDeltaReflection {
       addDataFiles: Method,
       addDeleteFiles: Method,
       addReferencedDataFiles: Method,
-      addRewrittenDeleteFiles: Method,
+      addRewrittenDeleteFiles: Option[Method],
       buildWriteResult: Method,
       deltaTaskCommitConstructor: Constructor[_],
       dataFiles: Method,
       deleteFiles: Method,
-      rewrittenDeleteFiles: Method,
       referencedDataFiles: Method,
       inMemoryFileIoConstructor: Constructor[_],
       addInMemoryFile: Method,
@@ -233,12 +232,14 @@ object IcebergDeltaReflection {
         .find(m => m.getName == name && m.getParameterCount == count)
         .map(accessible)
         .getOrElse(throw new NoSuchMethodException(s"${clazz.getName}.$name/$count"))
-    def iterableMethod(clazz: Class[_], name: String): Method =
+    def optionalIterableMethod(clazz: Class[_], name: String): Option[Method] =
       clazz.getMethods
         .find(m =>
           m.getName == name && m.getParameterCount == 1 &&
             m.getParameterTypes()(0).isAssignableFrom(classOf[java.lang.Iterable[_]]))
         .map(accessible)
+    def iterableMethod(clazz: Class[_], name: String): Method =
+      optionalIterableMethod(clazz, name)
         .getOrElse(throw new NoSuchMethodException(s"${clazz.getName}.$name(Iterable)"))
     def declaredCtor(clazz: Class[_], params: Class[_]*): Constructor[_] = {
       val ctor = clazz.getDeclaredConstructor(params: _*)
@@ -282,25 +283,27 @@ object IcebergDeltaReflection {
     val writeResultBuilder = method(writeResultClass, "builder", 0)
     val writeResultBuilderValue = writeResultBuilder.invoke(null)
     val actualBuilderClass = writeResultBuilderValue.getClass
-    val writeResultBuilderMethods =
-      Seq("addDataFiles", "addDeleteFiles", "addReferencedDataFiles", "addRewrittenDeleteFiles")
-        .map(iterableMethod(actualBuilderClass, _))
+    val addDataFiles = iterableMethod(actualBuilderClass, "addDataFiles")
+    val addDeleteFiles = iterableMethod(actualBuilderClass, "addDeleteFiles")
+    val addReferencedDataFiles = iterableMethod(actualBuilderClass, "addReferencedDataFiles")
+    // Iceberg 1.5.x predates rewritten delete-file support. That member is only needed for
+    // FILE-granularity rewrites; PARTITION-granularity PositionDelta commits remain compatible.
+    val addRewrittenDeleteFiles =
+      optionalIterableMethod(actualBuilderClass, "addRewrittenDeleteFiles")
     val iteratorMethod = readerClass.getMethod("iterator")
     val closeMethod = readerClass.getMethod("close")
     Handles(
       writeResultBuilder = writeResultBuilder,
-      addDataFiles = writeResultBuilderMethods(0),
-      addDeleteFiles = writeResultBuilderMethods(1),
-      addReferencedDataFiles = writeResultBuilderMethods(2),
-      addRewrittenDeleteFiles = writeResultBuilderMethods(3),
+      addDataFiles = addDataFiles,
+      addDeleteFiles = addDeleteFiles,
+      addReferencedDataFiles = addReferencedDataFiles,
+      addRewrittenDeleteFiles = addRewrittenDeleteFiles,
       buildWriteResult = actualBuilderClass.getMethod("build"),
       deltaTaskCommitConstructor = declaredCtor(taskCommitClass, writeResultClass),
       dataFiles = findMethodInHierarchy(taskCommitClass, "dataFiles").getOrElse(
         throw new NoSuchMethodException("DeltaTaskCommit.dataFiles")),
       deleteFiles = findMethodInHierarchy(taskCommitClass, "deleteFiles").getOrElse(
         throw new NoSuchMethodException("DeltaTaskCommit.deleteFiles")),
-      rewrittenDeleteFiles = findMethodInHierarchy(taskCommitClass, "rewrittenDeleteFiles")
-        .getOrElse(throw new NoSuchMethodException("DeltaTaskCommit.rewrittenDeleteFiles")),
       referencedDataFiles = findMethodInHierarchy(taskCommitClass, "referencedDataFiles")
         .getOrElse(throw new NoSuchMethodException("DeltaTaskCommit.referencedDataFiles")),
       inMemoryFileIoConstructor = declaredCtor(inMemoryFileIo),
@@ -344,7 +347,14 @@ object IcebergDeltaReflection {
     h.addDataFiles.invoke(builder, dataFiles)
     h.addDeleteFiles.invoke(builder, deleteFiles)
     h.addReferencedDataFiles.invoke(builder, referencedDataFiles)
-    h.addRewrittenDeleteFiles.invoke(builder, rewrittenDeleteFiles)
+    if (rewrittenDeleteFiles.iterator().hasNext) {
+      h.addRewrittenDeleteFiles match {
+        case Some(method) => method.invoke(builder, rewrittenDeleteFiles)
+        case None =>
+          throw new IllegalStateException(
+            "The runtime Iceberg WriteResult cannot carry rewritten delete files")
+      }
+    }
     h.buildWriteResult.invoke(builder).asInstanceOf[AnyRef]
   }
 
