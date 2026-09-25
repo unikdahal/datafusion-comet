@@ -905,24 +905,31 @@ class CometIcebergWriteActionSuite
     }
   }
 
-  test("native MergeRows supports Iceberg CoW MERGE with the versioned delta writer") {
+  test("native MergeRows uses the versioned delta writer for Iceberg MoR MERGE") {
     assumeNativeAcceleration()
     withIcebergCatalog { warehouseDir =>
+      val mergeProperties =
+        if (isSpark35Plus) {
+          "'format-version'='2', 'write.merge.mode'='merge-on-read', " +
+            "'write.delete.mode'='merge-on-read'"
+        } else {
+          "'format-version'='2', 'write.merge.mode'='copy-on-write'"
+        }
       createTable(
         warehouseDir,
-        "native_cow_merge",
+        "native_merge",
         partitionSpec = "",
-        properties = Some("'write.merge.mode'='copy-on-write'"))
+        properties = Some(mergeProperties))
       withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
-        coalesceInsert("native_cow_merge", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
+        coalesceInsert("native_merge", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
       }
 
       var snapshot: Option[WriteSnapshot] = None
       withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
         snapshot = Some(withNativeEnabled {
-          captureWrite("native_cow_merge") {
+          captureWrite("native_merge") {
             spark.sql("""
-              |MERGE INTO cat.db.native_cow_merge t
+              |MERGE INTO cat.db.native_merge t
               |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
               |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
               |ON t.id = s.id
@@ -945,30 +952,30 @@ class CometIcebergWriteActionSuite
         mergeExecs.nonEmpty,
         "expected Iceberg MERGE to execute through CometMergeRowsExec. Plans:\n" +
           writeSnapshot.plans.mkString("\n--\n"))
-      val nativeWrites = writeSnapshot.plans.flatMap { plan =>
-        collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }
-      }
-      assert(
-        nativeWrites.nonEmpty,
-        "expected Iceberg MERGE to feed Comet's Iceberg write wrapper. Plans:\n" +
-          writeSnapshot.plans.mkString("\n--\n"))
       val nativeDeltaWrites = writeSnapshot.plans.flatMap { plan =>
         collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
       }
       if (isSpark35Plus) {
         assert(
           nativeDeltaWrites.nonEmpty,
-          "Spark 3.5+ native MERGE should use CometIcebergDeltaWriteExec. Plans:\n" +
+          "Spark 3.5+ native MoR MERGE should use CometIcebergDeltaWriteExec. Plans:\n" +
             writeSnapshot.plans.mkString("\n--\n"))
       } else {
+        val nativeWrites = writeSnapshot.plans.flatMap { plan =>
+          collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }
+        }
+        assert(
+          nativeWrites.nonEmpty,
+          "Spark 3.4 native CoW MERGE should use CometIcebergWriteExec. Plans:\n" +
+            writeSnapshot.plans.mkString("\n--\n"))
         assert(
           nativeDeltaWrites.isEmpty,
           "Spark 3.4 MERGE should retain Iceberg's JVM DeltaWriter. Plans:\n" +
             writeSnapshot.plans.mkString("\n--\n"))
       }
-      assertRows("native_cow_merge", expectedIds = Seq(1, 2, 3))
+      assertRows("native_merge", expectedIds = Seq(1, 2, 3))
       val updated = spark
-        .sql(s"SELECT amount FROM $catalog.$ns.native_cow_merge WHERE id = 2")
+        .sql(s"SELECT amount FROM $catalog.$ns.native_merge WHERE id = 2")
         .collect()
       assert(updated.length == 1 && updated.head.getDouble(0) == 200.0)
     }
