@@ -149,29 +149,34 @@ case class IcebergCommitExec(
     }
 
   /**
-   * A job failure happens before any commit is attempted. Iceberg's BatchWrite.abort therefore
-   * owns cleanup of completed task files and, on every supported Iceberg version, deletes them
-   * while cleanupOnAbort is still true. Only fall back to Comet's direct FileIO cleanup when the
-   * abort itself fails; otherwise a second delete would race/retry work Iceberg already
-   * completed.
+   * A job failure happens before any commit is attempted. Abort Iceberg first, then explicitly
+   * delete files reported by tasks that already completed. Some Iceberg BatchWrite
+   * implementations return successfully from abort without removing those task outputs. The
+   * direct FileIO cleanup is safe after a successful abort because deleting an already-removed
+   * path is idempotent in the supported FileIO implementations.
    */
   private def abortAfterJobFailure(
       messages: Array[WriterCommitMessage],
-      cause: Throwable): Throwable =
+      cause: Throwable): Throwable = {
+    var abortFailed = false
     try {
       batchWrite.abort(messages)
-      cause
     } catch {
       case abortFailure: Throwable =>
+        abortFailed = true
         logError("Iceberg write abort failed; attempting direct cleanup of completed task files")
         cause.addSuppressed(abortFailure)
-        try deleteCompletedTaskFiles(messages)
-        catch {
-          case cleanupFailure: Throwable =>
-            cause.addSuppressed(cleanupFailure)
-        }
-        QueryExecutionErrors.writingJobFailedError(cause)
     }
+
+    try deleteCompletedTaskFiles(messages)
+    catch {
+      case cleanupFailure: Throwable =>
+        logError("Direct cleanup of completed Iceberg task files failed", cleanupFailure)
+        cause.addSuppressed(cleanupFailure)
+    }
+
+    if (abortFailed) QueryExecutionErrors.writingJobFailedError(cause) else cause
+  }
 
   private def deleteCompletedTaskFiles(completed: Array[WriterCommitMessage]): Unit = {
     val locations = completed.toSeq.flatMap(m => createdFilesExtractor.locations(m))

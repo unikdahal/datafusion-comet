@@ -224,6 +224,25 @@ case class CometExecRule(session: SparkSession)
   private def isCometNative(op: SparkPlan): Boolean = op.isInstanceOf[CometNativeExec]
 
   /**
+   * Whether a write child is known to produce Arrow-backed columnar batches.
+   *
+   * AQE keeps [[AQEShuffleReadExec]] / [[ShuffleQueryStageExec]] wrappers around a Comet
+   * shuffle, so requiring the immediate child itself to be a [[CometNativeExec]] incorrectly
+   * rejects native writes after Spark inserts a write distribution. Walk only the known
+   * passthrough wrappers and stop at an explicitly Arrow-producing Comet node; arbitrary Spark
+   * columnar operators are deliberately not admitted because they may use on-heap vectors.
+   */
+  private def producesArrowBatches(plan: SparkPlan): Boolean = plan match {
+    case _: CometNativeExec => true
+    case _: CometSparkToColumnarExec => true
+    case _: CometShuffleExchangeExec => true
+    case read: AQEShuffleReadExec => producesArrowBatches(read.child)
+    case stage: ShuffleQueryStageExec => producesArrowBatches(stage.plan)
+    case ReusedExchangeExec(_, child) => producesArrowBatches(child)
+    case _ => false
+  }
+
+  /**
    * Restore a Spark Partial while retaining its current children. The tag prevents reconversion
    * when AQE replans the exchange without its Final, and records why the Partial stays in Spark.
    */
@@ -914,11 +933,11 @@ case class CometExecRule(session: SparkSession)
         return None
       }
 
-      // For operators that require native children (like writes), check if all data-producing
-      // children are CometNativeExec. This prevents runtime failures when the native operator
-      // expects Arrow arrays but receives non-Arrow data (e.g., OnHeapColumnVector).
+      // For operators that require Arrow input (like writes), accept native children and the
+      // narrow set of Comet/AQE wrappers that are known to preserve Arrow-backed batches. This
+      // still rejects arbitrary Spark columnar operators whose batches may use on-heap vectors.
       if (serde.requiresNativeChildren && op.children.nonEmpty) {
-        if (!dataProducingChildren.forall(_.isInstanceOf[CometNativeExec])) {
+        if (!dataProducingChildren.forall(producesArrowBatches)) {
           withFallbackReason(
             op,
             "Cannot perform native operation because input is not in Arrow format")
