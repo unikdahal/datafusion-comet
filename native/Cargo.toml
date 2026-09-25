@@ -67,8 +67,8 @@ aws-credential-types = "1.2.13"
 # Pinned to a revision rather than a release because no published iceberg-rust
 # version is on our arrow: 0.10.1 requires arrow/parquet ^58. Move to a plain
 # version requirement once a release ships on arrow 59. Bump policy: #5645.
-iceberg = { git = "https://github.com/unikdahal/iceberg-rust", rev = "e2b286b6c1c95b2c9bd8eae5e39a4d3179620057" }
-iceberg-storage-opendal = { git = "https://github.com/unikdahal/iceberg-rust", rev = "e2b286b6c1c95b2c9bd8eae5e39a4d3179620057", features = ["opendal-memory", "opendal-fs", "opendal-s3", "opendal-gcs", "opendal-oss", "opendal-azdls"] }
+iceberg = { git = "https://github.com/unikdahal/iceberg-rust", rev = "0489025896fe5fb606863fc9a088b1db6e83bf31" }
+iceberg-storage-opendal = { git = "https://github.com/unikdahal/iceberg-rust", rev = "0489025896fe5fb606863fc9a088b1db6e83bf31", features = ["opendal-memory", "opendal-fs", "opendal-s3", "opendal-gcs", "opendal-oss", "opendal-azdls"] }
 reqsign-core = "3"
 
 [profile.release]
