@@ -267,12 +267,19 @@ case class CometExecRule(session: SparkSession)
     case _ => false
   }
 
-  private def bridgeIcebergDeltaShuffle(op: IcebergWriteExec): IcebergWriteExec =
-    if (!producesArrowBatches(op.child) && isSparkShuffleOverComet(op.child)) {
+  private def bridgeIcebergDeltaShuffle(op: IcebergWriteExec): IcebergWriteExec = {
+    val nativeWriteSupported = CometIcebergNativeWrite.getSupportLevel(op) match {
+      case _: Compatible => true
+      case _ => false
+    }
+    if (nativeWriteSupported &&
+      !producesArrowBatches(op.child) &&
+      isSparkShuffleOverComet(op.child)) {
       op.copy(child = CometSparkToColumnarExec(op.child))
     } else {
       op
     }
+  }
 
   /**
    * Restore a Spark Partial while retaining its current children. The tag prevents reconversion
