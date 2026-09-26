@@ -239,6 +239,27 @@ object IcebergReflection extends Logging {
   def getPositionDeltaWriteValue(write: Any, name: String): Option[AnyRef] =
     if (!isIcebergPositionDeltaWrite(write)) None else reflectField(write, name)
 
+  /**
+   * Iceberg 1.11+ stores the resolved output sort-order id directly on SparkPositionDeltaWrite.
+   * Older runtimes do not have this field because their position-delta writer never wires a data
+   * sort order into SparkFileWriterFactory. Missing is therefore a supported version distinction,
+   * not a reflection error; callers should use id 0 (unsorted) in that case.
+   */
+  def getPositionDeltaWriteSortOrderId(write: Any): Option[Int] = {
+    if (!isIcebergPositionDeltaWrite(write)) return None
+    try {
+      val field = write.getClass.getDeclaredField("sortOrderId")
+      field.setAccessible(true)
+      Some(field.get(write).asInstanceOf[java.lang.Integer].intValue())
+    } catch {
+      case _: NoSuchFieldException => None
+      case e: Exception =>
+        logError(
+          s"Iceberg reflection failure: sortOrderId on ${write.getClass.getName}: ${e.getMessage}")
+        None
+    }
+  }
+
   /** Returns every historical partition spec with its table spec id as the key. */
   def getPartitionSpecs(table: Any): Option[java.util.Map[Integer, AnyRef]] =
     try {
