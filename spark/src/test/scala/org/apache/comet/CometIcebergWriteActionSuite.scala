@@ -2849,15 +2849,16 @@ class CometIcebergWriteActionSuite
    * columnar-only child, and would fail at runtime with a `ColumnarBatch cannot be cast to
    * InternalRow` `ClassCastException` rather than at planning time.
    *
-   * `CometIcebergWriteExec` is the one legitimate exception: it is row-based on the outside but
-   * pulls Arrow batches from its Comet-native child over FFI (see the class docstring), so the
-   * transition below it is deliberately stripped again by `EliminateRedundantTransitions`.
+   * `CometIcebergWriteExec` and `CometIcebergDeltaWriteExec` are legitimate exceptions: they are
+   * row-based on the outside but pull Arrow batches from their Comet-native children over FFI, so
+   * the transition below them is deliberately stripped again by `EliminateRedundantTransitions`.
    */
   private def assertColumnarContract(plan: SparkPlan): Unit = {
     val violations = collectWithSubqueries(plan) {
       case p
           if !p.supportsColumnar && !p.isInstanceOf[ColumnarToRowTransition] &&
             !p.isInstanceOf[CometIcebergWriteExec] &&
+            !p.isInstanceOf[CometIcebergDeltaWriteExec] &&
             p.children.exists(c => c.supportsColumnar && !c.supportsRowBased) =>
         p
     }
