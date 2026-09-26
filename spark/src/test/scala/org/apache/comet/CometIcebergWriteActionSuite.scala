@@ -915,7 +915,17 @@ class CometIcebergWriteActionSuite
         }
         val writeSnapshot =
           snapshot.getOrElse(fail(s"$mode MERGE did not produce a write snapshot"))
-        assertExactlyOneCommit(writeSnapshot)
+        assert(
+          writeSnapshot.snapshotDelta == 1L,
+          s"expected exactly 1 new Iceberg snapshot for $mode, got ${writeSnapshot.snapshotDelta}. Plans:\n" +
+            writeSnapshot.plans.mkString("\n--\n"))
+        val commits = writeSnapshot.plans.flatMap { plan =>
+          collectWithSubqueries(plan) { case c: IcebergCommitExec => c }
+        }
+        assert(
+          commits.nonEmpty,
+          s"expected >= 1 IcebergCommitExec for $mode, got 0. Plans:\n" +
+            writeSnapshot.plans.mkString("\n--\n"))
         val mergeExecs = writeSnapshot.plans.flatMap { plan =>
           collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }
         }
