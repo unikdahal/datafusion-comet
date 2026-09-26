@@ -876,77 +876,76 @@ class CometIcebergWriteActionSuite
           .collect()
           .toSeq
 
-      Seq("copy-on-write" -> "cow", "merge-on-read" -> "mor").foreach {
-        case (mode, suffix) =>
-          val nativeTable = s"merge_parity_${suffix}_native"
-          val sparkTable = s"merge_parity_${suffix}_spark"
-          Seq(nativeTable, sparkTable).foreach { table =>
-            createTable(
-              warehouseDir,
-              table,
-              partitionSpec = "PARTITIONED BY (region)",
-              properties = Some(s"'format-version'='2', 'write.merge.mode'='$mode'"))
-          }
+      Seq("copy-on-write" -> "cow", "merge-on-read" -> "mor").foreach { case (mode, suffix) =>
+        val nativeTable = s"merge_parity_${suffix}_native"
+        val sparkTable = s"merge_parity_${suffix}_spark"
+        Seq(nativeTable, sparkTable).foreach { table =>
+          createTable(
+            warehouseDir,
+            table,
+            partitionSpec = "PARTITIONED BY (region)",
+            properties = Some(s"'format-version'='2', 'write.merge.mode'='$mode'"))
+        }
 
-          withSQLConf(
-            CometConf.COMET_ENABLED.key -> "false",
-            "spark.sql.adaptive.coalescePartitions.enabled" -> "false",
-            "spark.sql.shuffle.partitions" -> "8") {
-            spark.sql(
-              s"INSERT INTO $catalog.$ns.$nativeTable SELECT id, region, amount FROM merge_parity_seed")
-            spark.sql(
-              s"INSERT INTO $catalog.$ns.$sparkTable SELECT id, region, amount FROM merge_parity_seed")
-          }
+        withSQLConf(
+          CometConf.COMET_ENABLED.key -> "false",
+          "spark.sql.adaptive.coalescePartitions.enabled" -> "false",
+          "spark.sql.shuffle.partitions" -> "8") {
+          spark.sql(
+            s"INSERT INTO $catalog.$ns.$nativeTable SELECT id, region, amount FROM merge_parity_seed")
+          spark.sql(
+            s"INSERT INTO $catalog.$ns.$sparkTable SELECT id, region, amount FROM merge_parity_seed")
+        }
 
-          val inputFiles = spark
-            .sql(s"SELECT count(*) FROM $catalog.$ns.$nativeTable.data_files")
-            .collect()
-            .head
-            .getLong(0)
-          assert(inputFiles > 1L, s"expected a multi-file target, got $inputFiles file(s)")
+        val inputFiles = spark
+          .sql(s"SELECT count(*) FROM $catalog.$ns.$nativeTable.data_files")
+          .collect()
+          .head
+          .getLong(0)
+        assert(inputFiles > 1L, s"expected a multi-file target, got $inputFiles file(s)")
 
-          var snapshot: Option[WriteSnapshot] = None
-          withSQLConf(
-            CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true",
-            "spark.sql.adaptive.coalescePartitions.enabled" -> "false",
-            "spark.sql.shuffle.partitions" -> "8") {
-            snapshot = Some(withNativeEnabled {
-              captureWrite(nativeTable)(merge(nativeTable))
-            })
-          }
-          val writeSnapshot =
-            snapshot.getOrElse(fail(s"$mode MERGE did not produce a write snapshot"))
-          assertExactlyOneCommit(writeSnapshot)
-          val mergeExecs = writeSnapshot.plans.flatMap { plan =>
-            collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }
-          }
+        var snapshot: Option[WriteSnapshot] = None
+        withSQLConf(
+          CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true",
+          "spark.sql.adaptive.coalescePartitions.enabled" -> "false",
+          "spark.sql.shuffle.partitions" -> "8") {
+          snapshot = Some(withNativeEnabled {
+            captureWrite(nativeTable)(merge(nativeTable))
+          })
+        }
+        val writeSnapshot =
+          snapshot.getOrElse(fail(s"$mode MERGE did not produce a write snapshot"))
+        assertExactlyOneCommit(writeSnapshot)
+        val mergeExecs = writeSnapshot.plans.flatMap { plan =>
+          collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }
+        }
+        assert(
+          mergeExecs.nonEmpty,
+          s"expected CometMergeRowsExec for $mode. Plans:\n" +
+            writeSnapshot.plans.mkString("\n--\n"))
+
+        val nativeWrites = writeSnapshot.plans.flatMap { plan =>
+          collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }
+        }
+        if (mode == "copy-on-write") {
           assert(
-            mergeExecs.nonEmpty,
-            s"expected CometMergeRowsExec for $mode. Plans:\n" +
-              writeSnapshot.plans.mkString("\n--\n"))
-
-          val nativeWrites = writeSnapshot.plans.flatMap { plan =>
-            collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }
-          }
-          if (mode == "copy-on-write") {
-            assert(
-              nativeWrites.nonEmpty,
-              "copy-on-write MERGE should feed the native Iceberg writer on this partitioned plan")
-          } else {
-            assert(
-              nativeWrites.isEmpty,
-              "merge-on-read uses Iceberg WriteDelta and must not engage CometIcebergWriteExec")
-          }
-
-          withSQLConf(
-            CometConf.COMET_ENABLED.key -> "false",
-            "spark.sql.adaptive.coalescePartitions.enabled" -> "false",
-            "spark.sql.shuffle.partitions" -> "8") {
-            merge(sparkTable)
-          }
+            nativeWrites.nonEmpty,
+            "copy-on-write MERGE should feed the native Iceberg writer on this partitioned plan")
+        } else {
           assert(
-            rows(nativeTable) == rows(sparkTable),
-            s"$mode MERGE result differs from Spark")
+            nativeWrites.isEmpty,
+            "merge-on-read uses Iceberg WriteDelta and must not engage CometIcebergWriteExec")
+        }
+
+        withSQLConf(
+          CometConf.COMET_ENABLED.key -> "false",
+          "spark.sql.adaptive.coalescePartitions.enabled" -> "false",
+          "spark.sql.shuffle.partitions" -> "8") {
+          merge(sparkTable)
+        }
+        assert(
+          rows(nativeTable) == rows(sparkTable),
+          s"$mode MERGE result differs from Spark")
       }
     }
   }
