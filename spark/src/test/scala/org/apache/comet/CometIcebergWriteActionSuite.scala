@@ -943,9 +943,7 @@ class CometIcebergWriteActionSuite
           "spark.sql.shuffle.partitions" -> "8") {
           merge(sparkTable)
         }
-        assert(
-          rows(nativeTable) == rows(sparkTable),
-          s"$mode MERGE result differs from Spark")
+        assert(rows(nativeTable) == rows(sparkTable), s"$mode MERGE result differs from Spark")
       }
     }
   }
@@ -998,12 +996,11 @@ class CometIcebergWriteActionSuite
           duplicateMerge(sparkTable)
         }
       }
-      Seq("Comet" -> nativeError, "Spark" -> sparkError).foreach {
-        case (engine, error) =>
-          assert(
-            exceptionChain(error).exists(t =>
-              Option(t.getMessage).exists(_.contains("MERGE_CARDINALITY_VIOLATION"))),
-            s"$engine did not surface MERGE_CARDINALITY_VIOLATION: $error")
+      Seq("Comet" -> nativeError, "Spark" -> sparkError).foreach { case (engine, error) =>
+        assert(
+          exceptionChain(error).exists(t =>
+            Option(t.getMessage).exists(_.contains("MERGE_CARDINALITY_VIOLATION"))),
+          s"$engine did not surface MERGE_CARDINALITY_VIOLATION: $error")
       }
       assertRows(nativeTable, Seq(42, 43))
       assertRows(sparkTable, Seq(42, 43))
