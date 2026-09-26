@@ -271,6 +271,7 @@ case class CometExecRule(session: SparkSession)
    */
   private def isSparkShuffleOverComet(plan: SparkPlan): Boolean = plan match {
     case shuffle: ShuffleExchangeExec =>
+      producesArrowBatches(shuffle.child) ||
       columnarChildBelowRowTransition(shuffle.child).exists(producesArrowBatches)
     case read: AQEShuffleReadExec => isSparkShuffleOverComet(read.child)
     case stage: ShuffleQueryStageExec => isSparkShuffleOverComet(stage.plan)
