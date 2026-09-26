@@ -79,12 +79,24 @@ object IcebergDeltaReflection {
   def rewritablePositionDeletes(
       positionDeltaWrite: AnyRef): Either[String, Seq[PreviousPositionDeletesForDataFile]] =
     try {
-      val scan = IcebergReflection
-        .getPositionDeltaWriteValue(positionDeltaWrite, "scan")
-        .getOrElse(return Left("SparkPositionDeltaWrite.scan reflection failed"))
+      // Resolve the API against the declared scan class first. Iceberg 1.5 lacks
+      // rewritableDeletes(boolean) and must keep falling back, while 1.8+ supports it.
+      // The scan field itself is legitimately null for some DELETE plans; Iceberg's own
+      // PositionDeltaBatchWrite treats that as "no rewritable deletes", so mirror that behavior
+      // instead of mistaking a null field value for a reflection failure.
+      val scanClass =
+        try loadClass("org.apache.iceberg.spark.source.SparkBatchQueryScan")
+        catch {
+          case _: ClassNotFoundException =>
+            return Left("SparkBatchQueryScan is unavailable")
+        }
       val method = IcebergReflection
-        .findMethodInHierarchy(scan.getClass, "rewritableDeletes", java.lang.Boolean.TYPE)
+        .findMethodInHierarchy(scanClass, "rewritableDeletes", java.lang.Boolean.TYPE)
         .getOrElse(return Left("SparkBatchQueryScan.rewritableDeletes(boolean) is unavailable"))
+      val scan = IcebergReflection.getPositionDeltaWriteValue(positionDeltaWrite, "scan") match {
+        case Some(value) => value
+        case None => return Right(Seq.empty)
+      }
       val rewritable = method
         .invoke(scan, java.lang.Boolean.FALSE)
         .asInstanceOf[java.util.Map[String, AnyRef]]
