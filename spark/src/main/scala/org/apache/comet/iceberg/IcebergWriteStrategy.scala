@@ -21,9 +21,10 @@ package org.apache.comet.iceberg
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, ReplaceData}
-import org.apache.spark.sql.comet.{IcebergCommitExec, IcebergWriteExec, PositionDeltaCreatedFiles}
+import org.apache.spark.sql.comet.{CometSparkToColumnarExec, IcebergCommitExec, IcebergWriteExec, PositionDeltaCreatedFiles}
 import org.apache.spark.sql.connector.write.Write
 import org.apache.spark.sql.execution.{SparkPlan, SparkStrategy}
+import org.apache.spark.sql.execution.adaptive.LogicalQueryStage
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 
 import org.apache.comet.CometConf
@@ -108,9 +109,28 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
             }
           }
           .toList
-      // Hit by AQE.
+      // Hit by AQE. Once a write-distribution shuffle is materialized, Spark replaces the
+      // corresponding logical subtree with LogicalQueryStage and replans this writer. FILE-level
+      // position deletes may use a row-based Spark shuffle because the Iceberg _partition column
+      // is an empty struct for unpartitioned tables, which Comet shuffle cannot carry. Anchor the
+      // row-to-Arrow bridge in this AQE replan so the later Comet conversion pass can restore the
+      // native delta writer instead of losing it when the fresh IcebergWriteExec is created.
+      //
+      // The wrapper is transparent for JVM fallback: CometSparkToColumnarExec.doExecute delegates
+      // to its child, and Spark's transition cleanup removes the bridge when the write itself is
+      // not converted. Restrict it to materialized delta-write query stages so ordinary writes
+      // and the initial pre-AQE plan keep their existing direct child.
       case l @ IcebergWriteLogical(child, batchWrite, dispatch) =>
-        Seq(IcebergWriteExec(batchWrite, l.output, planLater(child), dispatch))
+        val plannedChild = planLater(child)
+        val writeChild = dispatch match {
+          case PositionDeltaWrite(_)
+              if child.isInstanceOf[LogicalQueryStage] &&
+                CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.get(conf) =>
+            CometSparkToColumnarExec(plannedChild)
+          case _ =>
+            plannedChild
+        }
+        Seq(IcebergWriteExec(batchWrite, l.output, writeChild, dispatch))
       case _ => Nil
     }
   }
