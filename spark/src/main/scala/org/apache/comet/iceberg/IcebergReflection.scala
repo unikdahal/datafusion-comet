@@ -255,7 +255,8 @@ object IcebergReflection extends Logging {
       case _: NoSuchFieldException => None
       case e: Exception =>
         logError(
-          s"Iceberg reflection failure: sortOrderId on ${write.getClass.getName}: ${e.getMessage}")
+          s"Iceberg reflection failure: sortOrderId on ${write.getClass.getName}: " +
+            s"${e.getMessage}")
         None
     }
   }
