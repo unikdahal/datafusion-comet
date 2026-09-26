@@ -874,10 +874,16 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
         s"Invalid position-delta target delete file size $targetDeleteFileSize")
       return None
     }
-    val useFanoutWriter = booleanValue("useFanoutWriter").getOrElse {
-      withFallbackReason(op, "PositionDeltaWrite.Context.useFanoutWriter reflection failed")
-      return None
-    }
+    // Iceberg 1.5.x names this Context accessor fanoutWriterEnabled(); 1.8+ renamed it to
+    // useFanoutWriter(). Both values describe the same writer-factory choice.
+    val useFanoutWriter = booleanValue("useFanoutWriter")
+      .orElse(booleanValue("fanoutWriterEnabled"))
+      .getOrElse {
+        withFallbackReason(
+          op,
+          "PositionDeltaWrite.Context useFanoutWriter/fanoutWriterEnabled reflection failed")
+        return None
+      }
     val inputOrdered = booleanValue("inputOrdered").getOrElse {
       withFallbackReason(op, "PositionDeltaWrite.Context.inputOrdered reflection failed")
       return None
@@ -894,13 +900,12 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       .getPositionDeltaWriteValue(positionDeltaWrite, "writeProperties")
       .map(_.asInstanceOf[java.util.Map[String, String]].asScala.toMap)
       .getOrElse(Map.empty[String, String])
-    val sortOrderId = IcebergReflection
-      .getPositionDeltaWriteValue(positionDeltaWrite, "sortOrderId")
-      .map(_.asInstanceOf[java.lang.Integer].intValue())
-      .getOrElse {
-        withFallbackReason(op, "SparkPositionDeltaWrite.sortOrderId reflection failed")
-        return None
-      }
+    // Iceberg only started wiring data sort order into PositionDelta writers in 1.11.
+    // Older runtimes build SparkFileWriterFactory without dataSortOrder(...), so their data files
+    // are intentionally stamped as unsorted (id 0). Match that behavior instead of treating the
+    // absent 1.11-only field as a conversion failure.
+    val sortOrderId =
+      IcebergReflection.getPositionDeltaWriteSortOrderId(positionDeltaWrite).getOrElse(0)
     val environment = IcebergNativeWriteEnvironment
       .resolve(
         op,
