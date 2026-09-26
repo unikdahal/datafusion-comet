@@ -296,6 +296,7 @@ consecutively in a plan, they execute as a single fused block.
 | `CometBroadcastHashJoin`       | `BroadcastHashJoinExec`                                                           |
 | `CometBroadcastNestedLoopJoin` | `BroadcastNestedLoopJoinExec`                                                     |
 | `CometSortMergeJoin`           | `SortMergeJoinExec`                                                               |
+| `CometMergeRows`               | `MergeRowsExec` (Spark 3.5.x / 4.0.x; opt-in)                                     |
 | `CometWindow`                  | `WindowExec`                                                                      |
 | `CometTakeOrderedAndProject`   | `TakeOrderedAndProjectExec`                                                       |
 

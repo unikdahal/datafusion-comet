@@ -41,6 +41,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check MergeRows Spark source parity
+        run: |
+          diff -u \
+            spark/src/main/spark-3.5/org/apache/comet/serde/operator/CometMergeRows.scala \
+            spark/src/main/spark-4.0/org/apache/comet/serde/operator/CometMergeRows.scala
+          diff -u \
+            spark/src/main/spark-3.5/org/apache/comet/shims/ShimCometMergeRows.scala \
+            spark/src/main/spark-4.0/org/apache/comet/shims/ShimCometMergeRows.scala
+
       - name: Check Rust formatting
         run: |
           rustup component add rustfmt
