@@ -87,6 +87,8 @@ runs natively; it is controlled by `spark.comet.exec.windowGroupLimit.enabled` (
 
 ## MERGE INTO (MergeRowsExec)
 
+Spark `MergeRowsExec` appears as `CometMergeRows` when native execution is enabled.
+
 Comet can run `MergeRowsExec` (Spark's row-level `MERGE INTO` dispatch operator) natively on
 Spark 3.5.x and Spark 4.0.x, but it is disabled by default. Enable it with
 `spark.comet.exec.mergeRows.enabled=true`.
