@@ -922,10 +922,17 @@ class CometIcebergWriteActionSuite
         val commits = writeSnapshot.plans.flatMap { plan =>
           collectWithSubqueries(plan) { case c: IcebergCommitExec => c }
         }
-        assert(
-          commits.nonEmpty,
-          s"expected >= 1 IcebergCommitExec for $mode, got 0. Plans:\n" +
-            writeSnapshot.plans.mkString("\n--\n"))
+        if (mode == "copy-on-write") {
+          assert(
+            commits.nonEmpty,
+            s"expected >= 1 IcebergCommitExec for $mode, got 0. Plans:\n" +
+              writeSnapshot.plans.mkString("\n--\n"))
+        } else {
+          assert(
+            commits.isEmpty,
+            s"merge-on-read should stay on Iceberg WriteDelta, got ${commits.size} IcebergCommitExec. Plans:\n" +
+              writeSnapshot.plans.mkString("\n--\n"))
+        }
         val mergeExecs = writeSnapshot.plans.flatMap { plan =>
           collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }
         }
