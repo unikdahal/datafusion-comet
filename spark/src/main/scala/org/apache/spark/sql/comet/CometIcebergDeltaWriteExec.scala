@@ -121,9 +121,15 @@ case class CometIcebergDeltaWriteExec(
     val positionDeltaWrite = IcebergDeltaWriteExec.requireReflection(
       IcebergReflection.getOuterPositionDeltaWrite(batchWrite),
       "outer PositionDeltaWrite")
+    // Iceberg intentionally leaves Context.dataSchema null for delete-only position-delta
+    // writes. There are no data rows to write in that shape, but the shared manifest-metrics
+    // reconstruction path still needs a schema value. Mirror the serializer fallback and use the
+    // table schema only for DELETE; UPDATE/MERGE must keep using the per-write schema.
     val decodedWriteSchema = IcebergDeltaWriteExec
       .requireReflection(
-        IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite),
+        IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite).orElse {
+          if (semanticCommand.contains(DeltaDelete)) IcebergReflection.getSchema(table) else None
+        },
         "PositionDeltaWrite.Context.dataSchema")
       .asInstanceOf[AnyRef]
     val sortOrderId = nativeOp.getIcebergDeltaWrite.getDataCommon.getSortOrderId
