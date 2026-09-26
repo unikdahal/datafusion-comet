@@ -37,6 +37,10 @@ import org.apache.comet.serde.OperatorOuterClass._
  */
 object IcebergWriteProtoTranslation {
 
+  sealed trait IcebergFileContentKind
+  case object DataContent extends IcebergFileContentKind
+  case object PositionDeleteContent extends IcebergFileContentKind
+
   /**
    * Iceberg `TableProperties` constants the translation depends on. Resolved lazily through the
    * reflection bridge so we always quote Iceberg's canonical names rather than duplicating
@@ -124,6 +128,22 @@ object IcebergWriteProtoTranslation {
     resolveCompressionLevel(props, compression).foreach(builder.setCompressionLevel)
 
     builder.build()
+  }
+
+  /** Resolves position-delete parquet keys before falling back to data-file keys. */
+  def buildParquetSettings(
+      props: Map[String, String],
+      kind: IcebergFileContentKind,
+      createdBy: String): IcebergParquetWriteSettings = kind match {
+    case DataContent => buildParquetSettings(props, createdBy)
+    case PositionDeleteContent =>
+      val deletePrefix = "write.delete.parquet."
+      val dataPrefix = "write.parquet."
+      val deleteSettings = props.iterator.collect {
+        case (key, value) if key.startsWith(deletePrefix) =>
+          dataPrefix + key.substring(deletePrefix.length) -> value
+      }.toMap
+      buildParquetSettings(props ++ deleteSettings, createdBy)
   }
 
   /**

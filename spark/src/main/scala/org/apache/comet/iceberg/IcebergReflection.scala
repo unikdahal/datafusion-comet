@@ -26,6 +26,7 @@ import scala.util.control.NonFatal
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.connector.write.Write
 
 import org.apache.comet.util.ClassLoaders
 
@@ -200,6 +201,192 @@ object IcebergReflection extends Logging {
   def isIcebergBatchWrite(batchWrite: Any): Boolean = {
     if (batchWrite == null) return false
     batchWrite.getClass.getName.startsWith(ClassNames.SPARK_WRITE + "$")
+  }
+
+  private val positionDeltaWriteClassName =
+    "org.apache.iceberg.spark.source.SparkPositionDeltaWrite"
+  private val positionDeltaBatchWriteClassPrefix =
+    "org.apache.iceberg.spark.source.SparkPositionDeltaWrite$PositionDeltaBatchWrite"
+
+  /** True only for Iceberg's DeltaWrite implementation, not an arbitrary Spark DeltaWrite. */
+  def isIcebergPositionDeltaWrite(write: Any): Boolean =
+    write != null && tryLoadClass(positionDeltaWriteClassName).exists(_.isInstance(write))
+
+  /** True only for the BatchWrite enclosed by Iceberg's SparkPositionDeltaWrite. */
+  def isIcebergPositionDeltaBatchWrite(batchWrite: Any): Boolean =
+    batchWrite != null && batchWrite.getClass.getName.startsWith(
+      positionDeltaBatchWriteClassPrefix)
+
+  def getOuterPositionDeltaWrite(batchWrite: Any): Option[Any] =
+    if (!isIcebergPositionDeltaBatchWrite(batchWrite)) None
+    else reflectField(batchWrite, "this$0")
+
+  def getTableFromPositionDeltaWrite(write: Any): Option[Any] =
+    if (!isIcebergPositionDeltaWrite(write)) None
+    else reflectField(write, "table")
+
+  def getPositionDeltaWriteContext(write: Any): Option[AnyRef] =
+    if (!isIcebergPositionDeltaWrite(write)) None
+    else reflectField(write, "context")
+
+  def getPositionDeltaWriteContextValue(write: Any, name: String): Option[AnyRef] =
+    getPositionDeltaWriteContext(write).flatMap { context =>
+      findMethodInHierarchy(context.getClass, name).flatMap(method =>
+        Option(method.invoke(context).asInstanceOf[AnyRef]))
+    }
+
+  /** Reads a private field from Iceberg's SparkPositionDeltaWrite. */
+  def getPositionDeltaWriteValue(write: Any, name: String): Option[AnyRef] =
+    if (!isIcebergPositionDeltaWrite(write)) None else reflectField(write, name)
+
+  /**
+   * Iceberg 1.11+ stores the resolved output sort-order id directly on SparkPositionDeltaWrite.
+   * Older runtimes do not have this field because their position-delta writer never wires a data
+   * sort order into SparkFileWriterFactory. Missing is therefore a supported version distinction,
+   * not a reflection error; callers should use id 0 (unsorted) in that case.
+   */
+  def getPositionDeltaWriteSortOrderId(write: Any): Option[Int] = {
+    if (!isIcebergPositionDeltaWrite(write)) return None
+    try {
+      val field = write.getClass.getDeclaredField("sortOrderId")
+      field.setAccessible(true)
+      Some(field.get(write).asInstanceOf[java.lang.Integer].intValue())
+    } catch {
+      case _: NoSuchFieldException => None
+      case e: Exception =>
+        logError(
+          s"Iceberg reflection failure: sortOrderId on ${write.getClass.getName}: " +
+            s"${e.getMessage}")
+        None
+    }
+  }
+
+  /** Returns every historical partition spec with its table spec id as the key. */
+  def getPartitionSpecs(table: Any): Option[java.util.Map[Integer, AnyRef]] =
+    try {
+      val specs = getMethod(table.getClass, "specs")
+        .invoke(table)
+        .asInstanceOf[java.util.Map[Integer, AnyRef]]
+      Some(specs)
+    } catch {
+      case e: Exception =>
+        logError(s"Iceberg reflection failure: Table.specs(): ${e.getMessage}")
+        None
+    }
+
+  /**
+   * Field ids in Iceberg's table-wide `_partition` struct, in Arrow projection order.
+   * `Partitioning.partitionType(table)` is the same union type used by Spark's scan metadata.
+   */
+  def getUnifiedPartitionFieldIds(table: Any): Option[Seq[Int]] =
+    try {
+      val partitioningClass = loadClass("org.apache.iceberg.Partitioning")
+      val tableClass = loadClass(ClassNames.TABLE)
+      val partitionType = getMethod(partitioningClass, "partitionType", tableClass)
+        .invoke(null, table.asInstanceOf[AnyRef])
+      val fields = getMethod(partitionType.getClass, "fields")
+        .invoke(partitionType)
+        .asInstanceOf[java.util.List[AnyRef]]
+      import scala.jdk.CollectionConverters._
+      Some(fields.asScala.toSeq.map(fieldId))
+    } catch {
+      case e: Exception =>
+        logError(
+          s"Iceberg reflection failure: Partitioning.partitionType(table): ${e.getMessage}")
+        None
+    }
+
+  /** Partition field ids, in the order required by that spec's partition struct. */
+  def getPartitionFieldIds(spec: Any): Option[Seq[Int]] =
+    try {
+      val fields = getMethod(spec.getClass, "fields")
+        .invoke(spec)
+        .asInstanceOf[java.util.List[AnyRef]]
+      import scala.jdk.CollectionConverters._
+      Some(fields.asScala.toSeq.map { field =>
+        getMethod(field.getClass, "fieldId").invoke(field).asInstanceOf[Integer].intValue()
+      })
+    } catch {
+      case e: Exception =>
+        logError(s"Iceberg reflection failure: PartitionSpec.fields(): ${e.getMessage}")
+        None
+    }
+
+  private def fieldId(field: AnyRef): Int =
+    getMethod(field.getClass, "fieldId").invoke(field).asInstanceOf[Integer].intValue()
+
+  def getSpecId(spec: Any): Option[Int] =
+    try Some(getMethod(spec.getClass, "specId").invoke(spec).asInstanceOf[Integer].intValue())
+    catch {
+      case e: Exception =>
+        logError(s"Iceberg reflection failure: PartitionSpec.specId(): ${e.getMessage}")
+        None
+    }
+
+  def getWriteSchemaFromPositionDeltaWrite(write: Any): Option[Any] =
+    getPositionDeltaWriteContextValue(write, "dataSchema")
+
+  /**
+   * Extract the version-specific logical WriteDelta contract. Spark 3.4's Iceberg extension node
+   * and Spark's stock WriteDelta both expose these case-class members, though their table member
+   * is named differently (`originalTable` vs `table`).
+   */
+  def extractDeltaLogicalFields(plan: org.apache.spark.sql.catalyst.plans.logical.LogicalPlan)
+      : Option[DeltaLogicalFields] = {
+    def member(name: String): Option[AnyRef] =
+      findMethodInHierarchy(plan.getClass, name)
+        .flatMap { method =>
+          Option(method.invoke(plan).asInstanceOf[AnyRef])
+        }
+        .orElse(reflectField(plan, name))
+
+    def optionalWrite(value: Option[AnyRef]): Option[Write] =
+      value.flatMap {
+        case option: Option[_] => option.collect { case write: Write => write }
+        case write: Write => Some(write)
+        case _ => None
+      }
+
+    for {
+      query <- member("query").collect {
+        case value: org.apache.spark.sql.catalyst.plans.logical.LogicalPlan => value
+      }
+      table <- member("originalTable").orElse(member("table")).collect {
+        case value: org.apache.spark.sql.catalyst.analysis.NamedRelation => value
+      }
+      projections <- member("projections").collect {
+        case value: org.apache.spark.sql.catalyst.util.WriteDeltaProjections => value
+      }
+    } yield {
+      def enumCommand(value: AnyRef): Option[DeltaCommand] = {
+        val name = value.toString.toUpperCase(java.util.Locale.ROOT)
+        name match {
+          case "DELETE" => Some(DeltaDelete)
+          case "UPDATE" => Some(DeltaUpdate)
+          case "MERGE" => Some(DeltaMerge)
+          case _ => None
+        }
+      }
+
+      val command = member("operation").flatMap { operation =>
+        findMethodInHierarchy(operation.getClass, "command")
+          .flatMap(method => Option(method.invoke(operation).asInstanceOf[AnyRef]))
+          .flatMap(enumCommand)
+      }
+      val tableForName = member("table").orElse(member("originalTable"))
+      val tableName = tableForName.flatMap { relation =>
+        findMethodInHierarchy(relation.getClass, "name")
+          .flatMap(method => Option(method.invoke(relation).asInstanceOf[AnyRef]))
+          .map(_.toString)
+      }
+      DeltaLogicalFields(
+        query,
+        table,
+        projections,
+        optionalWrite(member("write")),
+        command,
+        tableName)
+    }
   }
 
   def getOuterSparkWrite(batchWrite: Any): Option[Any] = {
@@ -1813,6 +2000,29 @@ object IcebergReflection extends Logging {
         }
       case None => Seq.empty
     }
+
+  /**
+   * Newly created files from an Iceberg `DeltaTaskCommit`. Existing referenced data files and
+   * rewritten old delete files are intentionally excluded: Comet only owns task-created files
+   * when a Spark job fails before the driver attempts the Iceberg commit.
+   */
+  def deltaTaskCommitCreatedFileLocations(message: AnyRef): Seq[String] = {
+    if (message == null ||
+      !message.getClass.getName.contains("SparkPositionDeltaWrite$DeltaTaskCommit")) {
+      return Seq.empty
+    }
+    Seq("dataFiles", "deleteFiles").flatMap { accessor =>
+      findMethodInHierarchy(message.getClass, accessor).toSeq.flatMap { method =>
+        method.invoke(message) match {
+          case array: Array[_] => array.toSeq.flatMap(file => extractFileLocation(file))
+          case values: java.lang.Iterable[_] =>
+            import scala.jdk.CollectionConverters._
+            values.asScala.toSeq.flatMap(file => extractFileLocation(file))
+          case _ => Seq.empty
+        }
+      }
+    }
+  }
 
   /** The table's `FileIO` (`table.io()`). Iceberg requires `FileIO` to be `Serializable`. */
   def getTableIO(table: Any): Option[AnyRef] =

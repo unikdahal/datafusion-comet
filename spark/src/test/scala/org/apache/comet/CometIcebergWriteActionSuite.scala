@@ -37,7 +37,7 @@ import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.comet.{CometIcebergWriteExec, CometMergeRowsExec, IcebergCommitExec, IcebergWriteExec}
+import org.apache.spark.sql.comet.{CometIcebergDeltaWriteExec, CometIcebergWriteExec, CometMergeRowsExec, IcebergCommitExec, IcebergWriteExec}
 import org.apache.spark.sql.connector.catalog.InMemoryTableCatalog
 import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, PhysicalWriteInfo, Write, WriterCommitMessage}
 import org.apache.spark.sql.execution.{ColumnarToRowTransition, LeafExecNode, SparkPlan}
@@ -431,14 +431,26 @@ class CometIcebergWriteActionSuite
         properties = Some("'write.merge.mode'='copy-on-write'"))
       coalesceInsert("merge_summary", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
 
-      spark.sql(s"""
-        |MERGE INTO $catalog.$ns.merge_summary t
-        |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
-        |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
-        |ON t.id = s.id
-        |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
-        |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
-        |""".stripMargin)
+      val write = captureWrite("merge_summary") {
+        withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
+          withNativeEnabled {
+            spark.sql(s"""
+              |MERGE INTO $catalog.$ns.merge_summary t
+              |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
+              |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
+              |ON t.id = s.id
+              |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
+              |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
+              |""".stripMargin)
+          }
+        }
+      }
+      val nativeMergeRows = write.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case merge: CometMergeRowsExec => merge }
+      }
+      assert(
+        nativeMergeRows.nonEmpty,
+        "Spark 4.1 should use CometMergeRowsExec while creating the merge snapshot")
 
       val summary = spark
         .sql(s"SELECT summary FROM $catalog.$ns.merge_summary.snapshots " +
@@ -893,25 +905,31 @@ class CometIcebergWriteActionSuite
     }
   }
 
-  test("native acceleration: ReplaceData (CoW MERGE) runs MergeRows and writer natively") {
+  test("Iceberg MERGE uses the native delta writer exactly when MergeRows is native") {
     assumeNativeAcceleration()
-    assume(isSpark35Plus && !isSpark41Plus, "native MergeRows requires Spark 3.5 through 4.0")
     withIcebergCatalog { warehouseDir =>
+      val mergeProperties =
+        if (isSpark35Plus) {
+          "'format-version'='2', 'write.merge.mode'='merge-on-read', " +
+            "'write.delete.mode'='merge-on-read'"
+        } else {
+          "'format-version'='2', 'write.merge.mode'='copy-on-write'"
+        }
       createTable(
         warehouseDir,
-        "native_cow_merge",
+        "native_merge",
         partitionSpec = "",
-        properties = Some("'write.merge.mode'='copy-on-write'"))
+        properties = Some(mergeProperties))
       withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
-        coalesceInsert("native_cow_merge", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
+        coalesceInsert("native_merge", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
       }
 
       var snapshot: Option[WriteSnapshot] = None
       withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
         snapshot = Some(withNativeEnabled {
-          captureWrite("native_cow_merge") {
+          captureWrite("native_merge") {
             spark.sql("""
-              |MERGE INTO cat.db.native_cow_merge t
+              |MERGE INTO cat.db.native_merge t
               |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
               |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
               |ON t.id = s.id
@@ -923,29 +941,298 @@ class CometIcebergWriteActionSuite
       }
 
       val writeSnapshot =
-        snapshot.getOrElse(fail("native MERGE write did not produce a snapshot"))
+        snapshot.getOrElse(fail("MERGE write did not produce a snapshot"))
       assert(
         writeSnapshot.snapshotDelta == 1L,
-        s"expected exactly one Iceberg snapshot from native MERGE, got ${writeSnapshot.snapshotDelta}")
-      val mergeExecs = writeSnapshot.plans.flatMap { plan =>
+        s"expected exactly one Iceberg snapshot from MERGE, got ${writeSnapshot.snapshotDelta}")
+
+      val nativeMergeRows = writeSnapshot.plans.flatMap { plan =>
         collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }
       }
-      assert(
-        mergeExecs.nonEmpty,
-        "expected Iceberg MERGE to execute through CometMergeRowsExec. Plans:\n" +
-          writeSnapshot.plans.mkString("\n--\n"))
-      val nativeWrites = writeSnapshot.plans.flatMap { plan =>
-        collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }
+      val nativeDeltaWrites = writeSnapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
       }
-      assert(
-        nativeWrites.nonEmpty,
-        "expected Iceberg MERGE to feed CometIcebergWriteExec. Plans:\n" +
-          writeSnapshot.plans.mkString("\n--\n"))
-      assertRows("native_cow_merge", expectedIds = Seq(1, 2, 3))
+
+      if (isSpark35Plus) {
+        assert(
+          nativeDeltaWrites.nonEmpty == nativeMergeRows.nonEmpty,
+          "Spark 3.5+ MoR MERGE can use the native delta writer only when MergeRows itself " +
+            "has a native child and converts. Plans:\n" + writeSnapshot.plans.mkString("\n--\n"))
+      } else {
+        assert(
+          nativeDeltaWrites.isEmpty,
+          "Spark 3.4 CoW MERGE must not use the position-delta writer. Plans:\n" +
+            writeSnapshot.plans.mkString("\n--\n"))
+      }
+
+      assertRows("native_merge", expectedIds = Seq(1, 2, 3))
       val updated = spark
-        .sql(s"SELECT amount FROM $catalog.$ns.native_cow_merge WHERE id = 2")
+        .sql(s"SELECT amount FROM $catalog.$ns.native_merge WHERE id = 2")
         .collect()
       assert(updated.length == 1 && updated.head.getDouble(0) == 200.0)
+    }
+  }
+
+  test("native MoR PARTITION DELETE works without raising the Spark 3.4 Iceberg runtime") {
+    assumeNativeAcceleration()
+    withIcebergCatalog { warehouseDir =>
+      createTable(
+        warehouseDir,
+        "native_mor_partition_delete",
+        partitionSpec = "PARTITIONED BY (region)",
+        properties = Some(
+          "'format-version'='2', 'write.delete.mode'='merge-on-read', " +
+            "'write.delete.granularity'='partition'"))
+      withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+        coalesceInsert(
+          "native_mor_partition_delete",
+          Seq((1, "us", 10.0), (2, "us", 20.0), (3, "eu", 30.0)))
+      }
+
+      val snapshot = withNativeEnabled {
+        captureWrite("native_mor_partition_delete") {
+          spark.sql(s"DELETE FROM $catalog.$ns.native_mor_partition_delete WHERE id = 2")
+        }
+      }
+      val deltaWrites = snapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
+      }
+      assert(
+        deltaWrites.nonEmpty,
+        "PARTITION-granularity PositionDelta should remain native on the supported Iceberg " +
+          s"runtime. Plans:\n${snapshot.plans.mkString("\n--\n")}")
+      assertRows("native_mor_partition_delete", Seq(1, 3))
+
+      val deletes = spark
+        .sql("SELECT file_path, delete_file_path, pos " +
+          s"FROM $catalog.$ns.native_mor_partition_delete.position_deletes")
+        .collect()
+        .toSeq
+      assert(deletes.size == 1, s"expected one committed position delete, got $deletes")
+    }
+  }
+
+  test("Spark 3.4 Iceberg 1.5 FILE-granularity MoR DELETE falls back cleanly") {
+    assumeNativeAcceleration()
+    assume(!isSpark35Plus, "standard Spark 3.4 profile uses Iceberg 1.5.2")
+    assume(!icebergVersionAtLeast(1, 8), "Iceberg 1.8+ exposes rewritableDeletes")
+    withIcebergCatalog { warehouseDir =>
+      createTable(
+        warehouseDir,
+        "mor_file_34_fallback",
+        partitionSpec = "",
+        properties = Some(
+          "'format-version'='2', 'write.delete.mode'='merge-on-read', " +
+            "'write.delete.granularity'='file'"))
+      withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+        coalesceInsert(
+          "mor_file_34_fallback",
+          Seq((1, "us", 10.0), (2, "us", 20.0), (3, "us", 30.0)))
+      }
+
+      val snapshot = withNativeEnabled {
+        captureWrite("mor_file_34_fallback") {
+          spark.sql(s"DELETE FROM $catalog.$ns.mor_file_34_fallback WHERE id = 2")
+        }
+      }
+      val nativeDeltaWrites = snapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
+      }
+      assert(
+        nativeDeltaWrites.isEmpty,
+        "Iceberg 1.5.2 has no command-scan rewritableDeletes API, so FILE-granularity native " +
+          s"writing must fall back. Plans:\n${snapshot.plans.mkString("\n--\n")}")
+      assertRows("mor_file_34_fallback", Seq(1, 3))
+    }
+  }
+
+  test("native MoR FILE deletes rewrite prior delete files without losing positions") {
+    assumeNativeAcceleration()
+    assume(icebergVersionAtLeast(1, 8), "FILE-granularity rewrite coverage requires Iceberg 1.8+")
+    withIcebergCatalog { warehouseDir =>
+      createTable(
+        warehouseDir,
+        "native_mor_file_rewrite",
+        partitionSpec = "",
+        properties = Some(
+          "'format-version'='2', 'write.delete.mode'='merge-on-read', " +
+            "'write.delete.granularity'='file'"))
+      withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+        coalesceInsert(
+          "native_mor_file_rewrite",
+          Seq(
+            (1, "us-east", 10.0),
+            (2, "us-east", 20.0),
+            (3, "us-east", 30.0),
+            (4, "us-east", 40.0)))
+      }
+
+      def nativeDelete(id: Int): Unit = {
+        val snapshot = withNativeEnabled {
+          captureWrite("native_mor_file_rewrite") {
+            spark.sql(s"DELETE FROM $catalog.$ns.native_mor_file_rewrite WHERE id = $id")
+          }
+        }
+        val deltaWrites = snapshot.plans.flatMap { plan =>
+          collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
+        }
+        assert(
+          deltaWrites.nonEmpty,
+          s"expected DELETE id=$id to use CometIcebergDeltaWriteExec. Plans:\n" +
+            snapshot.plans.mkString("\n--\n"))
+      }
+
+      def positionDeletes(): Seq[Row] =
+        spark
+          .sql("SELECT pos, file_path, delete_file_path " +
+            s"FROM $catalog.$ns.native_mor_file_rewrite.position_deletes ORDER BY pos")
+          .collect()
+          .toSeq
+
+      nativeDelete(2)
+      assertRows("native_mor_file_rewrite", Seq(1, 3, 4))
+      val first = positionDeletes()
+      assert(first.size == 1, s"expected one position delete after first DELETE, got $first")
+      val targetDataFile = first.head.getString(1)
+      val firstDeleteFile = first.head.getString(2)
+
+      nativeDelete(3)
+      assertRows("native_mor_file_rewrite", Seq(1, 4))
+      val second = positionDeletes()
+      assert(second.size == 2, s"expected two retained positions after rewrite, got $second")
+      assert(
+        second.forall(_.getString(1) == targetDataFile),
+        s"rewritten FILE-scoped deletes changed target data file: $second")
+      val secondDeleteFiles = second.map(_.getString(2)).distinct
+      assert(secondDeleteFiles.size == 1, s"expected one replacement delete file, got $second")
+      assert(
+        secondDeleteFiles.head != firstDeleteFile,
+        "second DELETE should replace, not retain, the prior file-scoped delete file")
+      assert(
+        second.map(_.getLong(0)).distinct.size == 2,
+        s"delete positions were not preserved: $second")
+
+      nativeDelete(4)
+      assertRows("native_mor_file_rewrite", Seq(1))
+      val third = positionDeletes()
+      assert(
+        third.size == 3,
+        s"expected three retained positions after second rewrite, got $third")
+      assert(
+        third.forall(_.getString(1) == targetDataFile),
+        s"unexpected target data file: $third")
+      val thirdDeleteFiles = third.map(_.getString(2)).distinct
+      assert(thirdDeleteFiles.size == 1, s"expected one replacement delete file, got $third")
+      assert(
+        thirdDeleteFiles.head != secondDeleteFiles.head,
+        "third DELETE should replace the previous file-scoped delete file")
+      assert(
+        third.map(_.getLong(0)).distinct.size == 3,
+        s"delete positions were not preserved: $third")
+    }
+  }
+
+  test("native MoR FILE deletes stay scoped to one target data file") {
+    assumeNativeAcceleration()
+    assume(icebergVersionAtLeast(1, 8), "FILE-granularity rewrite coverage requires Iceberg 1.8+")
+    withIcebergCatalog { warehouseDir =>
+      createTable(
+        warehouseDir,
+        "native_mor_file_scope",
+        partitionSpec = "",
+        properties = Some(
+          "'format-version'='2', 'write.delete.mode'='merge-on-read', " +
+            "'write.delete.granularity'='file'"))
+      withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+        // Two independent appends deliberately create two data files in the same partition.
+        coalesceInsert("native_mor_file_scope", Seq((1, "same", 10.0), (2, "same", 20.0)))
+        coalesceInsert("native_mor_file_scope", Seq((3, "same", 30.0), (4, "same", 40.0)))
+      }
+
+      val snapshot = withNativeEnabled {
+        captureWrite("native_mor_file_scope") {
+          spark.sql(s"DELETE FROM $catalog.$ns.native_mor_file_scope WHERE id IN (2, 4)")
+        }
+      }
+      val deltaWrites = snapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
+      }
+      assert(
+        deltaWrites.nonEmpty,
+        "expected multi-file DELETE to use CometIcebergDeltaWriteExec. Plans:\n" +
+          snapshot.plans.mkString("\n--\n"))
+      assertRows("native_mor_file_scope", Seq(1, 3))
+
+      val deletes = spark
+        .sql(
+          "SELECT file_path, delete_file_path, count(*) AS positions " +
+            s"FROM $catalog.$ns.native_mor_file_scope.position_deletes " +
+            "GROUP BY file_path, delete_file_path")
+        .collect()
+        .toSeq
+      assert(
+        deletes.size == 2,
+        s"expected one file-scoped delete file per target data file: $deletes")
+      assert(
+        deletes.map(_.getString(0)).distinct.size == 2,
+        s"expected two distinct target data files: $deletes")
+      assert(
+        deletes.map(_.getString(1)).distinct.size == 2,
+        s"a FILE-granularity delete file must not mix target data files: $deletes")
+      assert(
+        deletes.forall(_.getLong(2) == 1L),
+        s"each target should contribute exactly one new delete position: $deletes")
+    }
+  }
+
+  test("Spark 3.4 Iceberg 1.8 MERGE preserves cardinality exception compatibility") {
+    assume(!isSpark35Plus, "Spark 3.4 uses Iceberg's extension MergeRowsExec")
+    assume(icebergAvailable && icebergVersionAtLeast(1, 8), "requires Iceberg 1.8+")
+    withIcebergCatalog { warehouseDir =>
+      createTable(
+        warehouseDir,
+        "merge_cardinality_34",
+        partitionSpec = "",
+        properties = Some("'write.merge.mode'='copy-on-write'"))
+      coalesceInsert("merge_cardinality_34", Seq((1, "us-east", 10.0)))
+      val mergeSql =
+        """
+          |MERGE INTO cat.db.merge_cardinality_34 t
+          |USING (
+          |  SELECT 1 AS id, 'us-east' AS region, 20.0 AS amount
+          |  UNION ALL
+          |  SELECT 1 AS id, 'us-east' AS region, 30.0 AS amount
+          |) s
+          |ON t.id = s.id
+          |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
+          |""".stripMargin
+
+      val (_, stockFailure) = captureFailedPlans(spark) {
+        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+          spark.sql(mergeSql).collect()
+        }
+      }
+      val stockError = stockFailure.getOrElse(fail("Spark MERGE unexpectedly succeeded"))
+
+      val (nativePlans, nativeFailure) = captureFailedPlans(spark) {
+        withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
+          withNativeEnabled {
+            spark.sql(mergeSql).collect()
+          }
+        }
+      }
+      val nativeError = nativeFailure.getOrElse(fail("native MERGE unexpectedly succeeded"))
+      // This query shape may keep Iceberg's MergeRowsExec on the JVM when its join child is not
+      // native. The compatibility invariant is the observable exception, not forced conversion.
+      assert(
+        nativeError.getClass == stockError.getClass,
+        s"expected ${stockError.getClass.getName}, got ${nativeError.getClass.getName}")
+      val compatibilityMessage = "matched a single row from the target table"
+      assert(
+        Option(nativeError.getMessage).exists(_.contains(compatibilityMessage)) &&
+          Option(stockError.getMessage).exists(_.contains(compatibilityMessage)),
+        s"expected both paths to retain the legacy cardinality message; stock=$stockError, " +
+          s"native=$nativeError")
     }
   }
 
@@ -2562,15 +2849,16 @@ class CometIcebergWriteActionSuite
    * columnar-only child, and would fail at runtime with a `ColumnarBatch cannot be cast to
    * InternalRow` `ClassCastException` rather than at planning time.
    *
-   * `CometIcebergWriteExec` is the one legitimate exception: it is row-based on the outside but
-   * pulls Arrow batches from its Comet-native child over FFI (see the class docstring), so the
-   * transition below it is deliberately stripped again by `EliminateRedundantTransitions`.
+   * `CometIcebergWriteExec` and `CometIcebergDeltaWriteExec` are legitimate exceptions: they are
+   * row-based on the outside but pull Arrow batches from their Comet-native children over FFI, so
+   * the transition below them is deliberately stripped again by `EliminateRedundantTransitions`.
    */
   private def assertColumnarContract(plan: SparkPlan): Unit = {
     val violations = collectWithSubqueries(plan) {
       case p
           if !p.supportsColumnar && !p.isInstanceOf[ColumnarToRowTransition] &&
             !p.isInstanceOf[CometIcebergWriteExec] &&
+            !p.isInstanceOf[CometIcebergDeltaWriteExec] &&
             p.children.exists(c => c.supportsColumnar && !c.supportsRowBased) =>
         p
     }
@@ -2581,11 +2869,12 @@ class CometIcebergWriteActionSuite
   }
 
   /**
-   * Flip [[CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED]] for the duration of `action`.
+   * Enable both native Iceberg data writes and the separately gated position-delta writer for the
+   * duration of `action`.
    *
    * We also enable [[CometConf.COMET_EXEC_LOCAL_TABLE_SCAN_ENABLED]] (default off) so VALUES-
    * driven INSERTs have a Comet-native upstream -- `requiresNativeChildren = true` would
-   * otherwise short-circuit the conversion to `CometIcebergWriteExec` because Spark emits a bare
+   * otherwise short-circuit native write conversion because Spark emits a bare
    * `LocalTableScanExec` for inline `VALUES`. Using `sessionState.conf.setConfString` directly
    * (rather than `withSQLConf`) keeps the override visible to the columnar rule across some Spark
    * version / session-state combinations where `withSQLConf` loses the override before the rule
@@ -2596,10 +2885,13 @@ class CometIcebergWriteActionSuite
     session.sessionState.conf
       .setConfString(CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED.key, "true")
     session.sessionState.conf
+      .setConfString(CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.key, "true")
+    session.sessionState.conf
       .setConfString(CometConf.COMET_EXEC_LOCAL_TABLE_SCAN_ENABLED.key, "true")
     try action
     finally {
       session.sessionState.conf.unsetConf(CometConf.COMET_EXEC_LOCAL_TABLE_SCAN_ENABLED.key)
+      session.sessionState.conf.unsetConf(CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.key)
       session.sessionState.conf.unsetConf(CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED.key)
     }
   }

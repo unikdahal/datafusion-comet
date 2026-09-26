@@ -25,12 +25,14 @@ import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.spark.sql.comet.{CometIcebergWriteExec, CometNativeExec, IcebergWriteExec}
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.sql.comet.{CometIcebergDeltaWriteExec, CometIcebergWriteExec, CometNativeExec, IcebergWriteExec}
 
-import org.apache.comet.{CometConf, ConfigEntry}
+import com.google.protobuf.ByteString
+
 import org.apache.comet.CometSparkSessionExtensions.withFallbackReason
-import org.apache.comet.iceberg.IcebergReflection
-import org.apache.comet.objectstore.NativeConfig
+import org.apache.comet.ConfigEntry
+import org.apache.comet.iceberg.{IcebergDeltaReflection, IcebergNativeWriteEnvironment, IcebergReflection, PlainIcebergWrite, PositionDeltaWrite, ReplaceDataWrite}
 import org.apache.comet.serde.{CometOperatorSerde, Compatible, OperatorOuterClass, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.Operator
 import org.apache.comet.serde.QueryPlanSerde.exprToProto
@@ -38,7 +40,7 @@ import org.apache.comet.serde.QueryPlanSerde.exprToProto
 object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
 
   override def enabledConfig: Option[ConfigEntry[Boolean]] =
-    Some(CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED)
+    None
 
   override def requiresNativeChildren: Boolean = true
 
@@ -119,7 +121,10 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
 
   override def getSupportLevel(op: IcebergWriteExec): SupportLevel =
     try {
-      checkTriggers(op) match {
+      (op.dispatch match {
+        case PositionDeltaWrite(info) => checkDeltaTriggers(op, info)
+        case _ => checkTriggers(op)
+      }) match {
         case Some(reason) => Unsupported(Some(reason))
         case None => Compatible(None)
       }
@@ -152,16 +157,96 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     val context = TriggerContext(
       table,
       tableProperties ++ writeProperties,
-      sparkWrite,
-      op.session.sessionState.newHadoopConf())
+      IcebergReflection.getFormatFromSparkWrite(sparkWrite),
+      IcebergReflection.getWriteSchemaFromSparkWrite(sparkWrite),
+      None,
+      None,
+      op.session.sessionState.newHadoopConf(),
+      isDelta = false)
     triggers.iterator.map(rule => rule(context)).collectFirst { case Some(reason) => reason }
+  }
+
+  private def checkDeltaTriggers(
+      op: IcebergWriteExec,
+      info: org.apache.comet.iceberg.WriteDeltaDispatchInfo): Option[String] = {
+    val batchWrite = op.batchWrite
+    if (!IcebergReflection.isIcebergPositionDeltaBatchWrite(batchWrite)) {
+      return Some(s"not an Iceberg PositionDeltaBatchWrite: ${batchWrite.getClass.getName}")
+    }
+    val positionDeltaWrite = IcebergReflection
+      .getOuterPositionDeltaWrite(batchWrite)
+      .getOrElse {
+        return Some("could not unwrap SparkPositionDeltaWrite")
+      }
+      .asInstanceOf[AnyRef]
+    val table = IcebergReflection.getTableFromPositionDeltaWrite(positionDeltaWrite).getOrElse {
+      return Some("SparkPositionDeltaWrite.table is null")
+    }
+    val contextValue = (name: String) =>
+      IcebergReflection.getPositionDeltaWriteContextValue(positionDeltaWrite, name)
+    val tableProperties = IcebergReflection
+      .getTableProperties(table)
+      .map(_.asScala.toMap)
+      .getOrElse(Map.empty[String, String])
+    val writeProperties = IcebergReflection
+      .getPositionDeltaWriteValue(positionDeltaWrite, "writeProperties")
+      .map(_.asInstanceOf[java.util.Map[String, String]].asScala.toMap)
+      .getOrElse(Map.empty[String, String])
+    val command = IcebergReflection
+      .getPositionDeltaWriteValue(positionDeltaWrite, "command")
+      .map(_.toString.toUpperCase(Locale.ROOT))
+    val context = TriggerContext(
+      table,
+      tableProperties ++ writeProperties,
+      contextValue("dataFileFormat").map(_.toString.toLowerCase(Locale.ROOT)),
+      IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite),
+      contextValue("deleteFileFormat").map(_.toString.toUpperCase(Locale.ROOT)),
+      contextValue("deleteGranularity").map(_.toString.toUpperCase(Locale.ROOT)),
+      op.session.sessionState.newHadoopConf(),
+      isDelta = true)
+
+    val commonRejection = triggers.iterator
+      .map(rule => rule(context))
+      .collectFirst { case Some(reason) => reason }
+    commonRejection.orElse {
+      if (!command.exists(Set("DELETE", "UPDATE", "MERGE"))) {
+        Some(s"unsupported Iceberg row-level command ${command.getOrElse("<unresolved>")}")
+      } else if (IcebergReflection.getFormatVersion(table) != Some(2)) {
+        Some("native Iceberg delta writes require format-version=2")
+      } else if (!Set("PARTITION", "FILE").contains(context.deleteGranularity.getOrElse(""))) {
+        Some(
+          "native Iceberg delta requires PARTITION or FILE delete granularity, got " +
+            context.deleteGranularity.getOrElse("<unresolved>"))
+      } else if (!context.deleteFileFormat.contains("PARQUET")) {
+        Some(
+          "native Iceberg delta requires Parquet delete files, got " +
+            context.deleteFileFormat.getOrElse("<unresolved>"))
+      } else if (command.contains("MERGE") &&
+        org.apache.comet.shims.ShimCometMergeRows.nativeExecs.isEmpty) {
+        Some("native Iceberg MERGE requires a compatible native MergeRows implementation")
+      } else if (info.metadataLayout.specIdIndex.isEmpty ||
+        info.metadataLayout.partitionIndex.isEmpty) {
+        Some("native Iceberg delta projection is missing _spec_id or _partition")
+      } else if (context.deleteGranularity.contains("FILE")) {
+        IcebergDeltaReflection.rewritablePositionDeletes(positionDeltaWrite) match {
+          case Left(reason) => Some(reason)
+          case Right(_) => IcebergDeltaReflection.driverReflectionUnresolved()
+        }
+      } else {
+        IcebergDeltaReflection.driverReflectionUnresolved()
+      }
+    }
   }
 
   private case class TriggerContext(
       table: Any,
       properties: Map[String, String],
-      sparkWrite: Any,
-      hadoopConf: Configuration)
+      writeFormat: Option[String],
+      writeSchema: Option[Any],
+      deleteFileFormat: Option[String],
+      deleteGranularity: Option[String],
+      hadoopConf: Configuration,
+      isDelta: Boolean)
 
   private type TriggerRule = TriggerContext => Option[String]
 
@@ -196,9 +281,19 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     requireGcsFileIOForGcsDataLocation,
     requireExecutorReflectionResolvable)
 
+  private def contentAwareProperties(ctx: TriggerContext): Map[String, String] = {
+    if (!ctx.isDelta) return ctx.properties
+    val deletePrefix = "write.delete.parquet."
+    val dataPrefix = "write.parquet."
+    ctx.properties ++ ctx.properties.iterator.collect {
+      case (key, value) if key.startsWith(deletePrefix) =>
+        dataPrefix + key.substring(deletePrefix.length) -> value
+    }
+  }
+
   private val requireFormatParquet: TriggerRule = ctx =>
-    IcebergReflection.getFormatFromSparkWrite(ctx.sparkWrite) match {
-      case None => Some("could not resolve the effective write format from SparkWrite")
+    ctx.writeFormat match {
+      case None => Some("could not resolve the effective Iceberg data write format")
       case Some("parquet") => None
       case Some(other) => Some(s"resolved write format=$other (only parquet is supported)")
     }
@@ -231,9 +326,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   // and casts to FixedSizeBinary(N), and the V3-only types are excluded by the format-version
   // gate.
   private val requireNoUuidColumns: TriggerRule = ctx =>
-    IcebergReflection
-      .getWriteSchemaFromSparkWrite(ctx.sparkWrite)
-      .orElse(IcebergReflection.getSchema(ctx.table)) match {
+    ctx.writeSchema.orElse(IcebergReflection.getSchema(ctx.table)) match {
       case None => Some("could not resolve the write schema for column type checking")
       case Some(schema) =>
         IcebergReflection
@@ -256,14 +349,14 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
 
   private val requireNoBloomFilterColumnsEnabled: TriggerRule = ctx => {
     val prefix = PropertyKeys.BloomFilterColumnEnabledPrefix
-    ctx.properties
+    contentAwareProperties(ctx)
       .find { case (k, v) => k.startsWith(prefix) && v.equalsIgnoreCase("true") }
       .map { case (k, _) => s"$k=true: bloom filters unsupported" }
   }
 
   private val requireParquetPageVersionDefault: TriggerRule = ctx => {
     val key = PropertyKeys.ParquetPageVersion
-    ctx.properties
+    contentAwareProperties(ctx)
       .get(key)
       .filter(_.trim.toLowerCase(Locale.ROOT) != PropertyKeys.ParquetPageVersionDefault)
       .map(v => s"$key=$v unsupported")
@@ -271,7 +364,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
 
   private val requireShredVariantsDisabled: TriggerRule = ctx => {
     val key = PropertyKeys.ParquetShredVariants
-    ctx.properties
+    contentAwareProperties(ctx)
       .get(key)
       .filter(_.equalsIgnoreCase("true"))
       .map(_ => s"$key=true (variant shredding changes the parquet schema)")
@@ -283,10 +376,10 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   // not become a mid-task native failure, and a non-integer must fail on the stock path; both
   // fall back. Range logic lives beside the codec resolution in IcebergWriteProtoTranslation.
   private val requireNativeSupportedCompressionLevel: TriggerRule = ctx =>
-    IcebergWriteProtoTranslation.compressionLevelRejection(ctx.properties)
+    IcebergWriteProtoTranslation.compressionLevelRejection(contentAwareProperties(ctx))
 
   private val requireOnlyVettedParquetWriteProperties: TriggerRule = ctx =>
-    ctx.properties
+    contentAwareProperties(ctx)
       .find { case (k, _) =>
         k.startsWith(ParquetWritePropertyPrefix) &&
         !vettedParquetWriteKeys.contains(k) &&
@@ -355,8 +448,14 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   // the task's data files is pure reflection over iceberg-java internals. Resolving the whole
   // surface up front turns an Iceberg release that moves any of it into a plan-time fallback
   // instead of a mid-write task failure.
-  private val requireExecutorReflectionResolvable: TriggerRule = _ =>
-    IcebergReflection.executorReflectionUnresolved
+  private val requireExecutorReflectionResolvable: TriggerRule = ctx =>
+    if (ctx.isDelta) {
+      IcebergDeltaReflection
+        .executorReflectionUnresolved()
+        .orElse(IcebergReflection.executorReflectionUnresolved)
+    } else {
+      IcebergReflection.executorReflectionUnresolved
+    }
 
   // The `io-impl` property rule above only sees FileIO configured through table/write
   // properties; a catalog-level `io-impl` (or a catalog implementation installing its own
@@ -407,7 +506,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   // translation, so anything but a positive Java int falls back and fails on the stock path.
   private val requirePositiveIntParquetSizes: TriggerRule = ctx =>
     positiveIntParquetSizeKeys.flatMap { key =>
-      ctx.properties.get(key).flatMap { raw =>
+      contentAwareProperties(ctx).get(key).flatMap { raw =>
         scala.util.Try(java.lang.Integer.parseInt(raw)).toOption match {
           case None => Some(s"$key=$raw is not a Java int (iceberg-java fails at write time)")
           case Some(v) if v <= 0 =>
@@ -447,16 +546,29 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       childOp: Operator*): Option[OperatorOuterClass.Operator] = {
     val _ = (builder, childOp) // unused: we synthesise our own FFI scan child below
     try {
-      for {
-        icebergWrite <- buildIcebergWriteProto(op)
-        ffiScan <- buildFfiScan(op)
-        writeChild <- dropNonDataColumns(op, ffiScan)
-      } yield OperatorOuterClass.Operator
-        .newBuilder()
-        .setPlanId(op.id)
-        .addChildren(writeChild)
-        .setIcebergWrite(icebergWrite)
-        .build()
+      op.dispatch match {
+        case PositionDeltaWrite(info) =>
+          for {
+            deltaWrite <- buildIcebergDeltaWriteProto(op, info)
+            ffiScan <- buildFfiScan(op)
+          } yield OperatorOuterClass.Operator
+            .newBuilder()
+            .setPlanId(op.id)
+            .addChildren(ffiScan)
+            .setIcebergDeltaWrite(deltaWrite)
+            .build()
+        case _ =>
+          for {
+            icebergWrite <- buildIcebergWriteProto(op)
+            ffiScan <- buildFfiScan(op)
+            writeChild <- dropNonDataColumns(op, ffiScan)
+          } yield OperatorOuterClass.Operator
+            .newBuilder()
+            .setPlanId(op.id)
+            .addChildren(writeChild)
+            .setIcebergWrite(icebergWrite)
+            .build()
+      }
     } catch {
       case e: Exception =>
         withFallbackReason(op, s"Failed to convert Iceberg native write: ${e.getMessage}")
@@ -491,7 +603,12 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     // tables are gated out: on format-version >= 3 Iceberg's writer reads row-lineage fields
     // from the metadata columns (`ExtractRowLineage`), which this projection discards. Revisit
     // together with `requireFormatVersionAtMostTwo`.
-    if (op.replaceDataDispatch.isEmpty) return Some(scan)
+    op.dispatch match {
+      case PlainIcebergWrite => return Some(scan)
+      case PositionDeltaWrite(_) =>
+        return Some(scan)
+      case ReplaceDataWrite(_) =>
+    }
 
     val sparkWrite = IcebergReflection.getOuterSparkWrite(op.batchWrite).getOrElse {
       withFallbackReason(op, "Could not unwrap outer SparkWrite for ReplaceData projection")
@@ -548,27 +665,71 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   }
 
   override def createExec(nativeOp: Operator, op: IcebergWriteExec): CometNativeExec = {
-    val sparkWrite = IcebergReflection
-      .getOuterSparkWrite(op.batchWrite)
-      .getOrElse(
-        throw new IllegalStateException(
-          "Native Iceberg write conversion: could not unwrap outer SparkWrite from BatchWrite"))
-    val table = IcebergReflection
-      .getTableFromSparkWrite(sparkWrite)
-      .getOrElse(
-        throw new IllegalStateException(
-          "Native Iceberg write conversion: SparkWrite.table reflection failed"))
-    val outputSpecId = IcebergReflection
-      .getOutputSpecIdFromSparkWrite(sparkWrite)
-      .getOrElse(
-        throw new IllegalStateException(
-          "Native Iceberg write conversion: SparkWrite.outputSpecId reflection failed"))
-    CometIcebergWriteExec(
-      nativeOp,
-      op.child,
-      op.batchWrite,
-      table.asInstanceOf[AnyRef],
-      outputSpecId)
+    op.dispatch match {
+      case PositionDeltaWrite(_) =>
+        val positionDeltaWrite = IcebergReflection
+          .getOuterPositionDeltaWrite(op.batchWrite)
+          .getOrElse(throw new IllegalStateException("Could not unwrap SparkPositionDeltaWrite"))
+        val table = IcebergReflection
+          .getTableFromPositionDeltaWrite(positionDeltaWrite)
+          .getOrElse(
+            throw new IllegalStateException("SparkPositionDeltaWrite.table is unavailable"))
+        val outputSpec = IcebergReflection
+          .getPartitionSpec(table)
+          .getOrElse(throw new IllegalStateException("Table.spec() is unavailable"))
+        val outputSpecId = IcebergReflection
+          .getSpecId(outputSpec)
+          .getOrElse(throw new IllegalStateException("Table.spec().specId() is unavailable"))
+        val specs = IcebergReflection
+          .getPartitionSpecs(table)
+          .getOrElse(throw new IllegalStateException("Table.specs() is unavailable"))
+        val deltaProto = nativeOp.getIcebergDeltaWrite
+        val previousDeleteFilesBroadcast: Option[Broadcast[Map[String, AnyRef]]] =
+          if (deltaProto.getPreviousDeletesBlob.isEmpty) {
+            None
+          } else {
+            val groups = IcebergDeltaReflection
+              .rewritablePositionDeletes(positionDeltaWrite.asInstanceOf[AnyRef])
+              .fold(
+                reason =>
+                  throw new IllegalStateException(
+                    s"Could not rebuild rewritable deletes for executor commit messages: $reason"),
+                identity)
+            val originalsByLocation = groups.iterator
+              .flatMap(_.deleteFiles.iterator.map(file => file.location -> file.originalFile))
+              .toMap
+            Some(op.session.sparkContext.broadcast(originalsByLocation))
+          }
+        CometIcebergDeltaWriteExec(
+          nativeOp,
+          op.child,
+          op.batchWrite,
+          table.asInstanceOf[AnyRef],
+          outputSpecId,
+          specs,
+          previousDeleteFilesBroadcast)
+      case _ =>
+        val sparkWrite = IcebergReflection
+          .getOuterSparkWrite(op.batchWrite)
+          .getOrElse(throw new IllegalStateException(
+            "Native Iceberg write conversion: could not unwrap outer SparkWrite from BatchWrite"))
+        val table = IcebergReflection
+          .getTableFromSparkWrite(sparkWrite)
+          .getOrElse(
+            throw new IllegalStateException(
+              "Native Iceberg write conversion: SparkWrite.table reflection failed"))
+        val outputSpecId = IcebergReflection
+          .getOutputSpecIdFromSparkWrite(sparkWrite)
+          .getOrElse(
+            throw new IllegalStateException(
+              "Native Iceberg write conversion: SparkWrite.outputSpecId reflection failed"))
+        CometIcebergWriteExec(
+          nativeOp,
+          op.child,
+          op.batchWrite,
+          table.asInstanceOf[AnyRef],
+          outputSpecId)
+    }
   }
 
   /**
@@ -587,17 +748,6 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       return None
     }
 
-    val properties = IcebergReflection
-      .getTableProperties(table)
-      .map(_.asScala.toMap)
-      .getOrElse(Map.empty[String, String])
-    val fileIOProperties =
-      IcebergReflection.getFileIOProperties(table).getOrElse(Map.empty[String, String])
-
-    // A brand-new table (CTAS/RTAS before its first commit) has no metadata file yet. The
-    // native side only surfaces metadata_location in plan-debug output, so an empty string is
-    // fine -- FileIO is initialised from data_location.
-    val metadataLocation = IcebergReflection.getMetadataLocation(table).getOrElse("")
     val outputSpecId = IcebergReflection.getOutputSpecIdFromSparkWrite(sparkWrite).getOrElse {
       withFallbackReason(op, "SparkWrite.outputSpecId reflection failed")
       return None
@@ -606,16 +756,8 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       withFallbackReason(op, s"No partition spec found for id=$outputSpecId")
       return None
     }
-    val partitionSpecJson = IcebergReflection.partitionSpecToJson(partitionSpec).getOrElse {
-      withFallbackReason(op, "PartitionSpecParser.toJson failed")
-      return None
-    }
     val writeSchema = IcebergReflection.getWriteSchemaFromSparkWrite(sparkWrite).getOrElse {
       withFallbackReason(op, "SparkWrite.writeSchema reflection failed")
-      return None
-    }
-    val icebergSchemaJson = IcebergReflection.schemaToJson(writeSchema).getOrElse {
-      withFallbackReason(op, "SchemaParser.toJson failed")
       return None
     }
     // Iceberg's Spark `SparkWrite$WriterFactory` does NOT wire the table sort order into the
@@ -629,10 +771,6 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     // pinned runtime is bumped, otherwise default to 0.
     val sortOrderId =
       IcebergReflection.getOutputSortOrderIdFromSparkWrite(sparkWrite).getOrElse(0)
-    val dataLocation = IcebergReflection.getDataLocation(table).getOrElse {
-      withFallbackReason(op, "Table.locationProvider().newDataLocation reflection failed")
-      return None
-    }
     val operationId = IcebergReflection.getOperationIdFromSparkWrite(sparkWrite).getOrElse {
       withFallbackReason(op, "SparkWrite.queryId reflection failed")
       return None
@@ -647,59 +785,332 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
         withFallbackReason(op, "SparkWrite.useFanoutWriter reflection failed")
         return None
       }
-    val specIsUnpartitioned = isUnpartitionedSpec(partitionSpec)
-    val writerMode = IcebergWriteProtoTranslation.resolveWriterMode(
-      specIsUnpartitioned = specIsUnpartitioned,
-      useFanoutWriter = useFanoutWriter)
-
-    val createdBy = s"Apache Iceberg ${IcebergReflection.icebergVersion()} (Comet)"
-    // Iceberg's `RegistryBasedFileWriterFactory` merges resolved write properties (codec, level,
-    // and other effective settings carried on `SparkWrite`) over the table's properties when
-    // building the per-file writer. Mirror that merge here so per-write options (e.g.
-    // `option("write-parquet-compression-codec", "gzip")`) survive into the native writer.
     val resolvedWriteProperties =
       IcebergReflection.getWritePropertiesFromSparkWrite(sparkWrite).getOrElse(Map.empty)
-    val effectiveProperties = properties ++ resolvedWriteProperties
-    val parquetSettings =
-      IcebergWriteProtoTranslation.buildParquetSettings(effectiveProperties, createdBy)
-
-    // `FileIO.properties()` misses configuration a HadoopFileIO carries through the Hadoop
-    // Configuration instead (fs.s3a.* credentials, custom endpoint, path-style access), which
-    // the JVM writer would honour but iceberg-rust would never see. Mirror the scan side
-    // (`CometScanRule`): extract the object-store options for the data location from the
-    // session Hadoop configuration, translate them to the s3.* keys iceberg-rust consumes, and
-    // let FileIO/vended properties win on conflict.
-    val writeHadoopConf = op.session.sessionState.newHadoopConf()
-    val dataUri = new java.net.URI(dataLocation)
-    // Promote the data bucket's per-bucket `fs.s3a.bucket.<b>.*` settings to global, mirroring the
-    // scan path: iceberg-rust's pinned S3 parser reads only global `s3.*`. Only an S3-family data
-    // location yields a bucket (None for a local/GCS/OSS write, which needs no promotion).
-    //
-    // No opt-in S3-compliant aliases here: `requireSupportedStorageScheme` already declined any
-    // data location outside `SupportedStorageSchemes`, so an alias scheme never reaches this
-    // point. Alias support is scan-only. Enabling it would also mean forwarding
-    // `fs.comet.s3Compliant.schemes` into `catalogProperties`, as the scan does, since
-    // `storage_factory_for` reads the opt-in from there.
-    val dataBucket = NativeConfig.bucketForUri(dataUri, Set.empty)
-    val hadoopDerivedProperties = CometIcebergNativeScan.hadoopToIcebergS3Properties(
-      NativeConfig.extractObjectStoreOptions(writeHadoopConf, dataUri),
-      dataBucket)
-    val catalogProperties = hadoopDerivedProperties ++ fileIOProperties
-
-    val common = IcebergWriteProtoTranslation.buildCommon(
-      catalogProperties = catalogProperties,
-      metadataLocation = metadataLocation,
-      icebergSchemaJson = icebergSchemaJson,
-      partitionSpecJson = partitionSpecJson,
-      sortOrderId = sortOrderId,
-      dataLocation = dataLocation,
-      operationId = operationId,
-      targetFileSizeBytes = targetFileSize,
-      writerMode = writerMode,
-      parquetSettings = parquetSettings,
-      catalogName = IcebergReflection.deriveCatalogName(table))
+    val environment = IcebergNativeWriteEnvironment
+      .resolve(
+        op,
+        table.asInstanceOf[AnyRef],
+        writeSchema.asInstanceOf[AnyRef],
+        partitionSpec.asInstanceOf[AnyRef],
+        operationId,
+        targetFileSize,
+        useFanoutWriter,
+        sortOrderId,
+        resolvedWriteProperties)
+      .fold(
+        reason => {
+          withFallbackReason(op, reason)
+          return None
+        },
+        identity)
+    val parquetSettings = IcebergWriteProtoTranslation.buildParquetSettings(
+      environment.effectiveProperties,
+      s"Apache Iceberg ${environment.icebergVersion} (Comet)")
+    val common = buildIcebergWriteCommon(environment, parquetSettings)
 
     Some(OperatorOuterClass.IcebergWrite.newBuilder().setCommon(common).build())
+  }
+
+  private def buildIcebergDeltaWriteProto(
+      op: IcebergWriteExec,
+      dispatch: org.apache.comet.iceberg.WriteDeltaDispatchInfo)
+      : Option[OperatorOuterClass.IcebergDeltaWrite] = {
+    val batchWrite = op.batchWrite
+    val positionDeltaWrite = IcebergReflection
+      .getOuterPositionDeltaWrite(batchWrite)
+      .getOrElse {
+        withFallbackReason(op, "Could not unwrap SparkPositionDeltaWrite")
+        return None
+      }
+      .asInstanceOf[AnyRef]
+    val table = IcebergReflection.getTableFromPositionDeltaWrite(positionDeltaWrite).getOrElse {
+      withFallbackReason(op, "Could not extract Table from SparkPositionDeltaWrite")
+      return None
+    }
+    def contextValue(name: String): Option[AnyRef] =
+      IcebergReflection.getPositionDeltaWriteContextValue(positionDeltaWrite, name)
+    def stringValue(name: String): Option[String] = contextValue(name).map(_.toString)
+    def longValue(name: String): Option[Long] = contextValue(name).map {
+      case value: java.lang.Number => value.longValue()
+      case value =>
+        throw new IllegalArgumentException(s"PositionDeltaWrite.Context.$name is $value")
+    }
+    def booleanValue(name: String): Option[Boolean] = contextValue(name).map {
+      case value: java.lang.Boolean => value.booleanValue()
+      case value =>
+        throw new IllegalArgumentException(s"PositionDeltaWrite.Context.$name is $value")
+    }
+
+    // Iceberg's PositionDeltaWriteBuilder intentionally sets Context.dataSchema to null for
+    // delete-only writes because there is no data-row payload. The native delta proto still carries
+    // the common data schema, so use the table schema only for that shape. UPDATE/MERGE must keep
+    // resolving the actual per-write data schema rather than silently broadening it.
+    val writeSchema = IcebergReflection
+      .getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite)
+      .orElse {
+        if (dispatch.rowSchema.isEmpty) IcebergReflection.getSchema(table) else None
+      }
+      .getOrElse {
+        withFallbackReason(op, "PositionDeltaWrite.Context.dataSchema reflection failed")
+        return None
+      }
+    val outputSpec = IcebergReflection.getPartitionSpec(table).getOrElse {
+      withFallbackReason(op, "Table.spec() reflection failed for position delta")
+      return None
+    }
+    val operationId = stringValue("queryId").getOrElse {
+      withFallbackReason(op, "PositionDeltaWrite.Context.queryId reflection failed")
+      return None
+    }
+    val targetDataFileSize = longValue("targetDataFileSize").getOrElse {
+      withFallbackReason(op, "PositionDeltaWrite.Context.targetDataFileSize reflection failed")
+      return None
+    }
+    if (targetDataFileSize <= 0) {
+      withFallbackReason(op, s"Invalid position-delta target data file size $targetDataFileSize")
+      return None
+    }
+    val targetDeleteFileSize = longValue("targetDeleteFileSize").getOrElse {
+      withFallbackReason(op, "PositionDeltaWrite.Context.targetDeleteFileSize reflection failed")
+      return None
+    }
+    if (targetDeleteFileSize <= 0) {
+      withFallbackReason(
+        op,
+        s"Invalid position-delta target delete file size $targetDeleteFileSize")
+      return None
+    }
+    // Iceberg 1.5.x names this Context accessor fanoutWriterEnabled(); 1.8+ renamed it to
+    // useFanoutWriter(). Both values describe the same writer-factory choice.
+    val useFanoutWriter = booleanValue("useFanoutWriter")
+      .orElse(booleanValue("fanoutWriterEnabled"))
+      .getOrElse {
+        withFallbackReason(
+          op,
+          "PositionDeltaWrite.Context useFanoutWriter/fanoutWriterEnabled reflection failed")
+        return None
+      }
+    val inputOrdered = booleanValue("inputOrdered").getOrElse {
+      withFallbackReason(op, "PositionDeltaWrite.Context.inputOrdered reflection failed")
+      return None
+    }
+    val deleteGranularity = stringValue("deleteGranularity").getOrElse {
+      withFallbackReason(op, "PositionDeltaWrite.Context.deleteGranularity reflection failed")
+      return None
+    }
+    val deleteFileFormat = stringValue("deleteFileFormat").getOrElse {
+      withFallbackReason(op, "PositionDeltaWrite.Context.deleteFileFormat reflection failed")
+      return None
+    }
+    val resolvedWriteProperties = IcebergReflection
+      .getPositionDeltaWriteValue(positionDeltaWrite, "writeProperties")
+      .map(_.asInstanceOf[java.util.Map[String, String]].asScala.toMap)
+      .getOrElse(Map.empty[String, String])
+    // Iceberg only started wiring data sort order into PositionDelta writers in 1.11.
+    // Older runtimes build SparkFileWriterFactory without dataSortOrder(...), so their data files
+    // are intentionally stamped as unsorted (id 0). Match that behavior instead of treating the
+    // absent 1.11-only field as a conversion failure.
+    val sortOrderId =
+      IcebergReflection.getPositionDeltaWriteSortOrderId(positionDeltaWrite).getOrElse(0)
+    val environment = IcebergNativeWriteEnvironment
+      .resolve(
+        op,
+        table.asInstanceOf[AnyRef],
+        writeSchema.asInstanceOf[AnyRef],
+        outputSpec.asInstanceOf[AnyRef],
+        operationId,
+        targetDataFileSize,
+        useFanoutWriter,
+        sortOrderId,
+        resolvedWriteProperties)
+      .fold(
+        reason => {
+          withFallbackReason(op, reason)
+          return None
+        },
+        identity)
+    val createdBy = s"Apache Iceberg ${environment.icebergVersion} (Comet)"
+    val dataParquetSettings = IcebergWriteProtoTranslation.buildParquetSettings(
+      environment.effectiveProperties,
+      IcebergWriteProtoTranslation.DataContent,
+      createdBy)
+    val deleteParquetSettings = IcebergWriteProtoTranslation.buildParquetSettings(
+      environment.effectiveProperties,
+      IcebergWriteProtoTranslation.PositionDeleteContent,
+      createdBy)
+    val common = buildIcebergWriteCommon(environment, dataParquetSettings)
+
+    val tableSpecs = IcebergReflection.getPartitionSpecs(table).getOrElse {
+      withFallbackReason(op, "Table.specs() reflection failed")
+      return None
+    }
+    val unifiedFieldIds = IcebergReflection.getUnifiedPartitionFieldIds(table).getOrElse {
+      withFallbackReason(op, "Partitioning.partitionType(table) reflection failed")
+      return None
+    }
+    val unifiedOrdinals = unifiedFieldIds.zipWithIndex.toMap
+    val historicalSpecs = new java.util.ArrayList[OperatorOuterClass.IcebergDeltaPartitionSpec]()
+    tableSpecs.asScala.toSeq.sortBy(_._1.intValue()).foreach { case (id, spec) =>
+      val specId = id.intValue()
+      val fieldIds = IcebergReflection.getPartitionFieldIds(spec).getOrElse {
+        withFallbackReason(op, s"PartitionSpec.fields() reflection failed for spec $specId")
+        return None
+      }
+      val projection = fieldIds.map { fieldId =>
+        unifiedOrdinals.getOrElse(
+          fieldId, {
+            withFallbackReason(
+              op,
+              s"Historical spec $specId partition field id $fieldId is absent from " +
+                "the union partition struct")
+            return None
+          })
+      }
+      val specJson = IcebergReflection.partitionSpecToJson(spec).getOrElse {
+        withFallbackReason(op, s"PartitionSpecParser.toJson failed for spec $specId")
+        return None
+      }
+      val descriptor = OperatorOuterClass.IcebergDeltaPartitionSpec
+        .newBuilder()
+        .setSpecId(specId)
+        .setPartitionSpecJson(specJson)
+        .addAllPartitionProjection(projection.map(Int.box).asJava)
+        .addAllTargetPartitionFieldIds(fieldIds.map(Int.box).asJava)
+        .build()
+      historicalSpecs.add(descriptor)
+    }
+
+    val previousDeleteGroups =
+      if (deleteGranularity.equalsIgnoreCase("FILE")) {
+        IcebergDeltaReflection.rewritablePositionDeletes(positionDeltaWrite) match {
+          case Left(reason) =>
+            withFallbackReason(op, reason)
+            return None
+          case Right(groups) => groups
+        }
+      } else {
+        Seq.empty
+      }
+    val knownSpecIds = tableSpecs.keySet().asScala.map(_.intValue()).toSet
+    val previousDeletesBuilder = OperatorOuterClass.IcebergPreviousDeletes.newBuilder()
+    previousDeleteGroups.foreach { group =>
+      val groupBuilder = OperatorOuterClass.IcebergPreviousDeletesForDataFile
+        .newBuilder()
+        .setDataFile(group.dataFile)
+      group.deleteFiles.foreach { file =>
+        if (!knownSpecIds.contains(file.partitionSpecId)) {
+          withFallbackReason(
+            op,
+            s"Rewritable delete ${file.location} uses unknown partition spec " +
+              s"${file.partitionSpecId}")
+          return None
+        }
+        val fileBuilder = OperatorOuterClass.IcebergPreviousDeleteFileDescriptor
+          .newBuilder()
+          .setLocation(file.location)
+          .setFileSizeInBytes(file.fileSizeInBytes)
+          .setFormat(file.format)
+          .setPartitionSpecId(file.partitionSpecId)
+          .setRecordCount(file.recordCount)
+        file.keyMetadata.foreach(bytes => fileBuilder.setKeyMetadata(ByteString.copyFrom(bytes)))
+        file.referencedDataFile.foreach(fileBuilder.setReferencedDataFile)
+        file.contentOffset.foreach(fileBuilder.setContentOffset)
+        file.contentSizeInBytes.foreach(fileBuilder.setContentSizeInBytes)
+        groupBuilder.addDeleteFiles(fileBuilder)
+      }
+      previousDeletesBuilder.addGroups(groupBuilder)
+    }
+    val previousDeletesBlob =
+      if (previousDeleteGroups.nonEmpty) previousDeletesBuilder.build().toByteString
+      else ByteString.EMPTY
+
+    val operationLayout = OperatorOuterClass.DeltaInputLayout
+      .newBuilder()
+      .setOperationOrdinal(dispatch.operationOrdinal)
+      .addAllDataOrdinals(dispatch.rowOrdinals.getOrElse(IndexedSeq.empty).map(Int.box).asJava)
+      .addAllRowIdOrdinals(dispatch.rowIdOrdinals.map(Int.box).asJava)
+      .addAllMetadataOrdinals(
+        dispatch.metadataOrdinals.getOrElse(IndexedSeq.empty).map(Int.box).asJava)
+      .setDeleteOperation(dispatch.operationCodes.delete)
+      .setUpdateOperation(dispatch.operationCodes.update)
+      .setInsertOperation(dispatch.operationCodes.insert)
+    dispatch.operationCodes.reinsert.foreach(operationLayout.setReinsertOperation)
+    val metadataLayout = OperatorOuterClass.DeltaMetadataLayout
+      .newBuilder()
+      .setFilePathIndex(dispatch.metadataLayout.filePathIndex)
+      .setRowPositionIndex(dispatch.metadataLayout.rowPositionIndex)
+    dispatch.metadataLayout.specIdIndex.foreach(metadataLayout.setSpecIdIndex)
+    dispatch.metadataLayout.partitionIndex.foreach(metadataLayout.setPartitionIndex)
+    operationLayout.setMetadataLayout(metadataLayout.build())
+
+    val commandName = IcebergReflection
+      .getPositionDeltaWriteValue(positionDeltaWrite, "command")
+      .map(_.toString.toUpperCase(Locale.ROOT))
+      .getOrElse {
+        withFallbackReason(op, "SparkPositionDeltaWrite.command reflection failed")
+        return None
+      }
+    val command = commandName match {
+      case "DELETE" => OperatorOuterClass.IcebergDeltaCommand.ICEBERG_DELTA_COMMAND_DELETE
+      case "UPDATE" => OperatorOuterClass.IcebergDeltaCommand.ICEBERG_DELTA_COMMAND_UPDATE
+      case "MERGE" => OperatorOuterClass.IcebergDeltaCommand.ICEBERG_DELTA_COMMAND_MERGE
+      case other =>
+        withFallbackReason(op, s"Unsupported Iceberg position-delta command $other")
+        return None
+    }
+    val granularity = deleteGranularity.toUpperCase(Locale.ROOT) match {
+      case "PARTITION" =>
+        OperatorOuterClass.IcebergDeleteGranularity.ICEBERG_DELETE_GRANULARITY_PARTITION
+      case "FILE" =>
+        OperatorOuterClass.IcebergDeleteGranularity.ICEBERG_DELETE_GRANULARITY_FILE
+      case other =>
+        withFallbackReason(op, s"Unsupported Iceberg delete granularity $other")
+        return None
+    }
+    deleteFileFormat.toUpperCase(Locale.ROOT) match {
+      case "PARQUET" => ()
+      case other =>
+        withFallbackReason(op, s"Unsupported Iceberg delete file format $other")
+        return None
+    }
+
+    val result = OperatorOuterClass.IcebergDeltaWrite
+      .newBuilder()
+      .setDataCommon(common)
+      .addAllHistoricalSpecs(historicalSpecs)
+      .setInputLayout(operationLayout.build())
+      .setTargetDeleteFileSizeBytes(targetDeleteFileSize)
+      .setDeleteParquetSettings(deleteParquetSettings)
+      .setDeleteInputOrdered(inputOrdered)
+      .setDeleteGranularity(granularity)
+      .setDeleteDataLocation(environment.dataLocation)
+      .setCommand(command)
+      .setFormatVersion(environment.formatVersion)
+      .setPreviousDeletesBlob(previousDeletesBlob)
+      .build()
+    Some(result)
+  }
+
+  private def buildIcebergWriteCommon(
+      environment: IcebergNativeWriteEnvironment,
+      parquetSettings: OperatorOuterClass.IcebergParquetWriteSettings)
+      : OperatorOuterClass.IcebergWriteCommon = {
+    val writerMode = IcebergWriteProtoTranslation.resolveWriterMode(
+      specIsUnpartitioned = isUnpartitionedSpec(environment.outputSpec),
+      useFanoutWriter = environment.useFanoutWriter)
+    IcebergWriteProtoTranslation.buildCommon(
+      catalogProperties = environment.catalogProperties,
+      metadataLocation = environment.metadataLocation,
+      icebergSchemaJson = environment.writeSchemaJson,
+      partitionSpecJson = environment.outputSpecJson,
+      sortOrderId = environment.sortOrderId,
+      dataLocation = environment.dataLocation,
+      operationId = environment.operationId,
+      targetFileSizeBytes = environment.targetDataFileSize,
+      writerMode = writerMode,
+      parquetSettings = parquetSettings,
+      catalogName = environment.catalogName)
   }
 
   /**

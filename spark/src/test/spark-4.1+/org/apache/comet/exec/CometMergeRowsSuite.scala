@@ -23,9 +23,11 @@ import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.{CometListenerBusUtils, SparkConf}
 import org.apache.spark.sql.CometTestBase
+import org.apache.spark.sql.comet.CometMergeRowsExec
 import org.apache.spark.sql.connector.catalog.InMemoryRowLevelOperationTableCatalog
 import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
+import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
 import org.apache.spark.sql.util.QueryExecutionListener
 
 import org.apache.comet.CometConf
@@ -33,9 +35,8 @@ import org.apache.comet.CometConf
 /**
  * Spark 4.1+ compatibility coverage for MergeRowsExec.
  *
- * Spark 4.1 introduced writer-side MergeSummary discovery that specifically looks for Spark's
- * concrete MergeRowsExec. Comet must therefore retain that JVM node until it can preserve the
- * summary-aware BatchWrite.commit contract end-to-end.
+ * Spark 4.1 introduced writer-side MergeSummary discovery. The native MergeRows replacement must
+ * preserve the eight semantic counters consumed by the summary-aware BatchWrite contract.
  */
 class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
 
@@ -49,7 +50,7 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       .set("spark.sql.shuffle.partitions", "4")
   }
 
-  test("Spark 4.1+ MERGE retains Spark MergeRowsExec for write-summary compatibility") {
+  test("Spark 4.1+ native MergeRows preserves MergeSummary action counters") {
     val target = s"$catalog.default.rowlevel_target"
     val source = s"$catalog.default.rowlevel_source"
 
@@ -82,24 +83,22 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
 
       val executedPlans = captured.map(_.executedPlan)
       val sparkMergeRows = executedPlans.exists(plan =>
-        find(plan) {
-          case node if node.getClass.getSimpleName == "MergeRowsExec" => true
-          case _ => false
-        }.nonEmpty)
-      val cometMergeRows = executedPlans.exists(plan =>
-        find(plan) {
-          case node if node.getClass.getSimpleName == "CometMergeRowsExec" => true
-          case _ => false
-        }.nonEmpty)
+        find(plan) { case _: MergeRowsExec => true; case _ => false }.nonEmpty)
+      val cometMergeRows = executedPlans
+        .flatMap(plan => find(plan) { case _: CometMergeRowsExec => true; case _ => false })
+        .collectFirst { case node: CometMergeRowsExec => node }
 
       assert(
-        sparkMergeRows,
-        "Spark 4.1+ MERGE must retain the concrete Spark MergeRowsExec so the V2 writer can " +
-          "derive MergeSummary")
+        cometMergeRows.nonEmpty,
+        "Spark 4.1+ MERGE should execute through CometMergeRowsExec")
       assert(
-        !cometMergeRows,
-        "Spark 4.1+ must not replace MergeRowsExec until Comet preserves MergeSummary commit " +
-          "semantics")
+        !sparkMergeRows,
+        "Spark MergeRowsExec should be replaced when native MergeRows is enabled")
+      val metrics = cometMergeRows.get.metrics
+      assert(metrics("numTargetRowsCopied").value == 1L)
+      assert(metrics("numTargetRowsUpdated").value == 1L)
+      assert(metrics("numTargetRowsInserted").value == 1L)
+      assert(metrics("numTargetRowsMatchedUpdated").value == 1L)
 
       val rows =
         sql(s"SELECT id, amount FROM $target ORDER BY id").collect().map(_.toString).toSeq

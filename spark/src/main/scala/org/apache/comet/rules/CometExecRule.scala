@@ -55,6 +55,7 @@ import org.apache.spark.sql.types._
 import org.apache.comet.{CometConf, CometExplainInfo, ExtendedExplainInfo}
 import org.apache.comet.CometConf.{COMET_SPARK_TO_ARROW_ENABLED, COMET_SPARK_TO_ARROW_SUPPORTED_OPERATOR_LIST}
 import org.apache.comet.CometSparkSessionExtensions._
+import org.apache.comet.iceberg.PositionDeltaWrite
 import org.apache.comet.rules.CometExecRule.allExecs
 import org.apache.comet.serde._
 import org.apache.comet.serde.operator._
@@ -221,6 +222,88 @@ case class CometExecRule(session: SparkSession)
   }
 
   private def isCometNative(op: SparkPlan): Boolean = op.isInstanceOf[CometNativeExec]
+
+  /**
+   * Whether a write child is known to produce Arrow-backed columnar batches.
+   *
+   * AQE keeps [[AQEShuffleReadExec]] / [[ShuffleQueryStageExec]] wrappers around a Comet shuffle,
+   * so requiring the immediate child itself to be a [[CometNativeExec]] incorrectly rejects
+   * native writes after Spark inserts a write distribution. Walk only the known passthrough
+   * wrappers and stop at an explicitly Arrow-producing Comet node; arbitrary Spark columnar
+   * operators are deliberately not admitted because they may use on-heap vectors.
+   */
+  private def producesArrowBatches(plan: SparkPlan): Boolean = plan match {
+    case _: CometNativeExec => true
+    case _: CometSparkToColumnarExec => true
+    case _: CometShuffleExchangeExec => true
+    case read: AQEShuffleReadExec => producesArrowBatches(read.child)
+    case stage: ShuffleQueryStageExec => producesArrowBatches(stage.plan)
+    case ReusedExchangeExec(_, child) => producesArrowBatches(child)
+    case _ => false
+  }
+
+  /**
+   * Return the columnar producer below a row transition, including the WholeStageCodegen wrapper
+   * Spark can retain around that transition during AQE re-planning.
+   *
+   * This is intentionally only a structural unwrap. Callers still have to prove the returned
+   * child produces Arrow-backed batches before handing it to a native writer.
+   */
+  private def columnarChildBelowRowTransition(plan: SparkPlan): Option[SparkPlan] = plan match {
+    case ColumnarToRowExec(child) => Some(child)
+    case CometColumnarToRowExec(child) => Some(child)
+    case CometNativeColumnarToRowExec(child) => Some(child)
+    case WholeStageCodegenExec(child) => columnarChildBelowRowTransition(child)
+    case _ => None
+  }
+
+  /**
+   * Whether a Spark shuffle is row-based only because Comet had to decline the shuffle itself,
+   * while its immediate producer is still a Comet columnar plan.
+   *
+   * Iceberg FILE-granularity position deletes repartition by (_spec_id, _partition, _file). For
+   * an unpartitioned table, _partition is an empty struct. Comet shuffle deliberately rejects
+   * empty structs, so Spark inserts a row shuffle after CometColumnarToRow. The delta writer can
+   * still run natively by converting that shuffle output back to Arrow at the write boundary.
+   *
+   * Keep this test deliberately narrow: a shuffle over an arbitrary Spark operator (notably a
+   * Spark MergeRowsExec) must not make the native delta writer eligible.
+   */
+  private def isSparkShuffleOverComet(plan: SparkPlan): Boolean = plan match {
+    case shuffle: ShuffleExchangeExec =>
+      producesArrowBatches(shuffle.child) ||
+      columnarChildBelowRowTransition(shuffle.child).exists(producesArrowBatches)
+    case read: AQEShuffleReadExec => isSparkShuffleOverComet(read.child)
+    case stage: ShuffleQueryStageExec => isSparkShuffleOverComet(stage.plan)
+    case ReusedExchangeExec(_, child) => isSparkShuffleOverComet(child)
+    case _ => false
+  }
+
+  private def bridgeIcebergDeltaShuffle(op: IcebergWriteExec): IcebergWriteExec = {
+    val nativeWriteSupported = CometIcebergNativeWrite.getSupportLevel(op) match {
+      case _: Compatible => true
+      case _ => false
+    }
+    if (!nativeWriteSupported) {
+      op
+    } else {
+      // AQE can hand this rule an IcebergWriteExec whose child already carries the
+      // ColumnarToRow inserted for the earlier row-based write. Remove only that stale boundary
+      // when the producer underneath is known to be Arrow-backed; if native conversion later
+      // declines, the caller returns the untouched original operator.
+      val child = columnarChildBelowRowTransition(op.child)
+        .filter(producesArrowBatches)
+        .getOrElse(op.child)
+
+      if (producesArrowBatches(child)) {
+        if (child eq op.child) op else op.copy(child = child)
+      } else if (isSparkShuffleOverComet(child)) {
+        op.copy(child = CometSparkToColumnarExec(child))
+      } else {
+        op
+      }
+    }
+  }
 
   /**
    * Restore a Spark Partial while retaining its current children. The tag prevents reconversion
@@ -447,10 +530,20 @@ case class CometExecRule(session: SparkSession)
       // AQE re-fires the Iceberg write planning on every stage materialisation, so a
       // partitioned write's physical sub-tree may already contain a `CometIcebergWriteExec`.
       // Unwrap to avoid a double conversion.
-      case op: IcebergWriteExec if op.child.isInstanceOf[CometIcebergWriteExec] =>
+      case op: IcebergWriteExec
+          if op.child.isInstanceOf[CometIcebergWriteExec] ||
+            op.child.isInstanceOf[CometIcebergDeltaWriteExec] =>
         op.child
 
-      case op: IcebergWriteExec if CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED.get(op.conf) =>
+      case op: IcebergWriteExec
+          if op.dispatch.isInstanceOf[PositionDeltaWrite] &&
+            CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.get(op.conf) =>
+        val candidate = bridgeIcebergDeltaShuffle(op)
+        convertToComet(candidate, CometIcebergNativeWrite).getOrElse(op)
+
+      case op: IcebergWriteExec
+          if !op.dispatch.isInstanceOf[PositionDeltaWrite] &&
+            CometConf.COMET_ICEBERG_NATIVE_WRITE_ENABLED.get(op.conf) =>
         convertToComet(op, CometIcebergNativeWrite).getOrElse(op)
 
       // For AQE broadcast stage on a Comet broadcast exchange
@@ -857,6 +950,7 @@ case class CometExecRule(session: SparkSession)
           // needs its own serialization. Reset the flag so children can start their own native
           // execution blocks.
           if (op.isInstanceOf[CometNativeWriteExec] || op.isInstanceOf[CometIcebergWriteExec] ||
+            op.isInstanceOf[CometIcebergDeltaWriteExec] ||
             op.isInstanceOf[CometWriteFilesExec]) {
             firstNativeOp = true
           }
@@ -903,11 +997,11 @@ case class CometExecRule(session: SparkSession)
         return None
       }
 
-      // For operators that require native children (like writes), check if all data-producing
-      // children are CometNativeExec. This prevents runtime failures when the native operator
-      // expects Arrow arrays but receives non-Arrow data (e.g., OnHeapColumnVector).
+      // For operators that require Arrow input (like writes), accept native children and the
+      // narrow set of Comet/AQE wrappers that are known to preserve Arrow-backed batches. This
+      // still rejects arbitrary Spark columnar operators whose batches may use on-heap vectors.
       if (serde.requiresNativeChildren && op.children.nonEmpty) {
-        if (!dataProducingChildren.forall(_.isInstanceOf[CometNativeExec])) {
+        if (!dataProducingChildren.forall(producesArrowBatches)) {
           withFallbackReason(
             op,
             "Cannot perform native operation because input is not in Arrow format")

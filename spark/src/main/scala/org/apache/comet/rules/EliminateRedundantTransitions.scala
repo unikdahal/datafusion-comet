@@ -22,7 +22,7 @@ package org.apache.comet.rules
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.sideBySide
-import org.apache.spark.sql.comet.{CometCollectLimitExec, CometColumnarToRowExec, CometIcebergWriteExec, CometMapInBatchExec, CometNativeColumnarToRowExec, CometNativeWriteExec, CometPlan, CometSparkToColumnarExec}
+import org.apache.spark.sql.comet.{CometCollectLimitExec, CometColumnarToRowExec, CometIcebergDeltaWriteExec, CometIcebergWriteExec, CometMapInBatchExec, CometNativeColumnarToRowExec, CometNativeWriteExec, CometPlan, CometSparkToColumnarExec}
 import org.apache.spark.sql.comet.execution.shuffle.{CometColumnarShuffle, CometShuffleExchangeExec}
 import org.apache.spark.sql.comet.shims.{MapInBatchInfo, ShimCometMapInBatch}
 import org.apache.spark.sql.execution.{ColumnarToRowExec, RowToColumnarExec, SparkPlan}
@@ -199,6 +199,8 @@ case class EliminateRedundantTransitions(session: SparkSession)
    */
   private def stripIcebergWriteInputTransition(plan: SparkPlan): SparkPlan = plan.transform {
     case w: CometIcebergWriteExec =>
+      stripColumnarToRow(w.child).map(child => w.withNewChildren(Seq(child))).getOrElse(w)
+    case w: CometIcebergDeltaWriteExec =>
       stripColumnarToRow(w.child).map(child => w.withNewChildren(Seq(child))).getOrElse(w)
   }
 
