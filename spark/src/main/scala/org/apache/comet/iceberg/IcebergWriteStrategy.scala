@@ -128,7 +128,7 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
         val writeChild = dispatch match {
           case PositionDeltaWrite(info)
               if child.isInstanceOf[LogicalQueryStage] &&
-                !info.command.contains(DeltaMerge) &&
+                info.command.exists(_ != DeltaMerge) &&
                 CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.get(conf) &&
                 IcebergReflection
                   .getOuterPositionDeltaWrite(batchWrite)
