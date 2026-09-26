@@ -243,6 +243,21 @@ case class CometExecRule(session: SparkSession)
   }
 
   /**
+   * Return the columnar producer below a row transition, including the WholeStageCodegen wrapper
+   * Spark can retain around that transition during AQE re-planning.
+   *
+   * This is intentionally only a structural unwrap. Callers still have to prove the returned
+   * child produces Arrow-backed batches before handing it to a native writer.
+   */
+  private def columnarChildBelowRowTransition(plan: SparkPlan): Option[SparkPlan] = plan match {
+    case ColumnarToRowExec(child) => Some(child)
+    case CometColumnarToRowExec(child) => Some(child)
+    case CometNativeColumnarToRowExec(child) => Some(child)
+    case WholeStageCodegenExec(child) => columnarChildBelowRowTransition(child)
+    case _ => None
+  }
+
+  /**
    * Whether a Spark shuffle is row-based only because Comet had to decline the shuffle itself,
    * while its immediate producer is still a Comet columnar plan.
    *
@@ -256,11 +271,7 @@ case class CometExecRule(session: SparkSession)
    */
   private def isSparkShuffleOverComet(plan: SparkPlan): Boolean = plan match {
     case shuffle: ShuffleExchangeExec =>
-      shuffle.child match {
-        case _: CometColumnarToRowExec | _: CometNativeColumnarToRowExec => true
-        case WholeStageCodegenExec(_: CometColumnarToRowExec) => true
-        case _ => false
-      }
+      columnarChildBelowRowTransition(shuffle.child).exists(producesArrowBatches)
     case read: AQEShuffleReadExec => isSparkShuffleOverComet(read.child)
     case stage: ShuffleQueryStageExec => isSparkShuffleOverComet(stage.plan)
     case ReusedExchangeExec(_, child) => isSparkShuffleOverComet(child)
@@ -272,12 +283,24 @@ case class CometExecRule(session: SparkSession)
       case _: Compatible => true
       case _ => false
     }
-    if (nativeWriteSupported &&
-      !producesArrowBatches(op.child) &&
-      isSparkShuffleOverComet(op.child)) {
-      op.copy(child = CometSparkToColumnarExec(op.child))
-    } else {
+    if (!nativeWriteSupported) {
       op
+    } else {
+      // AQE can hand this rule an IcebergWriteExec whose child already carries the
+      // ColumnarToRow inserted for the earlier row-based write. Remove only that stale boundary
+      // when the producer underneath is known to be Arrow-backed; if native conversion later
+      // declines, the caller returns the untouched original operator.
+      val child = columnarChildBelowRowTransition(op.child)
+        .filter(producesArrowBatches)
+        .getOrElse(op.child)
+
+      if (producesArrowBatches(child)) {
+        if (child eq op.child) op else op.copy(child = child)
+      } else if (isSparkShuffleOverComet(child)) {
+        op.copy(child = CometSparkToColumnarExec(child))
+      } else {
+        op
+      }
     }
   }
 
