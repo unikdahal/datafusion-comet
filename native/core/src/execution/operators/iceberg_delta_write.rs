@@ -190,7 +190,7 @@ impl DeleteRouter {
                     "Native Iceberg DELETE references unknown partition spec {spec_id}"
                 ))
             })?;
-            if partition_values.is_null(row) {
+            if !historical.spec.is_unpartitioned() && partition_values.is_null(row) {
                 return Err(DataFusionError::Execution(format!(
                     "Native Iceberg DELETE row {row} has a null _partition struct"
                 )));

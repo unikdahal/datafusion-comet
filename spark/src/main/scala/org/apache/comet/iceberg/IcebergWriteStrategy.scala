@@ -125,7 +125,12 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
         val writeChild = dispatch match {
           case PositionDeltaWrite(_)
               if child.isInstanceOf[LogicalQueryStage] &&
-                CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.get(conf) =>
+                CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.get(conf) &&
+                IcebergReflection
+                  .getOuterPositionDeltaWrite(batchWrite)
+                  .flatMap(
+                    IcebergReflection.getPositionDeltaWriteContextValue(_, "deleteGranularity"))
+                  .exists(_.toString.equalsIgnoreCase("FILE")) =>
             CometSparkToColumnarExec(plannedChild)
           case _ =>
             plannedChild
