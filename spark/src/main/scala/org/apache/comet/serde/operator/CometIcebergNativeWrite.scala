@@ -842,8 +842,15 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
         throw new IllegalArgumentException(s"PositionDeltaWrite.Context.$name is $value")
     }
 
+    // Iceberg's PositionDeltaWriteBuilder intentionally sets Context.dataSchema to null for
+    // delete-only writes because there is no data-row payload. The native delta proto still carries
+    // the common data schema, so use the table schema only for that shape. UPDATE/MERGE must keep
+    // resolving the actual per-write data schema rather than silently broadening it.
     val writeSchema = IcebergReflection
       .getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite)
+      .orElse {
+        if (dispatch.rowSchema.isEmpty) IcebergReflection.getSchema(table) else None
+      }
       .getOrElse {
         withFallbackReason(op, "PositionDeltaWrite.Context.dataSchema reflection failed")
         return None
