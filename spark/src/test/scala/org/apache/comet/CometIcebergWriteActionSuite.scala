@@ -41,7 +41,7 @@ import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
-import org.apache.spark.sql.comet.{CometIcebergWriteExec, IcebergCommitExec, IcebergWriteExec}
+import org.apache.spark.sql.comet.{CometIcebergWriteExec, CometMergeRowsExec, IcebergCommitExec, IcebergWriteExec}
 import org.apache.spark.sql.connector.catalog.InMemoryTableCatalog
 import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, PhysicalWriteInfo, Write, WriterCommitMessage}
 import org.apache.spark.sql.execution.{ColumnarToRowTransition, LeafExecNode, SparkPlan}
@@ -904,16 +904,9 @@ class CometIcebergWriteActionSuite
     }
   }
 
-  test("native acceleration: ReplaceData (CoW MERGE) falls back (MergeRowsExec not Comet)") {
-    // TODO(comet-merge-rows): native MERGE engagement requires a Comet equivalent of Iceberg's
-    // `MergeRowsExec` (the per-row dispatch operator that assigns __row_operation codes from
-    // MATCHED/NOT MATCHED clauses). Without it, `MergeRowsExec` stays JVM, the upstream chain
-    // breaks Comet-native partway, and `requiresNativeChildren=true` declines the
-    // `IcebergWriteExec -> CometIcebergWriteExec` conversion. Until that lands, MERGE
-    // falls back to the JVM two-op path -- this test pins that contract. Native `MergeRowsExec`
-    // is being added in https://github.com/apache/datafusion-comet/pull/5318; when that lands
-    // this test will start failing and needs to flip to `assertNativeWriteEngages`.
+  test("native acceleration: ReplaceData (CoW MERGE) runs MergeRows and writer natively") {
     assumeNativeAcceleration()
+    assume(isSpark35Plus && !isSpark41Plus, "native MergeRows requires Spark 3.5 through 4.0")
     withIcebergCatalog { warehouseDir =>
       createTable(
         warehouseDir,
@@ -923,16 +916,47 @@ class CometIcebergWriteActionSuite
       withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
         coalesceInsert("native_cow_merge", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
       }
-      assertNativeWriteDoesNotEngage("native_cow_merge", Seq(1, 2, 3)) {
-        spark.sql("""
-          |MERGE INTO cat.db.native_cow_merge t
-          |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
-          |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
-          |ON t.id = s.id
-          |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
-          |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
-          |""".stripMargin)
+
+      var snapshot: Option[WriteSnapshot] = None
+      withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
+        snapshot = Some(withNativeEnabled {
+          captureWrite("native_cow_merge") {
+            spark.sql("""
+              |MERGE INTO cat.db.native_cow_merge t
+              |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
+              |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
+              |ON t.id = s.id
+              |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
+              |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
+              |""".stripMargin)
+          }
+        })
       }
+
+      val writeSnapshot =
+        snapshot.getOrElse(fail("native MERGE write did not produce a snapshot"))
+      assert(
+        writeSnapshot.snapshotDelta == 1L,
+        s"expected exactly one Iceberg snapshot from native MERGE, got ${writeSnapshot.snapshotDelta}")
+      val mergeExecs = writeSnapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }
+      }
+      assert(
+        mergeExecs.nonEmpty,
+        "expected Iceberg MERGE to execute through CometMergeRowsExec. Plans:\n" +
+          writeSnapshot.plans.mkString("\n--\n"))
+      val nativeWrites = writeSnapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }
+      }
+      assert(
+        nativeWrites.nonEmpty,
+        "expected Iceberg MERGE to feed CometIcebergWriteExec. Plans:\n" +
+          writeSnapshot.plans.mkString("\n--\n"))
+      assertRows("native_cow_merge", expectedIds = Seq(1, 2, 3))
+      val updated = spark
+        .sql(s"SELECT amount FROM $catalog.$ns.native_cow_merge WHERE id = 2")
+        .collect()
+      assert(updated.length == 1 && updated.head.getDouble(0) == 200.0)
     }
   }
 
@@ -2777,83 +2801,6 @@ class CometIcebergWriteActionSuite
       "expected >= 1 CometIcebergWriteExec in captured plans, got 0. Plans:\n" +
         snapshot.plans.mkString("\n--\n"))
     assertRows(tableName, expectedIds)
-  }
-
-  /**
-   * For writes that *should* fall back even when the native conf is on (e.g. CoW MERGE): exactly
-   * one commit, no `CometIcebergWriteExec`, but the JVM two-op pair still present and rows
-   * correct. Catches regressions where a trigger silently stops firing and we accidentally run
-   * native for an unsupported case.
-   */
-  private def assertNativeWriteDoesNotEngage(tableName: String, expectedIds: Seq[Int])(
-      action: => Unit): Unit = {
-    val snapshot = withNativeEnabled { captureWrite(tableName)(action) }
-    assertExactlyOneCommit(snapshot)
-    val nativeExecs = snapshot.plans.flatMap { p =>
-      collectWithSubqueries(p) { case e: CometIcebergWriteExec => e }
-    }
-    assert(
-      nativeExecs.isEmpty,
-      s"expected NO CometIcebergWriteExec, got ${nativeExecs.size}. Plans:\n" +
-        snapshot.plans.mkString("\n--\n"))
-    assertRows(tableName, expectedIds)
-  }
-
-  /**
-   * Runs `fail` against a fresh table on Spark's own V2 write path and then on the split plan,
-   * and asserts both failures mention `expectedMessage` (lower case) and that the split plan
-   * threw the same exception type, with the same type of cause, as Spark did.
-   */
-  private def assertFailsLikeSpark(tablePrefix: String, expectedMessage: String)(
-      fail: String => Throwable): Unit = {
-    // Spark 3.x's `withSQLConf` returns `Unit`, hence the var.
-    var sparkError: Throwable = null
-    withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
-      sparkError = fail(s"${tablePrefix}_spark")
-    }
-    val (plans, splitError) = captureFailedPlans(spark) {
-      throw fail(s"${tablePrefix}_split")
-    }
-    assert(
-      collectIcebergWriteOps(plans)._1.nonEmpty,
-      "expected the failing write to run through IcebergCommitExec:\n" +
-        plans.mkString("\n--\n"))
-    Seq(sparkError, splitError.get).foreach { e =>
-      assert(
-        exceptionChain(e).exists(t =>
-          Option(t.getMessage).exists(_.toLowerCase.contains(expectedMessage))),
-        s"expected a failure mentioning '$expectedMessage', got $e")
-    }
-    def shape(t: Throwable): (Class[_], Option[Class[_]]) =
-      (t.getClass, Option(t.getCause).map(_.getClass))
-    assert(
-      shape(splitError.get) == shape(sparkError),
-      s"split plan threw ${shape(splitError.get)} but Spark's write threw ${shape(sparkError)}\n" +
-        s"split: ${splitError.get}\nspark: $sparkError")
-  }
-
-  /**
-   * Runs an [[IcebergCommitExec]] over `child` whose commit throws `commitFailure` and whose
-   * abort fails. Asserts the failure is wrapped the way Spark's `V2TableWriteExec.writeWithV2`
-   * (3.4 through 4.2) wraps it, in `QueryExecutionErrors.writingJobFailedError` with the abort
-   * failure suppressed on the original failure, and returns that original failure.
-   */
-  private def failWithFailingAbort(child: SparkPlan, commitFailure: Throwable): Throwable = {
-    val abortFailure = new RuntimeException("injected abort failure")
-    val batchWrite = new BatchWrite {
-      override def createBatchWriterFactory(info: PhysicalWriteInfo): DataWriterFactory =
-        throw new UnsupportedOperationException
-      override def commit(messages: Array[WriterCommitMessage]): Unit = throw commitFailure
-      override def abort(messages: Array[WriterCommitMessage]): Unit = throw abortFailure
-    }
-    val exec = IcebergCommitExec(batchWrite, new Write {}, () => (), child)
-    val e = intercept[SparkException](exec.executeCollect())
-    assert(e.getMessage.contains("Writing job failed"), s"unexpected message: ${e.getMessage}")
-    val cause = e.getCause
-    assert(
-      cause.getSuppressed.contains(abortFailure),
-      s"expected the abort failure suppressed on the cause, got ${cause.getSuppressed.toSeq}")
-    cause
   }
 
   private def exceptionChain(t: Throwable): Seq[Throwable] = {
