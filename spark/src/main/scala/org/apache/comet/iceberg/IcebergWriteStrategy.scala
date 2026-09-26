@@ -118,13 +118,17 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
       //
       // The wrapper is transparent for JVM fallback: CometSparkToColumnarExec.doExecute delegates
       // to its child, and Spark's transition cleanup removes the bridge when the write itself is
-      // not converted. Restrict it to materialized delta-write query stages so ordinary writes
-      // and the initial pre-AQE plan keep their existing direct child.
+      // not converted. Restrict it to materialized non-MERGE delta-write query stages so ordinary
+      // writes and the initial pre-AQE plan keep their existing direct child. MERGE must instead
+      // be bridged by CometExecRule only after it proves the Spark shuffle sits over a native
+      // MergeRows producer; wrapping a JVM MergeRows here would incorrectly make the delta writer
+      // eligible for native execution.
       case l @ IcebergWriteLogical(child, batchWrite, dispatch) =>
         val plannedChild = planLater(child)
         val writeChild = dispatch match {
-          case PositionDeltaWrite(_)
+          case PositionDeltaWrite(info)
               if child.isInstanceOf[LogicalQueryStage] &&
+                !info.command.contains(DeltaMerge) &&
                 CometConf.COMET_ICEBERG_DELTA_WRITE_ENABLED.get(conf) &&
                 IcebergReflection
                   .getOuterPositionDeltaWrite(batchWrite)
