@@ -2374,6 +2374,7 @@ class CometIcebergWriteActionSuite
 
   Seq("payload", "close", "poll").foreach { failurePoint =>
     test(s"native MoR cleanup owns files before a $failurePoint handoff failure") {
+      assume(icebergAvailable, "Iceberg not available in classpath")
       withIcebergCatalog { warehouseDir =>
         val tableName = s"delta_handoff_$failurePoint"
         createTable(warehouseDir, tableName, partitionSpec = "")
