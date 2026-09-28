@@ -44,7 +44,6 @@ import org.apache.spark.sql.execution.{ColumnarToRowTransition, LeafExecNode, Sp
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.sql.types.{BinaryType, DoubleType, IntegerType, StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
