@@ -54,6 +54,12 @@ private[comet] final case class IcebergNativeWriteEnvironment(
 
 private[comet] object IcebergNativeWriteEnvironment {
 
+  def resolveTableProperties(table: Any): Either[String, Map[String, String]] =
+    IcebergReflection
+      .getTableProperties(table)
+      .flatMap(properties => Option(properties).map(_.asScala.toMap))
+      .toRight("could not read Iceberg table properties")
+
   /** Resolves all common environment values without creating files or mutating the table. */
   def resolve(
       op: IcebergWriteExec,
@@ -67,10 +73,10 @@ private[comet] object IcebergNativeWriteEnvironment {
       resolvedWriteProperties: Map[String, String])
       : Either[String, IcebergNativeWriteEnvironment] =
     try {
-      val tableProperties = IcebergReflection
-        .getTableProperties(table)
-        .map(_.asScala.toMap)
-        .getOrElse(Map.empty[String, String])
+      val tableProperties = resolveTableProperties(table) match {
+        case Right(properties) => properties
+        case Left(reason) => return Left(reason)
+      }
       val fileIOProperties = IcebergReflection
         .getFileIOProperties(table)
         .getOrElse(Map.empty[String, String])

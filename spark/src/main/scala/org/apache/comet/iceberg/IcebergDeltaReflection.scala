@@ -93,7 +93,11 @@ object IcebergDeltaReflection {
       val method = IcebergReflection
         .findMethodInHierarchy(scanClass, "rewritableDeletes", java.lang.Boolean.TYPE)
         .getOrElse(return Left("SparkBatchQueryScan.rewritableDeletes(boolean) is unavailable"))
-      val scan = IcebergReflection.getPositionDeltaWriteValue(positionDeltaWrite, "scan") match {
+      // A null scan is legitimate, but a missing field means this Iceberg runtime changed its
+      // row-level write contract. Do not mistake that reflection failure for an empty rewrite set.
+      val scanField = positionDeltaWrite.getClass.getDeclaredField("scan")
+      scanField.setAccessible(true)
+      val scan = Option(scanField.get(positionDeltaWrite)) match {
         case Some(value) => value
         case None => return Right(Seq.empty)
       }

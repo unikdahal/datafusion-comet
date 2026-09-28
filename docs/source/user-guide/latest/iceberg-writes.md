@@ -81,6 +81,13 @@ spark.comet.write.iceberg.splitOperator.enabled=true
 
 # Native-write eligibility detection (experimental, off by default; requires the split plan)
 spark.comet.iceberg.write.enabled=true
+
+# Lets writes whose input is a local relation (INSERT ... VALUES, a local DataFrame) use the
+# native writer; see "Native Parquet write eligibility" below
+spark.comet.exec.localTableScan.enabled=true
+
+# Native merge-on-read writes (experimental, off by default; requires the split plan)
+spark.comet.iceberg.delta.write.enabled=true
 ```
 
 ## Supported operations
@@ -92,6 +99,7 @@ supports:
 - `INSERT OVERWRITE`, static and dynamic (`OverwriteByExpression`,
   `OverwritePartitionsDynamic`)
 - Copy-on-write `DELETE` / `UPDATE` / `MERGE` (`ReplaceData`)
+- Merge-on-read `DELETE` / `UPDATE` / `MERGE` (`WriteDelta`)
 
 The mechanism behind row-level DML differs by Spark version: on Spark 4.0+ the analyzer emits
 operation-coded rows that Comet's writer dispatches through `ReplaceData`'s projections, while
@@ -109,7 +117,6 @@ The rewrite is skipped — and the write runs through Spark's stock combined ope
 
 - `spark.comet.write.iceberg.splitOperator.enabled` is `false` (the default);
 - the write is not an Iceberg `SparkWrite` (any other V2 data source);
-- the table uses merge-on-read: delta writes (Iceberg `WriteDelta`) are not intercepted;
 - the statement is CTAS / RTAS on Spark 3.4, where the staged exec writes inline; on Spark
   3.5+ those statements re-plan their inner append, which is intercepted normally;
 - the write requires Spark's commit coordinator, which Comet's per-task commit protocol does
@@ -121,6 +128,22 @@ In every fallback case the write is planned as if Comet were absent; there is no
 trade-off, only no plan change.
 
 ## Native Parquet write eligibility
+
+Merge-on-read writes use the separate `spark.comet.iceberg.delta.write.enabled` flag.
+Eligible format-v2 commands write data files and Parquet position-delete files through
+`CometIcebergDeltaWrite`. Iceberg still validates and commits the row delta. The native path
+supports partition and file delete granularity. File granularity requires Iceberg's command-scan
+API for discovering rewritable delete files, so it falls back with the Spark 3.4 profile's
+Iceberg 1.5.2 runtime. Replaced delete files retain all earlier positions.
+
+The data-file and delete-file Parquet settings are checked separately. A setting under
+`write.delete.parquet.*` overrides the corresponding data-file setting only for delete files.
+The plan must supply Arrow batches to the writer. A supported Spark shuffle over a Comet
+producer can be converted back to Arrow at the delta-write boundary. Unsupported inputs and
+runtime reflection contracts keep the JVM delta writer.
+An unpartitioned `MERGE` can retain Spark's `MergeRows` and JVM delta writer when its empty
+`_partition` struct requires a Spark row shuffle; check the executed plan to confirm which
+writer ran.
 
 When `spark.comet.iceberg.write.enabled=true`
 ([#5308](https://github.com/apache/datafusion-comet/issues/5308)), the `IcebergWrite` operator's
@@ -189,9 +212,10 @@ which are forwarded.
 Other `write.*` properties are intentionally not gated because they cannot make the native
 writer produce different data files: distribution and ordering settings shape the Spark plan
 identically on both paths, WAP / branch / snapshot properties act on the JVM committer,
-`write.avro.*` / `write.orc.*` apply only to formats already excluded, and merge-on-read
-settings route the write through `WriteDelta`, which the split plan never intercepts. Every
-rule is pinned by `CometIcebergWriteDetectionSuite`.
+`write.avro.*` / `write.orc.*` apply only to formats already excluded. Merge-on-read settings
+route the write through `WriteDelta`, whose native path has a separate eligibility check for
+data-file and delete-file properties. Every rule is pinned by
+`CometIcebergWriteDetectionSuite`.
 
 Manifest `DataFile` metrics are assembled on the JVM before commit: each written file's
 metrics are re-derived from its parquet footer through the version-matched

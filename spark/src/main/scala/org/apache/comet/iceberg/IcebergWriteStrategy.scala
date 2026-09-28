@@ -31,8 +31,8 @@ import org.apache.comet.CometConf
 import org.apache.comet.CometSparkSessionExtensions.isCometLoaded
 
 /**
- * Spark Strategy that intercepts Iceberg V2 copy-on-write logical writes and emits Comet's
- * two-operator physical tree.
+ * Spark Strategy that intercepts supported Iceberg V2 writes, including merge-on-read
+ * position-delta commands, and emits Comet's two-operator physical tree.
  */
 case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
 

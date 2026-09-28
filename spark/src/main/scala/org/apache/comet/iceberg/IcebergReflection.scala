@@ -327,6 +327,17 @@ object IcebergReflection extends Logging {
     getPositionDeltaWriteContextValue(write, "dataSchema")
 
   /**
+   * DELETE has no data projection, so Iceberg deliberately leaves Context.dataSchema null. Native
+   * delete routing still needs the table schema to resolve partition source field IDs. UPDATE and
+   * MERGE must retain Iceberg's validated write schema.
+   */
+  def getNativeSchemaFromPositionDeltaWrite(write: Any): Option[Any] =
+    getPositionDeltaWriteValue(write, "command").map(_.toString) match {
+      case Some("DELETE") => getTableFromPositionDeltaWrite(write).flatMap(getSchema)
+      case _ => getWriteSchemaFromPositionDeltaWrite(write)
+    }
+
+  /**
    * Extract the version-specific logical WriteDelta contract. Spark 3.4's Iceberg extension node
    * and Spark's stock WriteDelta both expose these case-class members, though their table member
    * is named differently (`originalTable` vs `table`).

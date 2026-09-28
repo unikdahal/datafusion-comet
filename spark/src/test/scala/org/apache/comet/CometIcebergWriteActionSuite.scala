@@ -42,8 +42,11 @@ import org.apache.spark.sql.connector.catalog.InMemoryTableCatalog
 import org.apache.spark.sql.connector.write.{BatchWrite, DataWriterFactory, PhysicalWriteInfo, Write, WriterCommitMessage}
 import org.apache.spark.sql.execution.{ColumnarToRowTransition, LeafExecNode, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
+import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{DoubleType, IntegerType, StringType, StructField, StructType}
+import org.apache.spark.sql.streaming.Trigger
+import org.apache.spark.sql.types.{BinaryType, DoubleType, IntegerType, StringType, StructField, StructType}
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 import org.apache.comet.CometSparkSessionExtensions.{isSpark35Plus, isSpark41Plus}
 import org.apache.comet.iceberg.IcebergReflection
@@ -1185,6 +1188,107 @@ class CometIcebergWriteActionSuite
     }
   }
 
+  test("native FILE MoR DELETE and UPDATE are not wrapped by a second writer under AQE") {
+    assumeNativeAcceleration()
+    assume(icebergVersionAtLeast(1, 8), "FILE-granularity coverage requires Iceberg 1.8+")
+    withIcebergCatalog { warehouseDir =>
+      withSQLConf("spark.sql.adaptive.enabled" -> "true") {
+        val tableName = "mor_file_aqe"
+        createTable(
+          warehouseDir,
+          tableName,
+          "PARTITIONED BY (region)",
+          Some(
+            "'format-version'='2', 'write.delete.mode'='merge-on-read', " +
+              "'write.update.mode'='merge-on-read', 'write.delete.granularity'='file'"))
+        withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+          coalesceInsert(
+            tableName,
+            Seq((1, "a", 10.0), (2, "a", 20.0), (3, "b", 30.0), (4, "b", 40.0)))
+        }
+
+        def checkSingleNativeWriter(snapshot: WriteSnapshot): Unit = {
+          val writers = snapshot.plans.flatMap { plan =>
+            collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }
+          }
+          assert(writers.nonEmpty, s"expected a native delta writer. Plans:\n${snapshot.plans}")
+          assert(
+            writers.forall { writer =>
+              collectWithSubqueries(writer.child) { case e: CometIcebergDeltaWriteExec =>
+                e
+              }.isEmpty
+            },
+            s"AQE nested a delta writer below another delta writer. Plans:\n${snapshot.plans}")
+          assert(snapshot.snapshotDelta == 1L)
+        }
+
+        val deleted = withNativeEnabled {
+          captureWrite(tableName) {
+            spark.sql(s"DELETE FROM $catalog.$ns.$tableName WHERE id = 1")
+          }
+        }
+        checkSingleNativeWriter(deleted)
+
+        val updated = withNativeEnabled {
+          captureWrite(tableName) {
+            spark.sql(s"UPDATE $catalog.$ns.$tableName SET amount = amount + 3 WHERE id = 3")
+          }
+        }
+        checkSingleNativeWriter(updated)
+        checkAnswer(
+          spark.sql(s"SELECT id, region, amount FROM $catalog.$ns.$tableName ORDER BY id"),
+          Seq(Row(2, "a", 20.0), Row(3, "b", 33.0), Row(4, "b", 40.0)))
+      }
+    }
+  }
+
+  Seq("true", "false").foreach { aqe =>
+    test(s"native MoR UPDATE matches iceberg-java with partition evolution, AQE=$aqe") {
+      assumeNativeAcceleration()
+      withIcebergCatalog { warehouseDir =>
+        withSQLConf("spark.sql.adaptive.enabled" -> aqe) {
+          val nativeTable = s"mor_update_native_$aqe"
+          val jvmTable = s"mor_update_jvm_$aqe"
+          Seq(nativeTable, jvmTable).foreach { name =>
+            createTable(
+              warehouseDir,
+              name,
+              "PARTITIONED BY (region)",
+              Some("'format-version'='2', 'write.update.mode'='merge-on-read', " +
+                "'write.delete.granularity'='partition'"))
+            withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+              coalesceInsert(name, Seq((1, "us", 10.0), (2, "us", 20.0), (3, "eu", 30.0)))
+              spark.sql(s"ALTER TABLE $catalog.$ns.$name ADD PARTITION FIELD bucket(4, id)")
+              coalesceInsert(name, Seq((4, "eu", 40.0)))
+            }
+          }
+          def update(name: String): Unit = {
+            spark.sql(
+              s"UPDATE $catalog.$ns.$name SET region = 'updated', amount = amount + 1 " +
+                "WHERE id IN (2, 4)")
+          }
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            update(jvmTable)
+          }
+          val snapshot = withNativeEnabled {
+            captureWrite(nativeTable) { update(nativeTable) }
+          }
+          assert(
+            snapshot.plans.exists { plan =>
+              collectWithSubqueries(plan) { case e: CometIcebergDeltaWriteExec => e }.nonEmpty
+            },
+            s"expected native MoR UPDATE. Plans:\n${snapshot.plans.mkString("\n--\n")}")
+          assert(snapshot.snapshotDelta == 1L)
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            checkAnswer(
+              spark.table(s"$catalog.$ns.$nativeTable"),
+              spark.table(s"$catalog.$ns.$jvmTable"))
+          }
+        }
+      }
+    }
+  }
+
   test("Spark 3.4 Iceberg 1.8 MERGE preserves cardinality exception compatibility") {
     assume(!isSpark35Plus, "Spark 3.4 uses Iceberg's extension MergeRowsExec")
     assume(icebergAvailable && icebergVersionAtLeast(1, 8), "requires Iceberg 1.8+")
@@ -2266,6 +2370,63 @@ class CometIcebergWriteActionSuite
       cleanup.own(locations)
       cleanup.onTaskFailure(null, new RuntimeException("boom"))
       assert(parquetFiles(dataDir("listener_cleanup")).isEmpty)
+    }
+  }
+
+  Seq("payload", "close", "poll").foreach { failurePoint =>
+    test(s"native MoR cleanup owns files before a $failurePoint handoff failure") {
+      withIcebergCatalog { warehouseDir =>
+        val tableName = s"delta_handoff_$failurePoint"
+        createTable(warehouseDir, tableName, partitionSpec = "")
+        val io = IcebergReflection
+          .getTableIO(loadIcebergTable(spark, catalog, ns, tableName))
+          .getOrElse(fail("table.io() unavailable"))
+        val orphan = new File(warehouseDir, "delta-handoff-orphan.parquet")
+        java.nio.file.Files.write(orphan.toPath, Array[Byte](1))
+        val encoded = new java.io.ByteArrayOutputStream()
+        val out = new java.io.DataOutputStream(encoded)
+        val pathBytes = orphan.getAbsolutePath.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+        out.writeInt(1)
+        out.writeInt(pathBytes.length)
+        out.write(pathBytes)
+
+        val injected = new IllegalStateException(s"injected $failurePoint failure")
+        val payload = new OnHeapColumnVector(1, BinaryType)
+        payload.putByteArray(0, Array.emptyByteArray)
+        val locations = new OnHeapColumnVector(1, BinaryType)
+        locations.putByteArray(0, encoded.toByteArray)
+        var closed = false
+        val batch = new ColumnarBatch(Array[ColumnVector](payload, locations), 1) {
+          override def column(ordinal: Int): ColumnVector = {
+            if (ordinal == 0 && failurePoint == "payload") throw injected
+            super.column(ordinal)
+          }
+          override def close(): Unit = {
+            super.close()
+            closed = true
+            if (failurePoint == "close") throw injected
+          }
+        }
+        val batches = new Iterator[ColumnarBatch] {
+          private var consumed = false
+          override def hasNext: Boolean = {
+            if (consumed && failurePoint == "poll") throw injected
+            !consumed
+          }
+          override def next(): ColumnarBatch = {
+            consumed = true
+            batch
+          }
+        }
+        val cleanup = new CometIcebergWriteExec.WrittenFileCleanup(io)
+        val error = intercept[IllegalStateException] {
+          CometIcebergDeltaWriteExec.drainNativePayload(batches, cleanup)
+        }
+        assert(error eq injected)
+        assert(closed)
+        cleanup.onTaskFailure(null, error)
+        assert(!orphan.exists(), "failed delta handoff must not leave a created file behind")
+      }
     }
   }
 

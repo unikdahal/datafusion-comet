@@ -190,11 +190,6 @@ impl DeleteRouter {
                     "Native Iceberg DELETE references unknown partition spec {spec_id}"
                 ))
             })?;
-            if !historical.spec.is_unpartitioned() && partition_values.is_null(row) {
-                return Err(DataFusionError::Execution(format!(
-                    "Native Iceberg DELETE row {row} has a null _partition struct"
-                )));
-            }
             let partition = project_partition(partition_values, row, historical)?;
             let path = paths.value(row).to_owned();
             rows.push((
@@ -1118,8 +1113,15 @@ fn project_partition(
     row: usize,
     historical: &HistoricalSpec,
 ) -> DFResult<IcebergStruct> {
+    // Iceberg's unpartitioned metadata can be a null empty struct. There are no values to
+    // project for that spec, but a partitioned delete must still carry its partition.
     if historical.spec.is_unpartitioned() {
         return Ok(IcebergStruct::empty());
+    }
+    if union.is_null(row) {
+        return Err(DataFusionError::Execution(format!(
+            "Native Iceberg DELETE row {row} has a null _partition struct"
+        )));
     }
     let target = type_to_arrow_type(&Type::Struct(historical.partition_type.clone()))
         .map_err(iceberg_err)?;
@@ -1172,7 +1174,11 @@ async fn encode_delete_manifests(
             manifest_partition_spec(&historical.spec),
         )
         .build_v2_deletes();
-        for file in files_by_spec.remove(&spec_id).unwrap_or_default() {
+        // The delete router closes writers from a HashMap. Stabilize manifest entry order so
+        // task retries and equivalent input plans do not change the file listing order.
+        let mut files = files_by_spec.remove(&spec_id).unwrap_or_default();
+        sort_delete_files_by_path(&mut files);
+        for file in files {
             writer.add_file(file, 0).map_err(iceberg_err)?;
         }
         writer.write_manifest_file().await.map_err(iceberg_err)?;
@@ -1189,6 +1195,10 @@ async fn encode_delete_manifests(
         });
     }
     Ok(manifests)
+}
+
+fn sort_delete_files_by_path(files: &mut [DataFile]) {
+    files.sort_unstable_by(|a, b| a.file_path().cmp(b.file_path()));
 }
 
 fn build_delta_output_batch(
@@ -1324,7 +1334,68 @@ fn iceberg_err(error: iceberg::Error) -> DataFusionError {
 
 #[cfg(test)]
 mod tests {
-    use super::compare_iceberg_file_paths;
+    use super::*;
+    use arrow::buffer::NullBuffer;
+    use arrow::datatypes::Field;
+    use iceberg::spec::DataFileBuilder;
+
+    #[test]
+    fn delete_manifest_files_have_stable_path_order() {
+        let file = |path: &str| {
+            DataFileBuilder::default()
+                .content(DataContentType::PositionDeletes)
+                .file_path(path.to_string())
+                .file_format(DataFileFormat::Parquet)
+                .record_count(1)
+                .file_size_in_bytes(100)
+                .build()
+                .unwrap()
+        };
+        let mut files = vec![file("z.parquet"), file("a.parquet"), file("m.parquet")];
+        sort_delete_files_by_path(&mut files);
+        assert_eq!(
+            files.iter().map(DataFile::file_path).collect::<Vec<_>>(),
+            vec!["a.parquet", "m.parquet", "z.parquet"]
+        );
+    }
+
+    #[test]
+    fn null_partition_metadata_is_valid_only_for_an_unpartitioned_spec() {
+        let schema = parse_iceberg_schema(
+            r#"{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"region","required":false,"type":"string"}]}"#,
+        )
+        .unwrap();
+        let spec = parse_partition_spec(r#"{"spec-id":0,"fields":[]}"#).unwrap();
+        let historical = HistoricalSpec {
+            partition_type: spec.partition_type(&schema).unwrap(),
+            spec,
+            projection: vec![],
+        };
+        let empty = StructArray::new_empty_fields(1, Some(NullBuffer::new_null(1)));
+        assert_eq!(
+            project_partition(&empty, 0, &historical).unwrap(),
+            IcebergStruct::empty()
+        );
+
+        let spec = parse_partition_spec(
+            r#"{"spec-id":1,"fields":[{"source-id":1,"field-id":1000,"name":"region","transform":"identity"}]}"#,
+        )
+        .unwrap();
+        let historical = HistoricalSpec {
+            partition_type: spec.partition_type(&schema).unwrap(),
+            spec,
+            projection: vec![0],
+        };
+        let null_partition = StructArray::new(
+            vec![Field::new("region", DataType::Utf8, true)].into(),
+            vec![Arc::new(StringArray::from(vec![Some("us")]))],
+            Some(NullBuffer::new_null(1)),
+        );
+        assert!(project_partition(&null_partition, 0, &historical)
+            .unwrap_err()
+            .to_string()
+            .contains("null _partition struct"));
+    }
 
     #[test]
     fn iceberg_file_path_order_matches_java_for_supplementary_unicode() {

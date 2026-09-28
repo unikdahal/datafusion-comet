@@ -39,7 +39,7 @@ import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import org.apache.comet.CometSparkSessionExtensions.isSpark35Plus
-import org.apache.comet.iceberg.IcebergReflection
+import org.apache.comet.iceberg.{IcebergDeltaReflection, IcebergNativeWriteEnvironment, IcebergReflection}
 import org.apache.comet.rules.EliminateRedundantTransitions
 import org.apache.comet.serde.{Compatible, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.Operator
@@ -844,6 +844,60 @@ class CometIcebergWriteDetectionSuite extends CometTestBase with CometIcebergTes
       }
       assertUnsupportedContains(writeExec, "uuid_col", "column u has Iceberg type uuid")
     }
+  }
+
+  test("MoR DELETE resolves a native partition schema when Iceberg has no data schema") {
+    withDetectionCatalog { dir =>
+      createTable(
+        dir,
+        "delta_schema",
+        "PARTITIONED BY (region)",
+        Some("'format-version'='2', 'write.delete.mode'='merge-on-read'"))
+      spark.sql(s"INSERT INTO $catalog.$ns.delta_schema VALUES (1, 'us', 1.0), (2, 'us', 2.0)")
+      val write = captureWriteExec("delta_schema", allowWriteFailure = false) {
+        spark.sql(s"DELETE FROM $catalog.$ns.delta_schema WHERE id = 1")
+      }
+      val delta = IcebergReflection.getOuterPositionDeltaWrite(write.batchWrite).get
+      assert(IcebergReflection.getWriteSchemaFromPositionDeltaWrite(delta).isEmpty)
+      assert(IcebergReflection.getNativeSchemaFromPositionDeltaWrite(delta).isDefined)
+      assert(CometIcebergNativeWrite.getSupportLevel(write).isInstanceOf[Compatible])
+      assert(CometIcebergNativeWrite.convert(write, Operator.newBuilder()).isDefined)
+    }
+  }
+
+  test("FILE MoR rejects a missing command-scan field instead of assuming no prior deletes") {
+    assume(icebergVersionAtLeast(1, 8), "requires command-scan rewritableDeletes API")
+    val result = IcebergDeltaReflection.rewritablePositionDeletes(new Object)
+    assert(result.left.toOption.exists(_.contains("scan")), s"unexpected result: $result")
+  }
+
+  test("missing Iceberg table properties cannot be treated as an empty write configuration") {
+    assert(
+      IcebergNativeWriteEnvironment.resolveTableProperties(new Object) ==
+        Left("could not read Iceberg table properties"))
+  }
+
+  Seq(
+    "'write.parquet.page-version'='v2', 'write.delete.parquet.page-version'='v1'" ->
+      "write.parquet.page-version=v2",
+    "'write.delete.parquet.row-group-check-min-record-count'='101'" ->
+      "row-group-check-min-record-count=101").zipWithIndex.foreach {
+    case ((properties, reason), index) =>
+      test(s"MoR validates data and delete writer settings independently: $reason") {
+        withDetectionCatalog { dir =>
+          val tableName = s"delta_properties_$index"
+          createTable(
+            dir,
+            tableName,
+            "PARTITIONED BY (region)",
+            Some("'format-version'='2', 'write.update.mode'='merge-on-read', " + properties))
+          spark.sql(s"INSERT INTO $catalog.$ns.$tableName VALUES (1, 'us', 1.0)")
+          val write = captureWriteExec(tableName, allowWriteFailure = false) {
+            spark.sql(s"UPDATE $catalog.$ns.$tableName SET amount = 2.0 WHERE id = 1")
+          }
+          assertUnsupportedContains(write, tableName, reason)
+        }
+      }
   }
 
   private val catalog = "cat"

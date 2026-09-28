@@ -146,10 +146,10 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       .getTableFromSparkWrite(sparkWrite)
       .getOrElse(return Some("SparkWrite.table is null"))
 
-    val tableProperties = IcebergReflection
-      .getTableProperties(table)
-      .map(_.asScala.toMap)
-      .getOrElse(Map.empty[String, String])
+    val tableProperties = IcebergNativeWriteEnvironment.resolveTableProperties(table) match {
+      case Right(properties) => properties
+      case Left(reason) => return Some(reason)
+    }
     val writeProperties = IcebergReflection
       .getWritePropertiesFromSparkWrite(sparkWrite)
       .getOrElse(return Some("could not read SparkWrite.writeProperties"))
@@ -184,14 +184,14 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     }
     val contextValue = (name: String) =>
       IcebergReflection.getPositionDeltaWriteContextValue(positionDeltaWrite, name)
-    val tableProperties = IcebergReflection
-      .getTableProperties(table)
-      .map(_.asScala.toMap)
-      .getOrElse(Map.empty[String, String])
+    val tableProperties = IcebergNativeWriteEnvironment.resolveTableProperties(table) match {
+      case Right(properties) => properties
+      case Left(reason) => return Some(reason)
+    }
     val writeProperties = IcebergReflection
       .getPositionDeltaWriteValue(positionDeltaWrite, "writeProperties")
       .map(_.asInstanceOf[java.util.Map[String, String]].asScala.toMap)
-      .getOrElse(Map.empty[String, String])
+      .getOrElse(return Some("could not read SparkPositionDeltaWrite.writeProperties"))
     val command = IcebergReflection
       .getPositionDeltaWriteValue(positionDeltaWrite, "command")
       .map(_.toString.toUpperCase(Locale.ROOT))
@@ -199,15 +199,18 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
       table,
       tableProperties ++ writeProperties,
       contextValue("dataFileFormat").map(_.toString.toLowerCase(Locale.ROOT)),
-      IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite),
+      IcebergReflection.getNativeSchemaFromPositionDeltaWrite(positionDeltaWrite),
       contextValue("deleteFileFormat").map(_.toString.toUpperCase(Locale.ROOT)),
       contextValue("deleteGranularity").map(_.toString.toUpperCase(Locale.ROOT)),
       op.session.sessionState.newHadoopConf(),
       isDelta = true)
 
-    val commonRejection = triggers.iterator
-      .map(rule => rule(context))
-      .collectFirst { case Some(reason) => reason }
+    // A delta can write both data and delete files. Validate each effective property map:
+    // a supported delete override must not conceal an unsupported data-file setting.
+    val commonRejection =
+      Seq(context, context.copy(properties = contentAwareProperties(context))).iterator
+        .flatMap(ctx => triggers.iterator.map(rule => rule(ctx)))
+        .collectFirst { case Some(reason) => reason }
     commonRejection.orElse {
       if (!command.exists(Set("DELETE", "UPDATE", "MERGE"))) {
         Some(s"unsupported Iceberg row-level command ${command.getOrElse("<unresolved>")}")
@@ -349,14 +352,14 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
 
   private val requireNoBloomFilterColumnsEnabled: TriggerRule = ctx => {
     val prefix = PropertyKeys.BloomFilterColumnEnabledPrefix
-    contentAwareProperties(ctx)
+    ctx.properties
       .find { case (k, v) => k.startsWith(prefix) && v.equalsIgnoreCase("true") }
       .map { case (k, _) => s"$k=true: bloom filters unsupported" }
   }
 
   private val requireParquetPageVersionDefault: TriggerRule = ctx => {
     val key = PropertyKeys.ParquetPageVersion
-    contentAwareProperties(ctx)
+    ctx.properties
       .get(key)
       .filter(_.trim.toLowerCase(Locale.ROOT) != PropertyKeys.ParquetPageVersionDefault)
       .map(v => s"$key=$v unsupported")
@@ -364,7 +367,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
 
   private val requireShredVariantsDisabled: TriggerRule = ctx => {
     val key = PropertyKeys.ParquetShredVariants
-    contentAwareProperties(ctx)
+    ctx.properties
       .get(key)
       .filter(_.equalsIgnoreCase("true"))
       .map(_ => s"$key=true (variant shredding changes the parquet schema)")
@@ -376,10 +379,10 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   // not become a mid-task native failure, and a non-integer must fail on the stock path; both
   // fall back. Range logic lives beside the codec resolution in IcebergWriteProtoTranslation.
   private val requireNativeSupportedCompressionLevel: TriggerRule = ctx =>
-    IcebergWriteProtoTranslation.compressionLevelRejection(contentAwareProperties(ctx))
+    IcebergWriteProtoTranslation.compressionLevelRejection(ctx.properties)
 
   private val requireOnlyVettedParquetWriteProperties: TriggerRule = ctx =>
-    contentAwareProperties(ctx)
+    ctx.properties
       .find { case (k, _) =>
         k.startsWith(ParquetWritePropertyPrefix) &&
         !vettedParquetWriteKeys.contains(k) &&
@@ -506,7 +509,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
   // translation, so anything but a positive Java int falls back and fails on the stock path.
   private val requirePositiveIntParquetSizes: TriggerRule = ctx =>
     positiveIntParquetSizeKeys.flatMap { key =>
-      contentAwareProperties(ctx).get(key).flatMap { raw =>
+      ctx.properties.get(key).flatMap { raw =>
         scala.util.Try(java.lang.Integer.parseInt(raw)).toOption match {
           case None => Some(s"$key=$raw is not a Java int (iceberg-java fails at write time)")
           case Some(v) if v <= 0 =>
@@ -847,7 +850,7 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     // the common data schema, so use the table schema only for that shape. UPDATE/MERGE must keep
     // resolving the actual per-write data schema rather than silently broadening it.
     val writeSchema = IcebergReflection
-      .getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite)
+      .getNativeSchemaFromPositionDeltaWrite(positionDeltaWrite)
       .orElse {
         if (dispatch.rowSchema.isEmpty) IcebergReflection.getSchema(table) else None
       }
@@ -906,7 +909,10 @@ object CometIcebergNativeWrite extends CometOperatorSerde[IcebergWriteExec] {
     val resolvedWriteProperties = IcebergReflection
       .getPositionDeltaWriteValue(positionDeltaWrite, "writeProperties")
       .map(_.asInstanceOf[java.util.Map[String, String]].asScala.toMap)
-      .getOrElse(Map.empty[String, String])
+      .getOrElse {
+        withFallbackReason(op, "Could not read SparkPositionDeltaWrite.writeProperties")
+        return None
+      }
     // Iceberg only started wiring data sort order into PositionDelta writers in 1.11.
     // Older runtimes build SparkFileWriterFactory without dataSortOrder(...), so their data files
     // are intentionally stamped as unsorted (id 0). Match that behavior instead of treating the

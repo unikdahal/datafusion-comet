@@ -306,6 +306,20 @@ case class CometExecRule(session: SparkSession)
   }
 
   /**
+   * AQE can replan a FILE-granularity delta write after its shuffle has materialized. The logical
+   * write strategy may wrap that stage in a row-to-Arrow bridge even when it is already a native
+   * writer. Unwrap only that bridge (and its temporary scan wrapper) so the committer receives
+   * the existing writer's commit message rather than running a second writer over it.
+   */
+  private def convertedIcebergWriter(plan: SparkPlan): Option[SparkPlan] = plan match {
+    case writer: CometIcebergWriteExec => Some(writer)
+    case writer: CometIcebergDeltaWriteExec => Some(writer)
+    case bridge: CometSparkToColumnarExec => convertedIcebergWriter(bridge.child)
+    case wrapper: CometScanWrapper => convertedIcebergWriter(wrapper.originalPlan)
+    case _ => None
+  }
+
+  /**
    * Restore a Spark Partial while retaining its current children. The tag prevents reconversion
    * when AQE replans the exchange without its Final, and records why the Partial stays in Spark.
    */
@@ -527,13 +541,10 @@ case class CometExecRule(session: SparkSession)
       case op: DataWritingCommandExec if !isSpark40Plus =>
         convertToComet(op, CometDataWritingCommand).getOrElse(op)
 
-      // AQE re-fires the Iceberg write planning on every stage materialisation, so a
-      // partitioned write's physical sub-tree may already contain a `CometIcebergWriteExec`.
-      // Unwrap to avoid a double conversion.
-      case op: IcebergWriteExec
-          if op.child.isInstanceOf[CometIcebergWriteExec] ||
-            op.child.isInstanceOf[CometIcebergDeltaWriteExec] =>
-        op.child
+      // AQE re-fires Iceberg write planning on every stage materialisation. A previously
+      // converted writer may be the direct child or sit under the FILE-granularity bridge.
+      case op: IcebergWriteExec if convertedIcebergWriter(op.child).isDefined =>
+        convertedIcebergWriter(op.child).get
 
       case op: IcebergWriteExec
           if op.dispatch.isInstanceOf[PositionDeltaWrite] &&

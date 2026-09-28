@@ -127,7 +127,7 @@ case class CometIcebergDeltaWriteExec(
     // table schema only for DELETE; UPDATE/MERGE must keep using the per-write schema.
     val decodedWriteSchema = IcebergDeltaWriteExec
       .requireReflection(
-        IcebergReflection.getWriteSchemaFromPositionDeltaWrite(positionDeltaWrite).orElse {
+        IcebergReflection.getNativeSchemaFromPositionDeltaWrite(positionDeltaWrite).orElse {
           if (semanticCommand.contains(DeltaDelete)) IcebergReflection.getSchema(table) else None
         },
         "PositionDeltaWrite.Context.dataSchema")
@@ -147,8 +147,7 @@ case class CometIcebergDeltaWriteExec(
       Option(TaskContext.get()).foreach(_.addTaskFailureListener(cleanup))
       val previousDeleteFiles =
         capturedPreviousDeleteFiles.map(_.value).getOrElse(Map.empty[String, AnyRef])
-      val (payloadBytes, locations) = drainNativePayload(batches)
-      cleanup.own(locations)
+      val payloadBytes = CometIcebergDeltaWriteExec.drainNativePayload(batches, cleanup)
       val payload = org.apache.comet.serde.OperatorOuterClass.IcebergDeltaTaskPayload
         .parseFrom(payloadBytes)
       require(
@@ -286,7 +285,12 @@ case class CometIcebergDeltaWriteExec(
     }
   }
 
-  private def drainNativePayload(batches: Iterator[ColumnarBatch]): (Array[Byte], Seq[String]) = {
+}
+
+object CometIcebergDeltaWriteExec {
+  private[org] def drainNativePayload(
+      batches: Iterator[ColumnarBatch],
+      cleanup: CometIcebergWriteExec.WrittenFileCleanup): Array[Byte] = {
     require(batches.hasNext, "iceberg_delta_write produced no output batch for this task")
     val batch = batches.next()
     val payload =
@@ -297,9 +301,10 @@ case class CometIcebergDeltaWriteExec(
         require(
           batch.numCols() == 2,
           s"iceberg_delta_write expected two columns, got ${batch.numCols()}")
-        val bytes = batch.column(0).getBinary(0)
-        val locations = CometIcebergWriteExec.decodeLocations(batch.column(1).getBinary(0))
-        (bytes, locations)
+        // Own the files before copying the payload or polling the stream again: either can fail
+        // after the native writer has disarmed its cleanup guards.
+        cleanup.own(CometIcebergWriteExec.decodeLocations(batch.column(1).getBinary(0)))
+        batch.column(0).getBinary(0)
       } finally batch.close()
     require(!batches.hasNext, "iceberg_delta_write produced more than one batch for this task")
     payload
