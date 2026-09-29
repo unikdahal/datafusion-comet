@@ -1285,20 +1285,23 @@ class CometIcebergWriteActionSuite
     }
   }
 
-  Seq("true", "false").foreach { aqe =>
-    test(s"native MoR UPDATE matches iceberg-java with partition evolution, AQE=$aqe") {
+  for (aqe <- Seq("true", "false"); granularity <- Seq("partition", "file")) {
+    test(
+      s"native MoR UPDATE matches iceberg-java with partition evolution, " +
+        s"AQE=$aqe, granularity=$granularity") {
       assumeNativeAcceleration()
       withIcebergCatalog { warehouseDir =>
         withSQLConf("spark.sql.adaptive.enabled" -> aqe) {
-          val nativeTable = s"mor_update_native_$aqe"
-          val jvmTable = s"mor_update_jvm_$aqe"
+          val nativeTable = s"mor_update_native_${aqe}_$granularity"
+          val jvmTable = s"mor_update_jvm_${aqe}_$granularity"
           Seq(nativeTable, jvmTable).foreach { name =>
             createTable(
               warehouseDir,
               name,
               "PARTITIONED BY (region)",
-              Some("'format-version'='2', 'write.update.mode'='merge-on-read', " +
-                "'write.delete.granularity'='partition'"))
+              Some(
+                "'format-version'='2', 'write.update.mode'='merge-on-read', " +
+                  s"'write.delete.granularity'='$granularity'"))
             withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
               coalesceInsert(name, Seq((1, "us", 10.0), (2, "us", 20.0), (3, "eu", 30.0)))
               spark.sql(s"ALTER TABLE $catalog.$ns.$name ADD PARTITION FIELD bucket(4, id)")

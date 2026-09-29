@@ -301,8 +301,8 @@ object CometIcebergDeltaWriteExec {
         require(
           batch.numCols() == 2,
           s"iceberg_delta_write expected two columns, got ${batch.numCols()}")
-        // Own the files before copying the payload or polling the stream again: either can fail
-        // after the native writer has disarmed its cleanup guards.
+        // Own the files before copying the payload or polling the stream again: either can fail.
+        // Native cleanup remains armed until the final EOF poll acknowledges this handoff.
         cleanup.own(CometIcebergWriteExec.decodeLocations(batch.column(1).getBinary(0)))
         batch.column(0).getBinary(0)
       } finally batch.close()
