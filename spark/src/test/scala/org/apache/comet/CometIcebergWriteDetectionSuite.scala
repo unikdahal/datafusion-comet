@@ -877,30 +877,6 @@ class CometIcebergWriteDetectionSuite extends CometTestBase with CometIcebergTes
         Left("could not read Iceberg table properties"))
   }
 
-  Seq(
-    "'write.parquet.page-version'='v2', 'write.delete.parquet.page-version'='v1'" ->
-      "write.parquet.page-version=v2",
-    "'write.delete.parquet.row-group-check-min-record-count'='101'" ->
-      "row-group-check-min-record-count=101").zipWithIndex.foreach {
-    case ((properties, reason), index) =>
-      test(s"MoR validates data and delete writer settings independently: $reason") {
-        withDetectionCatalog { dir =>
-          val tableName = s"delta_properties_$index"
-          createTable(
-            dir,
-            tableName,
-            "PARTITIONED BY (region)",
-            Some("'format-version'='2', 'write.update.mode'='merge-on-read'"))
-          spark.sql(s"INSERT INTO $catalog.$ns.$tableName VALUES (1, 'us', 1.0)")
-          spark.sql(s"ALTER TABLE $catalog.$ns.$tableName SET TBLPROPERTIES ($properties)")
-          val write = captureWriteExec(tableName, allowWriteFailure = true) {
-            spark.sql(s"UPDATE $catalog.$ns.$tableName SET amount = 2.0 WHERE id = 1")
-          }
-          assertUnsupportedContains(write, tableName, reason)
-        }
-      }
-  }
-
   private val catalog = "cat"
   private val ns = "db"
 

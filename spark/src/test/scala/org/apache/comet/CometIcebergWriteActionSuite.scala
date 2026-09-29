@@ -49,6 +49,8 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 import org.apache.comet.CometSparkSessionExtensions.{isSpark35Plus, isSpark41Plus}
 import org.apache.comet.iceberg.IcebergReflection
+import org.apache.comet.serde.Unsupported
+import org.apache.comet.serde.operator.CometIcebergNativeWrite
 
 private case class WriteSnapshot(snapshotDelta: Long, plans: Seq[SparkPlan])
 
@@ -1012,6 +1014,48 @@ class CometIcebergWriteActionSuite
         .toSeq
       assert(deletes.size == 1, s"expected one committed position delete, got $deletes")
     }
+  }
+
+  Seq(
+    "'write.parquet.page-version'='v2', 'write.delete.parquet.page-version'='v1'" ->
+      "write.parquet.page-version=v2",
+    "'write.delete.parquet.row-group-check-min-record-count'='101'" ->
+      "row-group-check-min-record-count=101").zipWithIndex.foreach {
+    case ((properties, reason), index) =>
+      test(s"MoR checks data and delete writer settings independently: $reason") {
+        assumeNativeAcceleration()
+        withIcebergCatalog { warehouseDir =>
+          val tableName = s"delta_properties_$index"
+          createTable(
+            warehouseDir,
+            tableName,
+            partitionSpec = "PARTITIONED BY (region)",
+            properties = Some(
+              "'format-version'='2', 'write.delete.mode'='merge-on-read', " +
+                "'write.delete.granularity'='partition'"))
+          withSQLConf(CometConf.COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED.key -> "false") {
+            coalesceInsert(tableName, Seq((1, "us", 1.0), (2, "us", 2.0)))
+          }
+          spark.sql(s"ALTER TABLE $catalog.$ns.$tableName SET TBLPROPERTIES ($properties)")
+          val snapshot = withNativeEnabled {
+            captureWrite(tableName) {
+              spark.sql(s"DELETE FROM $catalog.$ns.$tableName WHERE id = 1")
+            }
+          }
+          val (_, writes) = collectIcebergWriteOps(snapshot.plans)
+          assert(writes.nonEmpty, s"expected an Iceberg writer: ${snapshot.plans}")
+          val rejections = writes.flatMap { write =>
+            CometIcebergNativeWrite.getSupportLevel(write) match {
+              case Unsupported(Some(message)) => Some(message)
+              case _ => None
+            }
+          }
+          assert(
+            rejections.exists(_.contains(reason)),
+            s"expected $reason in native fallback reasons: $rejections")
+          assertRows(tableName, Seq(2))
+        }
+      }
   }
 
   test("Spark 3.4 Iceberg 1.5 FILE-granularity MoR DELETE falls back cleanly") {
