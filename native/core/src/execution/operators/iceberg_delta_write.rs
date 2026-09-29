@@ -73,8 +73,8 @@ use crate::execution::operators::iceberg_common::load_file_io;
 use crate::execution::operators::iceberg_partition_path::CometLocationGenerator;
 use crate::execution::operators::iceberg_write::{
     abort_guard_with_shared_locations, build_output_schema, build_writer_properties,
-    file_name_prefix, manifest_partition_spec, parse_iceberg_schema, parse_partition_spec,
-    run_write_task, TrackingLocationGenerator,
+    file_name_prefix, manifest_partition_spec, output_with_cleanup_ack, parse_iceberg_schema,
+    parse_partition_spec, run_write_task, TrackingLocationGenerator,
 };
 
 type DeleteRollingBuilder = RollingFileWriterBuilder<
@@ -1064,11 +1064,10 @@ impl ExecutionPlan for IcebergDeltaWriteExec {
             tracked.extend(delete_guard.locations());
             let output = build_delta_output_batch(payload, &tracked, &output_schema);
             match output {
-                Ok(batch) => {
-                    data_guard.disarm();
-                    delete_guard.disarm();
-                    Ok::<_, DataFusionError>(futures::stream::iter(vec![Ok(batch)]))
-                }
+                Ok(batch) => Ok::<_, DataFusionError>(output_with_cleanup_ack(
+                    batch,
+                    vec![data_guard, delete_guard],
+                )),
                 Err(error) => {
                     data_guard.abort().await;
                     delete_guard.abort().await;
