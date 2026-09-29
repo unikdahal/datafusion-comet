@@ -94,25 +94,41 @@ type IcebergDataFileWriterBuilder = DataFileWriterBuilder<
 /// files it created. The recorded locations let `delete_task_files` clean up after a failure the
 /// way iceberg-java's `DataWriter.abort()` does.
 #[derive(Clone, Debug)]
-struct TrackingLocationGenerator {
+pub(super) struct TrackingLocationGenerator {
     inner: CometLocationGenerator,
     locations: Arc<Mutex<Vec<String>>>,
 }
 
 impl TrackingLocationGenerator {
-    fn new(inner: CometLocationGenerator) -> Self {
+    pub(super) fn new(inner: CometLocationGenerator) -> Self {
         Self {
             inner,
             locations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn locations(&self) -> Vec<String> {
-        self.locations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+    pub(super) fn with_shared_locations(
+        inner: CometLocationGenerator,
+        locations: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
+        Self { inner, locations }
     }
+
+    #[cfg(test)]
+    pub(super) fn locations(&self) -> Vec<String> {
+        read_tracked_locations(&self.locations)
+    }
+
+    pub(super) fn shared_locations(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.locations)
+    }
+}
+
+fn read_tracked_locations(locations: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    locations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 impl LocationGenerator for TrackingLocationGenerator {
@@ -126,27 +142,46 @@ impl LocationGenerator for TrackingLocationGenerator {
     }
 }
 
-/// Deletes the tracked files if the write task is dropped before it finished.
+/// Deletes the tracked files if the write task is dropped before the JVM acknowledges its output.
 ///
 /// A task can end without its future ever observing an error: when the JVM-side input iterator
 /// throws, `executePlan` returns that error straight from the JNI batch pull and the JVM then
 /// releases the plan, dropping this future mid-flight. The guard turns that drop into the same
-/// cleanup the explicit error path performs. It stays armed until the task's output batch has
-/// been handed to the JVM, which is the point where the JVM takes over cleanup ownership.
-struct AbortOnDrop {
+/// cleanup the explicit error path performs. It stays armed until the JVM polls past the output
+/// batch, after recording the locations in its task-failure listener.
+pub(super) struct AbortOnDrop {
     file_io: FileIO,
-    generator: TrackingLocationGenerator,
+    locations: Arc<Mutex<Vec<String>>>,
     armed: bool,
+}
+
+pub(super) fn abort_guard(file_io: FileIO, generator: TrackingLocationGenerator) -> AbortOnDrop {
+    AbortOnDrop {
+        file_io,
+        locations: generator.shared_locations(),
+        armed: true,
+    }
+}
+
+pub(super) fn abort_guard_with_shared_locations(
+    file_io: FileIO,
+    locations: Arc<Mutex<Vec<String>>>,
+) -> AbortOnDrop {
+    AbortOnDrop {
+        file_io,
+        locations,
+        armed: true,
+    }
 }
 
 impl AbortOnDrop {
     /// Every location the task's writers were handed, in the order they were generated.
-    fn locations(&self) -> Vec<String> {
-        self.generator.locations()
+    pub(super) fn locations(&self) -> Vec<String> {
+        read_tracked_locations(&self.locations)
     }
 
     /// Give up ownership without deleting: the files are now someone else's responsibility.
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.armed = false;
     }
 
@@ -160,8 +195,8 @@ impl AbortOnDrop {
     /// immediately, and leave the remaining files with no owner. Re-deleting a file that the
     /// cancelled run already removed is harmless, since `delete_task_files` is best effort and
     /// logs rather than fails.
-    async fn abort(&mut self) {
-        delete_task_files(&self.file_io, self.generator.locations()).await;
+    pub(super) async fn abort(&mut self) {
+        delete_task_files(&self.file_io, read_tracked_locations(&self.locations)).await;
         self.armed = false;
     }
 }
@@ -171,7 +206,7 @@ impl Drop for AbortOnDrop {
         if !self.armed {
             return;
         }
-        let locations = self.generator.locations();
+        let locations = read_tracked_locations(&self.locations);
         if locations.is_empty() {
             return;
         }
@@ -197,6 +232,27 @@ impl Drop for AbortOnDrop {
             },
         }
     }
+}
+
+/// The JVM reads the locations from the single output batch, registers its cleanup listener,
+/// and then polls once more to verify that the stream ended. Keep native cleanup armed through
+/// that last poll: a cancelled task or a failure decoding the locations before then must still
+/// delete the files, even though the output batch was successfully constructed.
+pub(super) fn output_with_cleanup_ack(
+    batch: RecordBatch,
+    guards: Vec<AbortOnDrop>,
+) -> impl futures::Stream<Item = DFResult<RecordBatch>> + Send {
+    futures::stream::unfold((Some(batch), guards), |(batch, mut guards)| async move {
+        match batch {
+            Some(batch) => Some((Ok(batch), (None, guards))),
+            None => {
+                for guard in &mut guards {
+                    guard.disarm();
+                }
+                None
+            }
+        }
+    })
 }
 
 /// Best-effort deletion of every file a failed task attempt created, the native counterpart of
@@ -402,11 +458,10 @@ impl ExecutionPlan for IcebergWriteExec {
             }
             .await;
             match packaged {
-                // The batch carries the locations, and the JVM takes cleanup ownership of them
-                // before it decodes the manifest, so the guard's job is done.
+                // The JVM registers the locations before polling for EOF. Keep the guard armed
+                // until that poll, so dropping the stream during the handoff still cleans up.
                 Ok(batch) => {
-                    abort_guard.disarm();
-                    Ok::<_, DataFusionError>(futures::stream::iter(vec![Ok(batch)]))
+                    Ok::<_, DataFusionError>(output_with_cleanup_ack(batch, vec![abort_guard]))
                 }
                 Err(e) => {
                     abort_guard.abort().await;
@@ -457,7 +512,7 @@ impl DisplayAs for IcebergWriteExec {
 /// On success the still-armed [`AbortOnDrop`] is returned along with the data files: the caller
 /// owns cleanup until the output batch has been handed to the JVM.
 #[allow(clippy::too_many_arguments)]
-async fn run_write_task(
+pub(super) async fn run_write_task(
     mut input: SendableRecordBatchStream,
     common: Arc<IcebergWriteCommon>,
     iceberg_schema: IcebergSchemaRef,
@@ -513,11 +568,7 @@ async fn run_write_task(
         file_name_generator,
     );
     let data_file_builder = DataFileWriterBuilder::new(rolling_builder);
-    let mut abort_guard = AbortOnDrop {
-        file_io,
-        generator: location_generator,
-        armed: true,
-    };
+    let mut abort_guard = abort_guard(file_io, location_generator);
 
     // Build the field-id-decorated target schema once per task; every batch is cast against it.
     let target_schema =
@@ -743,21 +794,21 @@ impl InnerWriter {
 
 // --- helpers -------------------------------------------------------------
 
-fn parse_iceberg_schema(json: &str) -> DFResult<IcebergSchemaRef> {
+pub(super) fn parse_iceberg_schema(json: &str) -> DFResult<IcebergSchemaRef> {
     let schema: IcebergSchema = serde_json::from_str(json).map_err(|e| {
         DataFusionError::Internal(format!("Failed to parse iceberg schema JSON: {e}"))
     })?;
     Ok(Arc::new(schema))
 }
 
-fn parse_partition_spec(json: &str) -> DFResult<PartitionSpecRef> {
+pub(super) fn parse_partition_spec(json: &str) -> DFResult<PartitionSpecRef> {
     let spec: PartitionSpec = serde_json::from_str(json).map_err(|e| {
         DataFusionError::Internal(format!("Failed to parse partition spec JSON: {e}"))
     })?;
     Ok(Arc::new(spec))
 }
 
-fn iceberg_err(e: iceberg::Error) -> DataFusionError {
+pub(super) fn iceberg_err(e: iceberg::Error) -> DataFusionError {
     DataFusionError::External(Box::new(e))
 }
 
@@ -839,7 +890,7 @@ fn format_partition_spec(spec: &PartitionSpec) -> String {
 /// allocation-hungry Avro decode that recovers the `DataFile`s. A failure in that decode would
 /// otherwise leave files that only the failed decode could have named. See `decodeLocations` and
 /// `WrittenFileCleanup` on the JVM side (`CometIcebergWriteExec`).
-fn build_output_schema() -> SchemaRef {
+pub(super) fn build_output_schema() -> SchemaRef {
     Arc::new(ArrowSchema::new(vec![
         Field::new("iceberg_manifest", DataType::Binary, false),
         Field::new("written_file_locations", DataType::Binary, false),
@@ -880,7 +931,11 @@ fn decorate_batch_with_field_ids(
     RecordBatch::try_new(Arc::clone(target_schema), casted).map_err(DataFusionError::from)
 }
 
-fn file_name_prefix(partition_id: i32, task_attempt_id: i64, operation_id: &str) -> String {
+pub(super) fn file_name_prefix(
+    partition_id: i32,
+    task_attempt_id: i64,
+    operation_id: &str,
+) -> String {
     format!("{partition_id:05}-{task_attempt_id:05}-{operation_id}")
 }
 
@@ -1141,7 +1196,7 @@ fn contains_float(data_type: &DataType) -> bool {
 /// -1`) and a placeholder `sequence_number` of `0`. Neither is meaningful here: the JVM ignores
 /// the entry-level fields and only consumes the embedded `DataFile`s, which the driver later
 /// re-stamps with the real snapshot id during `BatchWrite.commit`.
-async fn encode_data_files_as_manifest(
+pub(super) async fn encode_data_files_as_manifest(
     data_files: Vec<DataFile>,
     iceberg_schema: IcebergSchemaRef,
     partition_spec: PartitionSpecRef,
@@ -1208,7 +1263,7 @@ async fn encode_data_files_as_manifest(
 /// Dropping the fields also skips the `partition_type` resolution `ManifestWriter` would otherwise
 /// do, which fails once the `void` field's source column has itself been dropped from the schema
 /// (apache/datafusion-comet#5693).
-fn manifest_partition_spec(partition_spec: &PartitionSpecRef) -> PartitionSpec {
+pub(super) fn manifest_partition_spec(partition_spec: &PartitionSpecRef) -> PartitionSpec {
     if partition_spec.is_unpartitioned() {
         // A no-op when the spec already has no fields, which is the common case.
         PartitionSpec::unpartition_spec().with_spec_id(partition_spec.spec_id())
@@ -1220,7 +1275,7 @@ fn manifest_partition_spec(partition_spec: &PartitionSpecRef) -> PartitionSpec {
 /// Frame the written-file locations for the `written_file_locations` column: a big-endian `i32`
 /// count, then a big-endian `i32` byte length and the UTF-8 bytes for each location. Explicit
 /// lengths rather than a separator so a path is never re-interpreted, whatever it contains.
-fn encode_locations(locations: &[String]) -> Vec<u8> {
+pub(super) fn encode_locations(locations: &[String]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(
         4 + locations.len() * 4 + locations.iter().map(|l| l.len()).sum::<usize>(),
     );
@@ -1232,7 +1287,7 @@ fn encode_locations(locations: &[String]) -> Vec<u8> {
     encoded
 }
 
-fn build_output_batch(
+pub(super) fn build_output_batch(
     manifest_bytes: Vec<u8>,
     locations: &[String],
     output_schema: &SchemaRef,
@@ -1253,7 +1308,9 @@ fn build_output_batch(
 /// (which has no footer-stat truncation). Iceberg's metrics modes
 /// (`write.metadata.metrics.*`) do not apply here: they shape the *manifest* metrics, which
 /// the JVM re-derives from the footer with Iceberg's own `MetricsConfig` logic before commit.
-fn build_writer_properties(settings: &IcebergParquetWriteSettings) -> DFResult<WriterProperties> {
+pub(super) fn build_writer_properties(
+    settings: &IcebergParquetWriteSettings,
+) -> DFResult<WriterProperties> {
     let compression = compression_from_proto(settings.compression, settings.compression_level)?;
     Ok(WriterProperties::builder()
         .set_compression(compression)
@@ -1399,22 +1456,14 @@ mod tests {
         });
 
         // Disarmed: the task completed, nothing may be deleted.
-        let mut guard = AbortOnDrop {
-            file_io: file_io.clone(),
-            generator: generator.clone(),
-            armed: true,
-        };
+        let mut guard = abort_guard(file_io.clone(), generator.clone());
         guard.disarm();
         drop(guard);
         assert!(runtime.block_on(file_io.exists(&armed)).unwrap());
 
         // Armed and dropped from a thread without a runtime, as `releasePlan` does: the delete
         // runs to completion before `drop` returns.
-        drop(AbortOnDrop {
-            file_io: file_io.clone(),
-            generator,
-            armed: true,
-        });
+        drop(abort_guard(file_io.clone(), generator));
         assert!(!runtime.block_on(file_io.exists(&armed)).unwrap());
         assert!(!runtime.block_on(file_io.exists(&disarmed)).unwrap());
     }
@@ -1757,6 +1806,7 @@ mod tests {
             CompressionCodec as ProtoCodec, IcebergParquetWriteSettings, IcebergWriteCommon,
             IcebergWriterMode as ProtoIcebergWriterMode,
         };
+        use futures::StreamExt;
         use iceberg::spec::{
             Manifest, NestedField, PartitionSpec, PrimitiveType, Schema, Transform, Type,
         };
@@ -1764,6 +1814,7 @@ mod tests {
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::Arc;
+        use std::time::Duration;
         use tempfile::TempDir;
 
         fn user_schema() -> SchemaRef {
@@ -1975,6 +2026,63 @@ mod tests {
             abort_guard.abort().await;
             assert!(written.iter().all(|p| !p.exists()), "{written:?}");
             assert!(!abort_guard.armed, "aborting also gives up ownership");
+        }
+
+        #[tokio::test]
+        async fn output_stream_waits_for_jvm_eof_poll_before_releasing_cleanup() {
+            for acknowledge in [false, true] {
+                let temp_dir = TempDir::new().unwrap();
+                let data_location = format!("file://{}", temp_dir.path().display());
+                let schema = iceberg_user_schema();
+                let spec = PartitionSpec::builder(Arc::new(schema.clone()))
+                    .build()
+                    .unwrap();
+                let common = common(
+                    data_location,
+                    serde_json::to_string(&spec).unwrap(),
+                    serde_json::to_string(&schema).unwrap(),
+                    ProtoIcebergWriterMode::IcebergWriterUnpartitioned,
+                );
+                let (data_files, guard) = run_write_task(
+                    input_stream(vec![batch(&[1], &["us"])]),
+                    common,
+                    Arc::new(schema),
+                    Arc::new(spec),
+                    ProtoIcebergWriterMode::IcebergWriterUnpartitioned,
+                    WriterProperties::builder().build(),
+                    Some(0),
+                    Some(0),
+                    Time::default(),
+                )
+                .await
+                .unwrap();
+                let written: Vec<PathBuf> = data_files
+                    .iter()
+                    .map(|file| PathBuf::from(file.file_path().trim_start_matches("file:")))
+                    .collect();
+                assert!(!written.is_empty());
+                assert!(written.iter().all(|path| path.exists()));
+                let output =
+                    build_output_batch(vec![], &guard.locations(), &build_output_schema()).unwrap();
+                let mut stream = Box::pin(output_with_cleanup_ack(output, vec![guard]));
+                assert!(stream.next().await.unwrap().is_ok());
+                if acknowledge {
+                    assert!(stream.next().await.is_none());
+                }
+                drop(stream);
+
+                if acknowledge {
+                    assert!(written.iter().all(|path| path.exists()));
+                } else {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while written.iter().any(|path| path.exists()) {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("dropping an unacknowledged output must delete its files");
+                }
+            }
         }
 
         #[tokio::test]
@@ -3007,11 +3115,7 @@ mod tests {
             locations.push(location);
         }
 
-        let mut guard = AbortOnDrop {
-            file_io: file_io.clone(),
-            generator,
-            armed: true,
-        };
+        let mut guard = abort_guard(file_io.clone(), generator);
         {
             // A no-op waker means nothing ever wakes the future, so the first delete that yields
             // strands it. Dropping it there is the cancellation.

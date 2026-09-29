@@ -69,6 +69,7 @@ message Operator {
     WindowGroupLimit window_group_limit = 119;
     IcebergWrite iceberg_write = 120;
     MergeRows merge_rows = 121;
+    IcebergDeltaWrite iceberg_delta_write = 122;
     // Extension point for optional, out-of-tree contrib scans (Delta, Lance, ...). The concrete
     // scan message (e.g. `DeltaScan`) is packed into this envelope on the JVM side and dispatched
     // by `type_url` on the native side. Using a single permanent field -- rather than a new oneof
@@ -792,6 +793,109 @@ message IcebergWrite {
   optional int64 task_attempt_id = 3;
 }
 
+// Iceberg row-level writes keep Spark/Iceberg's command and transaction semantics, while this
+// executor-side operator writes the task's new DataFiles and position DeleteFiles.
+enum IcebergDeleteGranularity {
+  ICEBERG_DELETE_GRANULARITY_PARTITION = 0;
+  ICEBERG_DELETE_GRANULARITY_FILE = 1;
+}
+
+enum IcebergDeltaCommand {
+  ICEBERG_DELTA_COMMAND_UNKNOWN = 0;
+  ICEBERG_DELTA_COMMAND_DELETE = 1;
+  ICEBERG_DELTA_COMMAND_UPDATE = 2;
+  ICEBERG_DELTA_COMMAND_MERGE = 3;
+}
+
+message IcebergDeltaPartitionSpec {
+  int32 spec_id = 1;
+  string partition_spec_json = 2;
+  // Target spec field order -> ordinal in the union `_partition` struct.
+  repeated int32 partition_projection = 3;
+  repeated int32 target_partition_field_ids = 4;
+}
+
+message IcebergPreviousDeleteFileDescriptor {
+  string location = 1;
+  uint64 file_size_in_bytes = 2;
+  string format = 3;
+  int32 partition_spec_id = 4;
+  optional bytes key_metadata = 5;
+  optional string referenced_data_file = 6;
+  optional int64 content_offset = 7;
+  optional int64 content_size_in_bytes = 8;
+  int64 record_count = 9;
+}
+
+message IcebergPreviousDeletesForDataFile {
+  string data_file = 1;
+  repeated IcebergPreviousDeleteFileDescriptor delete_files = 2;
+}
+
+message IcebergPreviousDeletes {
+  repeated IcebergPreviousDeletesForDataFile groups = 1;
+  // Field 2 previously carried Java-serialized DeleteFile objects. Keep it reserved so those
+  // JVM-only objects can never accidentally re-enter the native/JNI transport.
+  reserved 2;
+  reserved "serialized_delete_files";
+}
+
+message DeltaMetadataLayout {
+  int32 file_path_index = 1;
+  int32 row_position_index = 2;
+  optional int32 spec_id_index = 3;
+  optional int32 partition_index = 4;
+}
+
+message DeltaInputLayout {
+  int32 operation_ordinal = 1;
+  repeated int32 data_ordinals = 2;
+  repeated int32 row_id_ordinals = 3;
+  repeated int32 metadata_ordinals = 4;
+  int32 delete_operation = 5;
+  int32 update_operation = 6;
+  int32 insert_operation = 7;
+  optional int32 reinsert_operation = 8;
+  DeltaMetadataLayout metadata_layout = 9;
+}
+
+message IcebergDeltaWrite {
+  IcebergWriteCommon data_common = 1;
+  repeated IcebergDeltaPartitionSpec historical_specs = 2;
+  DeltaInputLayout input_layout = 3;
+  uint64 target_delete_file_size_bytes = 4;
+  IcebergParquetWriteSettings delete_parquet_settings = 5;
+  bool delete_input_ordered = 6;
+  optional int32 partition_id = 7;
+  optional int64 task_attempt_id = 8;
+  IcebergDeleteGranularity delete_granularity = 9;
+  string delete_data_location = 10;
+  IcebergDeltaCommand command = 11;
+  int32 format_version = 12;
+  bytes previous_deletes_blob = 13;
+}
+
+message IcebergTaskManifest {
+  enum Content {
+    ICEBERG_TASK_MANIFEST_DATA = 0;
+    ICEBERG_TASK_MANIFEST_DELETES = 1;
+  }
+  Content content = 1;
+  int32 partition_spec_id = 2;
+  bytes avro_manifest = 3;
+}
+
+message IcebergDeltaTaskPayload {
+  uint32 schema_revision = 1;
+  repeated IcebergTaskManifest manifests = 2;
+  repeated string referenced_data_files = 3;
+  repeated string rewritten_delete_file_locations = 4;
+  uint64 input_rows = 5;
+  uint64 data_rows_written = 6;
+  uint64 delete_rows_written = 7;
+  uint64 bytes_written = 8;
+}
+
 message Projection {
   repeated spark.spark_expression.Expr project_list = 1;
 }
@@ -962,6 +1066,18 @@ message MergeRows {
 
   // Schema of the emitted rows, matching `MergeRowsExec.output`.
   repeated spark.spark_expression.DataType output_types = 7;
+
+  // True when the caller requires every Keep instruction to retain its Spark action context.
+  // Spark 4.1 uses this information to build the semantic MergeSummary passed to BatchWrite.
+  bool semantic_metrics_required = 8;
+}
+
+enum MergeActionContext {
+  MERGE_ACTION_CONTEXT_UNSPECIFIED = 0;
+  MERGE_ACTION_COPY = 1;
+  MERGE_ACTION_DELETE = 2;
+  MERGE_ACTION_INSERT = 3;
+  MERGE_ACTION_UPDATE = 4;
 }
 
 message MergeInstruction {
@@ -969,6 +1085,8 @@ message MergeInstruction {
   spark.spark_expression.Expr condition = 1;
   // 0 output rows = Discard, 1 = Keep, 2 = Split.
   repeated MergeOutputRow outputs = 2;
+  // Present only for a one-row Keep. Required when semantic_metrics_required is true.
+  optional MergeActionContext context = 3;
 }
 
 message MergeOutputRow {
