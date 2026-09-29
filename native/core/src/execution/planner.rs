@@ -42,8 +42,9 @@ use crate::execution::{
     expressions::list_positions::ListPositionsExpr,
     expressions::subquery::Subquery,
     operators::{
-        CometFilterExec, ExecutionError, ExpandExec, ExplodeExec, MergeInstructionExec, MergeRowsExec,
-        ParquetCompression, ParquetWriterExec, SampleExec, ScanExec, ShuffleScanExec,
+        CometFilterExec, ExecutionError, ExpandExec, ExplodeExec, MergeInstructionExec,
+        MergeRowsExec, ParquetCompression, ParquetWriterExec, SampleExec, ScanExec,
+        ShuffleScanExec,
     },
     planner::expression_registry::ExpressionRegistry,
     planner::operator_registry::OperatorRegistry,
