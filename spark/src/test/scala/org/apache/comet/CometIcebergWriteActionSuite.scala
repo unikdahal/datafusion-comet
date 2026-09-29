@@ -1287,7 +1287,7 @@ class CometIcebergWriteActionSuite
 
   for (aqe <- Seq("true", "false"); granularity <- Seq("partition", "file")) {
     test(
-      s"native MoR UPDATE matches iceberg-java with partition evolution, " +
+      "native MoR UPDATE matches iceberg-java with partition evolution, " +
         s"AQE=$aqe, granularity=$granularity") {
       assumeNativeAcceleration()
       withIcebergCatalog { warehouseDir =>
