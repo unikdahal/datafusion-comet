@@ -113,8 +113,9 @@ jobs:
         # Suites are grouped by functional area into balanced buckets so that no test
         # job runs much longer than ~23 min. See
         # docs/superpowers/specs/2026-05-22-pr-build-consolidation-design.md for the
-        # per-suite timing analysis behind this grouping. Keep this list in sync with
-        # pr_build_linux.yml; dev/ci/check-suites.py requires every suite in both files.
+        # per-suite timing analysis behind this grouping. Keep shared suites in sync
+        # with pr_build_linux.yml; dev/ci/check-suites.py scopes profile-specific
+        # suites to workflows that run that profile.
         suite:
           - name: "scans"
             value: |

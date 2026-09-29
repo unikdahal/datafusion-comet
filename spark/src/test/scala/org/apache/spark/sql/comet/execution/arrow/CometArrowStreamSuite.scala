@@ -30,8 +30,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import org.apache.arrow.memory.{AllocationListener, RootAllocator}
-import org.apache.arrow.vector.{BaseFixedWidthVector, BaseValueVector, BigIntVector, BitVector, DecimalVector, IntervalMonthDayNanoVector, IntVector, VarCharVector, VectorLoader, VectorSchemaRoot, VectorUnloader}
-import org.apache.arrow.vector.complex.ListVector
+import org.apache.arrow.vector.{BaseFixedWidthVector, BaseValueVector, BigIntVector, BitVector, DecimalVector, FieldVector, IntervalMonthDayNanoVector, IntVector, VarCharVector, VectorLoader, VectorSchemaRoot, VectorUnloader}
+import org.apache.arrow.vector.complex.{ListVector, StructVector}
 import org.apache.arrow.vector.dictionary.{Dictionary => ArrowDictionary}
 import org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider
 import org.apache.arrow.vector.ipc.ArrowReader
@@ -901,6 +901,68 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
       } finally batch.close()
     } finally {
       input.close()
+      allocator.close()
+    }
+  }
+
+  test("columnar struct writes trim trailing fields outside the Arrow schema") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceType =
+      StructType(Seq(StructField("id", IntegerType), StructField("added", IntegerType)))
+    val outputType = StructType(Seq(StructField("id", IntegerType)))
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    val partition = new OnHeapColumnVector(2, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](partition), 2)
+    try {
+      (0 until 2).foreach { i =>
+        partition.putNotNull(i)
+        partition.getChild(0).putInt(i, i + 1)
+        partition.getChild(1).putInt(i, i + 10)
+      }
+      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      try {
+        batch.numRows() shouldBe 2
+        (0 until 2).foreach { i =>
+          val row = batch.column(0).getStruct(i)
+          row.numFields shouldBe 1
+          row.getInt(0) shouldBe i + 1
+        }
+      } finally batch.close()
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("Arrow writer initializes declared struct children before exporting rows") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val structType = StructType(Seq(StructField("grp", StringType)))
+    val field = Utils.toArrowField("partition", structType, nullable = true, "UTC")
+    // Construct the root with a declared Field whose child vector is not initialized yet.
+    // The Spark-columnar-to-Arrow bridge can receive this shape after an AQE shuffle.
+    val vector = field.getFieldType
+      .createNewSingleVector(field, allocator, null)
+      .asInstanceOf[StructVector]
+    val root =
+      new VectorSchemaRoot(new Schema(Seq(field).asJava), Seq[FieldVector](vector).asJava, 0)
+    val source = new OnHeapColumnVector(1, structType)
+    val input = new ColumnarBatch(Array[ColumnVector](source), 1)
+    try {
+      vector.size() shouldBe 0
+      source.putNotNull(0)
+      source.getChild(0).putByteArray(0, "a".getBytes(StandardCharsets.UTF_8))
+      val writer = ArrowWriter.create(root, 1)
+      writer.writeColumns(input, 0, 1)
+      writer.finish()
+      vector.size() shouldBe 1
+      vector.getChildByOrdinal(0).asInstanceOf[VarCharVector].getObject(0).toString shouldBe "a"
+      val batch = new VectorUnloader(root).getRecordBatch
+      try batch.getNodes.size() shouldBe 2
+      finally batch.close()
+    } finally {
+      input.close()
+      root.close()
       allocator.close()
     }
   }

@@ -383,6 +383,14 @@ trait ShimSparkErrorConverter {
         val filePath = params.get("filePath").map(_.toString).getOrElse("")
         Some(QueryExecutionErrors.cannotReadFilesError(new SparkException(message), filePath))
 
+      case "MergeCardinalityViolation" =>
+        Some(
+          new SparkException(
+            "The ON search condition of the MERGE statement matched a single row from " +
+              "the target table with multiple rows of the source table. This could result " +
+              "in the target row being operated on more than once with an update or delete " +
+              "operation and is not allowed."))
+
       case _ =>
         None
     }

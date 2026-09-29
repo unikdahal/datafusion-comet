@@ -69,6 +69,10 @@ object Utils extends CometTypeShim with Logging {
     org.apache.spark.util.Utils.getSimpleName(cls)
   }
 
+  /** Compares Spark data types while ignoring compatible nullability differences. */
+  def equalsIgnoreCompatibleNullability(left: DataType, right: DataType): Boolean =
+    DataType.equalsIgnoreCompatibleNullability(left, right)
+
   def fromArrowField(field: Field): DataType = {
     field.getType match {
       case _: ArrowType.Map =>

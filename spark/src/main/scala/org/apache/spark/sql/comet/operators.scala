@@ -57,6 +57,7 @@ import com.google.protobuf.CodedOutputStream
 
 import org.apache.comet.{CometConf, CometExecIterator, CometRuntimeException, ConfigEntry, ContribServices}
 import org.apache.comet.CometSparkSessionExtensions.{isCometShuffleEnabled, isSpark35Plus, withFallbackReason}
+import org.apache.comet.iceberg.IcebergSemanticMetricsShim
 import org.apache.comet.parquet.CometParquetUtils
 import org.apache.comet.rules.CometExecRule
 import org.apache.comet.serde.{CometOperatorSerde, Compatible, OperatorOuterClass, QueryContextInterner, SupportLevel, Unsupported}
@@ -1741,11 +1742,38 @@ case class CometMergeRowsExec(
       rowIdOrdinal,
       child)
 
-  // Spark 4.1+ per-clause metrics require instruction context that earlier versions lack.
-  // Expose baseline metrics until that context is version-gated through native serde.
-  override lazy val metrics: Map[String, SQLMetric] =
+  override lazy val metrics: Map[String, SQLMetric] = {
+    val mergeMetrics = IcebergSemanticMetricsShim.mergeMetrics(sparkContext)
+    val semanticMetrics =
+      if (mergeMetrics.nonEmpty) {
+        mergeMetrics
+      } else {
+        Map(
+          "numTargetRowsCopied" ->
+            SQLMetrics.createMetric(sparkContext, "number of target rows copied"),
+          "numTargetRowsInserted" ->
+            SQLMetrics.createMetric(sparkContext, "number of target rows inserted"),
+          "numTargetRowsDeleted" ->
+            SQLMetrics.createMetric(sparkContext, "number of target rows deleted"),
+          "numTargetRowsUpdated" ->
+            SQLMetrics.createMetric(sparkContext, "number of target rows updated"),
+          "numTargetRowsMatchedUpdated" ->
+            SQLMetrics.createMetric(sparkContext, "number of matched target rows updated"),
+          "numTargetRowsMatchedDeleted" ->
+            SQLMetrics.createMetric(sparkContext, "number of matched target rows deleted"),
+          "numTargetRowsNotMatchedBySourceUpdated" ->
+            SQLMetrics.createMetric(
+              sparkContext,
+              "number of not matched by source target rows updated"),
+          "numTargetRowsNotMatchedBySourceDeleted" ->
+            SQLMetrics.createMetric(
+              sparkContext,
+              "number of not matched by source target rows deleted"))
+      }
     CometMetricNode.baselineMetrics(sparkContext) ++ Map(
-      "output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"))
+      "output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches")) ++
+      semanticMetrics
+  }
 }
 
 object CometExplodeExec extends CometOperatorSerde[GenerateExec] {

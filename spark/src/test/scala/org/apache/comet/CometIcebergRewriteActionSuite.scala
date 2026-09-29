@@ -343,7 +343,10 @@ class CometIcebergRewriteActionSuite extends CometTestBase with CometIcebergTest
   // The per-group rewrite write plans as Spark's AppendData, or as Comet's IcebergCommit when
   // COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED is on.
   private def isRewriteWrite(plan: CapturedPlan): Boolean =
-    plan.hasNode("AppendData") || plan.hasNode("IcebergCommit")
+    plan.hasNode("AppendData") || plan.nodeNames.exists { name =>
+      // IcebergCommitExec includes the table name in nodeName on newer Spark profiles.
+      name == "IcebergCommit" || name.startsWith("IcebergCommit ")
+    }
 
   private def assertReadsAreComet(plans: Seq[CapturedPlan]): Unit = {
     assertOperator(plans, "CometIcebergNativeScan")

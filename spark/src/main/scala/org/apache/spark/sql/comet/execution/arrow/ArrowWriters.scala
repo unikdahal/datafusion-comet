@@ -44,8 +44,19 @@ import org.apache.spark.unsafe.Platform
 private[arrow] object ArrowWriter {
   def create(root: VectorSchemaRoot, fixedWidthCapacity: Int): ArrowWriter = {
     require(fixedWidthCapacity >= 0, "Fixed-width capacity must be non-negative")
-    val children = root.getFieldVectors().asScala.map { vector =>
+    val declaredFields = root.getSchema.getFields.asScala
+    val children = root.getFieldVectors().asScala.zipWithIndex.map { case (vector, ordinal) =>
       vector match {
+        case struct: StructVector =>
+          val declaredChildren = declaredFields(ordinal).getChildren
+          if (struct.size() == 0 && !declaredChildren.isEmpty) {
+            struct.initializeChildrenFromFields(declaredChildren)
+          }
+          require(
+            struct.size() == declaredChildren.size(),
+            s"Arrow struct ${declaredFields(ordinal).getName} has ${struct.size()} vectors " +
+              s"for ${declaredChildren.size()} fields")
+          struct.allocateNew()
         case fixedWidth: BaseFixedWidthVector =>
           fixedWidth.allocateNew(fixedWidthCapacity)
         case _ =>
@@ -83,7 +94,17 @@ private[arrow] object ArrowWriter {
         val keyWriter = createFieldWriter(structVector.getChild(MapVector.KEY_NAME))
         val valueWriter = createFieldWriter(structVector.getChild(MapVector.VALUE_NAME))
         new MapWriter(vector, structVector, keyWriter, valueWriter)
-      case (StructType(_), vector: StructVector) =>
+      case (StructType(fields), vector: StructVector) =>
+        // An Arrow stream can expose a declared struct Field before its child vectors are
+        // initialized. Create them before constructing the writers, so the exported stream
+        // carries the child field nodes required by its schema.
+        if (vector.size() == 0 && fields.nonEmpty) {
+          vector.initializeChildrenFromFields(field.getChildren)
+          vector.allocateNew()
+        }
+        require(
+          vector.size() == fields.length,
+          s"Arrow struct ${field.getName} has ${vector.size()} vectors for ${fields.length} fields")
         val children = (0 until vector.size()).map { ordinal =>
           createFieldWriter(vector.getChildByOrdinal(ordinal))
         }
@@ -611,9 +632,14 @@ private[arrow] class StructWriter(
 
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     val struct = input.getStruct(ordinal, children.length)
+    require(
+      struct.numFields >= children.length,
+      s"Cannot write ${children.length} fields of struct $name from ${struct.numFields} fields")
     var i = 0
     valueVector.setIndexDefined(count)
-    while (i < struct.numFields) {
+    // Iceberg's partition metadata can retain fields from multiple partition specs even when
+    // this Arrow stream projects only a prefix of them. Follow the declared output schema.
+    while (i < children.length) {
       children(i).write(struct, i)
       i += 1
     }

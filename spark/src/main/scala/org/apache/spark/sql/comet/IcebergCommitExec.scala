@@ -28,7 +28,21 @@ import org.apache.spark.sql.execution.{SparkPlan, SQLExecution, UnaryExecNode}
 import org.apache.spark.sql.execution.datasources.v2.V2CommandExec
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
-import org.apache.comet.iceberg.{IcebergDriverMetricsShim, IcebergReflection}
+import org.apache.comet.iceberg.{DeltaCommand, IcebergDeltaReflection, IcebergDriverMetricsShim, IcebergReflection}
+
+sealed trait CreatedTaskFilesExtractor {
+  def locations(message: WriterCommitMessage): Seq[String]
+}
+
+case object OrdinaryIcebergCreatedFiles extends CreatedTaskFilesExtractor {
+  override def locations(message: WriterCommitMessage): Seq[String] =
+    IcebergReflection.taskCommitFileLocations(message)
+}
+
+case object PositionDeltaCreatedFiles extends CreatedTaskFilesExtractor {
+  override def locations(message: WriterCommitMessage): Seq[String] =
+    IcebergDeltaReflection.deltaTaskCommitCreatedFileLocations(message)
+}
 
 /**
  * Driver-side committer for Comet's split-operator Iceberg V2 write.
@@ -38,7 +52,10 @@ case class IcebergCommitExec(
     @transient batchWrite: BatchWrite,
     @transient write: Write,
     @transient refreshCache: IcebergCommitExec.RefreshCache,
-    child: SparkPlan)
+    child: SparkPlan,
+    createdFilesExtractor: CreatedTaskFilesExtractor = OrdinaryIcebergCreatedFiles,
+    command: Option[DeltaCommand] = None,
+    tableName: Option[String] = None)
     extends V2CommandExec
     with UnaryExecNode
     with Logging {
@@ -56,12 +73,23 @@ case class IcebergCommitExec(
   // Exactly-once relies on V2CommandExec memoizing run() via its `result` lazy val and on
   // the writer executing once inside the AQE bubble anchored by IcebergWriteLogical; pinned
   // by the AQE re-plan test in CometIcebergWriteActionSuite.
-  override protected def run(): Seq[InternalRow] = {
-    try {
-      collectAndCommit()
-    } finally {
-      postDriverMetrics()
-    }
+  override protected def run(): Seq[InternalRow] = runWithHooks(() => ())
+
+  /**
+   * Runs the Iceberg job and batch commit, reports write metrics, commits an attached catalog
+   * transaction, and refreshes cache in Spark 4.2's required order.
+   */
+  private[comet] final def runWithHooks(
+      commitAttachedTransaction: () => Unit): Seq[InternalRow] = {
+    val result =
+      try {
+        collectAndCommit()
+      } finally {
+        postDriverMetrics()
+      }
+    commitAttachedTransaction()
+    refreshCache()
+    result
   }
 
   private def collectAndCommit(): Seq[InternalRow] = {
@@ -86,24 +114,13 @@ case class IcebergCommitExec(
           s"Iceberg write job failed; aborting with ${completed.length} completed task " +
             "message(s)",
           cause)
-        // The BatchWrite contract expects a job-level abort. Iceberg's own `SparkWrite.abort`
-        // only deletes files after a cleanable *commit* failure and skips cleanup otherwise, so
-        // the data files of tasks that completed before the job failed would stay behind even
-        // though nothing can reference them (no commit was attempted). Delete them here; the
-        // failed task's own files are cleaned up by the task itself.
-        val failure = abortAfter(completed, cause)
-        try deleteCompletedTaskFiles(completed)
-        catch {
-          case cleanupFailure: Throwable =>
-            cause.addSuppressed(cleanupFailure)
-        }
-        throw failure
+        throw abortAfterJobFailure(completed, cause)
     }
     longMetric("numCommittedMessages").add(messages.length)
 
     try {
       messages.foreach(batchWrite.onDataWriterCommit)
-      IcebergWriteSummaryShim.commit(batchWrite, messages, child)
+      IcebergWriteSummaryShim.commit(batchWrite, messages, child, command)
       logInfo(s"Iceberg commit succeeded with ${messages.length} task message(s)")
     } catch {
       case cause: Throwable =>
@@ -111,7 +128,6 @@ case class IcebergCommitExec(
         throw abortAfter(messages, cause)
     }
 
-    refreshCache()
     Nil
   }
 
@@ -132,12 +148,50 @@ case class IcebergCommitExec(
         QueryExecutionErrors.writingJobFailedError(cause)
     }
 
+  /**
+   * A job failure happens before any commit is attempted. Abort Iceberg first, then explicitly
+   * delete files reported by tasks that already completed. Some Iceberg BatchWrite
+   * implementations return successfully from abort without removing those task outputs. The
+   * direct FileIO cleanup is safe after a successful abort because deleting an already-removed
+   * path is idempotent in the supported FileIO implementations.
+   */
+  private def abortAfterJobFailure(
+      messages: Array[WriterCommitMessage],
+      cause: Throwable): Throwable = {
+    var abortFailed = false
+    try {
+      batchWrite.abort(messages)
+    } catch {
+      case abortFailure: Throwable =>
+        abortFailed = true
+        logError("Iceberg write abort failed; attempting direct cleanup of completed task files")
+        cause.addSuppressed(abortFailure)
+    }
+
+    try deleteCompletedTaskFiles(messages)
+    catch {
+      case cleanupFailure: Throwable =>
+        logError("Direct cleanup of completed Iceberg task files failed", cleanupFailure)
+        cause.addSuppressed(cleanupFailure)
+    }
+
+    if (abortFailed) QueryExecutionErrors.writingJobFailedError(cause) else cause
+  }
+
   private def deleteCompletedTaskFiles(completed: Array[WriterCommitMessage]): Unit = {
-    val locations = completed.toSeq.flatMap(m => IcebergReflection.taskCommitFileLocations(m))
+    val locations = completed.toSeq.flatMap(m => createdFilesExtractor.locations(m))
     if (locations.nonEmpty) {
-      val io = IcebergReflection
-        .getOuterSparkWrite(batchWrite)
-        .flatMap(IcebergReflection.getTableFromSparkWrite)
+      val table = createdFilesExtractor match {
+        case PositionDeltaCreatedFiles =>
+          IcebergReflection
+            .getOuterPositionDeltaWrite(batchWrite)
+            .flatMap(IcebergReflection.getTableFromPositionDeltaWrite)
+        case OrdinaryIcebergCreatedFiles =>
+          IcebergReflection
+            .getOuterSparkWrite(batchWrite)
+            .flatMap(IcebergReflection.getTableFromSparkWrite)
+      }
+      val io = table
         .flatMap(IcebergReflection.getTableIO)
       io match {
         case Some(fileIO) =>
@@ -170,7 +224,8 @@ case class IcebergCommitExec(
   override protected def withNewChildInternal(newChild: SparkPlan): IcebergCommitExec =
     copy(child = newChild)
 
-  override def nodeName: String = "IcebergCommit"
+  override def nodeName: String =
+    tableName.filter(_.nonEmpty).map(name => s"IcebergCommit $name").getOrElse("IcebergCommit")
 }
 
 object IcebergCommitExec {
