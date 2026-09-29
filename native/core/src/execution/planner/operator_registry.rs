@@ -144,6 +144,8 @@ fn get_operator_type(spark_operator: &Operator) -> Option<OperatorType> {
         OpStruct::NativeScan(_) => Some(OperatorType::NativeScan),
         OpStruct::IcebergScan(_) => Some(OperatorType::IcebergScan),
         OpStruct::IcebergWrite(_) => Some(OperatorType::IcebergWrite),
+        // Row-level writes are lowered directly by PhysicalPlanner.
+        OpStruct::IcebergDeltaWrite(_) => None,
         OpStruct::ShuffleWriter(_) => Some(OperatorType::ShuffleWriter),
         OpStruct::ParquetWriter(_) => Some(OperatorType::ParquetWriter),
         OpStruct::Expand(_) => Some(OperatorType::Expand),

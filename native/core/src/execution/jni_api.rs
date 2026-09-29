@@ -448,6 +448,7 @@ fn op_name(op: &OpStruct) -> &'static str {
         OpStruct::NativeScan(_) => "NativeScan",
         OpStruct::IcebergScan(_) => "IcebergScan",
         OpStruct::IcebergWrite(_) => "IcebergWrite",
+        OpStruct::IcebergDeltaWrite(_) => "IcebergDeltaWrite",
         OpStruct::ParquetWriter(_) => "ParquetWriter",
         OpStruct::Explode(_) => "Explode",
         OpStruct::CsvScan(_) => "CsvScan",
