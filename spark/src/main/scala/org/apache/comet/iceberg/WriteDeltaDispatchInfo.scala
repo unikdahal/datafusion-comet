@@ -74,16 +74,17 @@ private[iceberg] object WriteDeltaDispatchInfo {
       // Spark 3.4's Scala 2.12 and 2.13 jars give colOrdinals different JVM return types
       // (collection.Seq and immutable.Seq). Avoid linking to either signature so planning
       // falls back cleanly if the runtime projection contract changes.
-      val ordinals = try {
-        projection.getClass.getMethod("colOrdinals").invoke(projection) match {
-          case values: scala.collection.Seq[_] =>
-            if (!values.forall(_.isInstanceOf[java.lang.Number])) return None
-            values.iterator.map(_.asInstanceOf[java.lang.Number].intValue()).toIndexedSeq
-          case _ => return None
+      val ordinals =
+        try {
+          projection.getClass.getMethod("colOrdinals").invoke(projection) match {
+            case values: scala.collection.Seq[_] =>
+              if (!values.forall(_.isInstanceOf[java.lang.Number])) return None
+              values.iterator.map(_.asInstanceOf[java.lang.Number].intValue()).toIndexedSeq
+            case _ => return None
+          }
+        } catch {
+          case NonFatal(_) => return None
         }
-      } catch {
-        case NonFatal(_) => return None
-      }
       val schema = projection.schema
       if (ordinals.length != schema.length ||
         ordinals.exists(index => index < 0 || index >= childOutput.length) ||
