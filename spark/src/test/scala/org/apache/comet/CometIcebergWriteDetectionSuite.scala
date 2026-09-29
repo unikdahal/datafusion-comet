@@ -890,9 +890,10 @@ class CometIcebergWriteDetectionSuite extends CometTestBase with CometIcebergTes
             dir,
             tableName,
             "PARTITIONED BY (region)",
-            Some("'format-version'='2', 'write.update.mode'='merge-on-read', " + properties))
+            Some("'format-version'='2', 'write.update.mode'='merge-on-read'"))
           spark.sql(s"INSERT INTO $catalog.$ns.$tableName VALUES (1, 'us', 1.0)")
-          val write = captureWriteExec(tableName, allowWriteFailure = false) {
+          spark.sql(s"ALTER TABLE $catalog.$ns.$tableName SET TBLPROPERTIES ($properties)")
+          val write = captureWriteExec(tableName, allowWriteFailure = true) {
             spark.sql(s"UPDATE $catalog.$ns.$tableName SET amount = 2.0 WHERE id = 1")
           }
           assertUnsupportedContains(write, tableName, reason)
