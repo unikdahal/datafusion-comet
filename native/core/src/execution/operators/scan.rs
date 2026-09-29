@@ -401,122 +401,12 @@ impl InputBatch {
 #[cfg(test)]
 mod import_tests {
     use super::*;
-    use arrow::array::{make_array, Array, ArrayData, ArrayRef, Decimal128Array, StringArray};
+    use arrow::array::{
+        make_array, Array, ArrayData, ArrayRef, Decimal128Array, StringArray, StructArray,
+    };
     use arrow::buffer::Buffer;
-    use arrow::datatypes::DataType;
-    use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
-    use arrow::ffi_stream::FFI_ArrowArrayStream;
-    use std::ffi::{c_int, c_void};
-
-    /// Private data of the stream built by [`one_batch_stream`].
-    struct OneBatch {
-        schema: SchemaRef,
-        batch: Option<ArrayData>,
-    }
-
-    unsafe extern "C" fn one_batch_get_schema(
-        stream: *mut FFI_ArrowArrayStream,
-        out: *mut FFI_ArrowSchema,
-    ) -> c_int {
-        let private = unsafe { &*((*stream).private_data as *const OneBatch) };
-        match FFI_ArrowSchema::try_from(private.schema.as_ref()) {
-            Ok(schema) => {
-                unsafe { std::ptr::write(out, schema) };
-                0
-            }
-            Err(_) => 22, // EINVAL
-        }
-    }
-
-    unsafe extern "C" fn one_batch_get_next(
-        stream: *mut FFI_ArrowArrayStream,
-        out: *mut FFI_ArrowArray,
-    ) -> c_int {
-        let private = unsafe { &mut *((*stream).private_data as *mut OneBatch) };
-        // A released (empty) array marks the end of the stream.
-        let array = match private.batch.take() {
-            Some(batch) => FFI_ArrowArray::new(&batch),
-            None => FFI_ArrowArray::empty(),
-        };
-        unsafe { std::ptr::write(out, array) };
-        0
-    }
-
-    unsafe extern "C" fn one_batch_release(stream: *mut FFI_ArrowArrayStream) {
-        let stream = unsafe { &mut *stream };
-        drop(unsafe { Box::from_raw(stream.private_data as *mut OneBatch) });
-        stream.release = None;
-    }
-
-    /// A C stream that yields `batch` once, with its buffers exactly as given. It stands in for a
-    /// JVM producer: arrow-rs's own `FFI_ArrowArrayStream::new` exports from typed arrays, and a
-    /// typed array cannot hold an under-aligned buffer.
-    fn one_batch_stream(schema: SchemaRef, batch: ArrayData) -> FFI_ArrowArrayStream {
-        let private = Box::new(OneBatch {
-            schema,
-            batch: Some(batch),
-        });
-        FFI_ArrowArrayStream {
-            get_schema: Some(one_batch_get_schema),
-            get_next: Some(one_batch_get_next),
-            get_last_error: None,
-            release: Some(one_batch_release),
-            private_data: Box::into_raw(private) as *mut c_void,
-        }
-    }
-
-    /// Comet counterpart to arrow-rs#10030's `test_decimal128_under_aligned_round_trip`, run
-    /// through the stock `ArrowArrayStreamReader` that `ScanExec` reads from. A JVM producer
-    /// (arrow-java's `NettyAllocationManager`) only guarantees the C Data Interface's recommended
-    /// 8-byte alignment, so it can hand us a `Decimal128` buffer that is not 16-byte aligned.
-    /// Since arrow 59, `from_ffi_and_data_type` realigns such buffers on import. Arrow 58 passed
-    /// them through untouched, so building the typed `Decimal128Array` panicked in
-    /// `ScalarBuffer::<i128>::from` (apache/arrow-rs#10028). This test guards against an arrow
-    /// downgrade bringing that back.
-    #[test]
-    fn realigns_under_aligned_decimal128() {
-        let decimal_type = DataType::Decimal128(10, 2);
-
-        // Slice an aligned [0, 1, 2] i128 buffer 8 bytes in to land on an 8-aligned-not-16-aligned
-        // address. The little-endian byte shift makes the two visible elements `1 << 64`, `2 << 64`.
-        let under_aligned = Buffer::from_vec(vec![0_i128, 1_i128, 2_i128]).slice(8);
-        assert_eq!(under_aligned.as_ptr().align_offset(8), 0);
-        assert_ne!(under_aligned.as_ptr().align_offset(16), 0);
-
-        // SAFETY: buffer holds room for 2 i128 values; under-alignment is the condition under test.
-        // `build_unchecked` avoids the validation read that would itself panic on the misaligned i128s.
-        let decimal = unsafe {
-            ArrayData::builder(decimal_type.clone())
-                .len(2)
-                .add_buffer(under_aligned)
-                .build_unchecked()
-        };
-
-        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
-            "d",
-            decimal_type.clone(),
-            false,
-        )]));
-        let struct_data = unsafe {
-            ArrayData::builder(DataType::Struct(schema.fields().clone()))
-                .len(2)
-                .add_child_data(decimal)
-                .build_unchecked()
-        };
-
-        let stream = one_batch_stream(Arc::clone(&schema), struct_data);
-        let mut reader = ArrowArrayStreamReader::try_new(stream).unwrap();
-        let batch = reader.next().unwrap().unwrap();
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Decimal128Array>()
-            .unwrap();
-        assert_eq!(col.len(), 2);
-        assert_eq!(col.value(0), 1_i128 << 64);
-        assert_eq!(col.value(1), 2_i128 << 64);
-        assert!(reader.next().is_none());
-    }
+    use arrow::datatypes::{DataType, Fields};
+    use arrow::ffi::{from_ffi_and_data_type, FFI_ArrowArray};
 
     #[test]
     fn import_decodes_invalid_utf8_column() {
@@ -533,5 +423,51 @@ mod import_tests {
         let out = import_column(&col).unwrap();
         let s = out.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(s.value(0), "\u{FFFD}");
+    }
+
+    /// A JVM producer (arrow-java's `NettyAllocationManager`) only guarantees the C Data
+    /// Interface's recommended 8-byte alignment, so it can hand us a `Decimal128` buffer that is
+    /// not 16-byte aligned (apache/arrow-rs#10028). `ArrowArrayStreamReader` imports each batch
+    /// with `from_ffi_and_data_type`, which realigns such buffers since arrow 59
+    /// (apache/arrow-rs#10030). Without that, building the typed column would panic in
+    /// `ScalarBuffer::<i128>::from`.
+    #[test]
+    fn ffi_import_realigns_under_aligned_decimal128() {
+        let decimal_type = DataType::Decimal128(10, 2);
+
+        // Slice an aligned [0, 1, 2] i128 buffer 8 bytes in to land on an 8-aligned-not-16-aligned
+        // address. The little-endian byte shift makes the two visible elements `1 << 64`, `2 << 64`.
+        let under_aligned = Buffer::from_vec(vec![0_i128, 1_i128, 2_i128]).slice(8);
+        assert_eq!(under_aligned.as_ptr().align_offset(8), 0);
+        assert_ne!(under_aligned.as_ptr().align_offset(16), 0);
+
+        // SAFETY: buffer holds room for 2 i128 values; under-alignment is the condition under test.
+        // `build_unchecked` avoids the validation read that would itself panic on the misaligned i128s.
+        let decimal = unsafe {
+            ArrayData::builder(decimal_type.clone())
+                .len(2)
+                .add_buffer(under_aligned)
+                .build_unchecked()
+        };
+        let fields = Fields::from(vec![Field::new("d", decimal_type, false)]);
+        let struct_data = unsafe {
+            ArrayData::builder(DataType::Struct(fields.clone()))
+                .len(2)
+                .add_child_data(decimal)
+                .build_unchecked()
+        };
+        let array = FFI_ArrowArray::new(&struct_data);
+
+        // The same import `ArrowArrayStreamReader::next` performs.
+        // SAFETY: `array` was exported above from data whose layout matches the struct type.
+        let data = unsafe { from_ffi_and_data_type(array, DataType::Struct(fields)) }.unwrap();
+        let (_, columns, _) = StructArray::from(data).into_parts();
+        let col = columns[0]
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
+        assert_eq!(col.len(), 2);
+        assert_eq!(col.value(0), 1_i128 << 64);
+        assert_eq!(col.value(1), 2_i128 << 64);
     }
 }
