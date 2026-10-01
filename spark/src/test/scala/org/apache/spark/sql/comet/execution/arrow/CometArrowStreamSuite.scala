@@ -30,8 +30,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import org.apache.arrow.memory.{AllocationListener, RootAllocator}
-import org.apache.arrow.vector.{BaseFixedWidthVector, BaseValueVector, BigIntVector, BitVector, DecimalVector, IntervalMonthDayNanoVector, IntVector, VarCharVector, VectorLoader, VectorSchemaRoot, VectorUnloader}
-import org.apache.arrow.vector.complex.ListVector
+import org.apache.arrow.vector.{BaseFixedWidthVector, BaseValueVector, BigIntVector, BitVector, DecimalVector, FieldVector, IntervalMonthDayNanoVector, IntVector, VarCharVector, VectorLoader, VectorSchemaRoot, VectorUnloader}
+import org.apache.arrow.vector.complex.{ListVector, StructVector}
 import org.apache.arrow.vector.dictionary.{Dictionary => ArrowDictionary}
 import org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider
 import org.apache.arrow.vector.ipc.ArrowReader
@@ -901,6 +901,134 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
       } finally batch.close()
     } finally {
       input.close()
+      allocator.close()
+    }
+  }
+
+  test("columnar struct writes trim compatible trailing fields outside the Arrow schema") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceType =
+      StructType(Seq(StructField("id", IntegerType), StructField("added", IntegerType)))
+    val outputType = StructType(Seq(StructField("id", IntegerType)))
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    val partition = new OnHeapColumnVector(2, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](partition), 2)
+    try {
+      (0 until 2).foreach { i =>
+        partition.putNotNull(i)
+        partition.getChild(0).putInt(i, i + 1)
+        partition.getChild(1).putInt(i, i + 10)
+      }
+      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      try {
+        batch.numRows() shouldBe 2
+        (0 until 2).foreach { i =>
+          val row = batch.column(0).getStruct(i)
+          row.numFields shouldBe 1
+          row.getInt(0) shouldBe i + 1
+        }
+      } finally batch.close()
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("columnar struct writes reject a wider struct with an incompatible prefix") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceType =
+      StructType(Seq(StructField("other", IntegerType), StructField("id", IntegerType)))
+    val outputType = StructType(Seq(StructField("id", IntegerType)))
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    val partition = new OnHeapColumnVector(1, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](partition), 1)
+    try {
+      partition.putNotNull(0)
+      partition.getChild(0).putInt(0, 99)
+      partition.getChild(1).putInt(0, 1)
+      val error = intercept[IllegalArgumentException] {
+        CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      }
+      error.getMessage should include("leading fields are incompatible")
+      allocator.getAllocatedMemory shouldBe 0L
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("struct writers do not trim trailing fields without columnar schema validation") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val structType = StructType(Seq(StructField("id", IntegerType)))
+    val field = Utils.toArrowField("partition", structType, nullable = true, "UTC")
+    val vector = field.createVector(allocator).asInstanceOf[StructVector]
+    val writer = ArrowWriter.createFieldWriter(vector)
+    val wider = new GenericInternalRow(Array[Any](1, 2))
+    val input = new GenericInternalRow(Array[Any](wider))
+    try {
+      val error = intercept[IllegalArgumentException] {
+        writer.write(input, 0)
+      }
+      error.getMessage should include("without a validated columnar projection")
+    } finally {
+      vector.close()
+      allocator.close()
+    }
+  }
+
+  test("Arrow writer rejects struct vectors that disagree with the root schema") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val declaredType = StructType(Seq(StructField("id", IntegerType)))
+    val physicalType = StructType(Seq(StructField("other", IntegerType)))
+    val declaredField = Utils.toArrowField("partition", declaredType, nullable = true, "UTC")
+    val physicalField = Utils.toArrowField("partition", physicalType, nullable = true, "UTC")
+    val vector = physicalField.createVector(allocator).asInstanceOf[StructVector]
+    val root =
+      new VectorSchemaRoot(
+        new Schema(Seq(declaredField).asJava),
+        Seq[FieldVector](vector).asJava,
+        0)
+    try {
+      val error = intercept[IllegalArgumentException] {
+        ArrowWriter.create(root, 1)
+      }
+      error.getMessage should include("field does not match the declared schema")
+    } finally {
+      root.close()
+      allocator.close()
+    }
+  }
+
+  test("Arrow writer initializes declared struct children before exporting rows") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val structType = StructType(Seq(StructField("grp", StringType)))
+    val field = Utils.toArrowField("partition", structType, nullable = true, "UTC")
+    // Construct a deliberately partial root to pin ArrowWriter's defensive schema repair.
+    // Normal Field.createVector callers already initialize children.
+    val vector = field.getFieldType
+      .createNewSingleVector(field, allocator, null)
+      .asInstanceOf[StructVector]
+    val root =
+      new VectorSchemaRoot(new Schema(Seq(field).asJava), Seq[FieldVector](vector).asJava, 0)
+    val source = new OnHeapColumnVector(1, structType)
+    val input = new ColumnarBatch(Array[ColumnVector](source), 1)
+    try {
+      vector.size() shouldBe 0
+      source.putNotNull(0)
+      source.getChild(0).putByteArray(0, "a".getBytes(StandardCharsets.UTF_8))
+      val writer = ArrowWriter.create(root, 1)
+      writer.writeColumns(input, 0, 1)
+      writer.finish()
+      vector.size() shouldBe 1
+      vector.getChildByOrdinal(0).asInstanceOf[VarCharVector].getObject(0).toString shouldBe "a"
+      val batch = new VectorUnloader(root).getRecordBatch
+      try batch.getNodes.size() shouldBe 2
+      finally batch.close()
+    } finally {
+      input.close()
+      root.close()
       allocator.close()
     }
   }
