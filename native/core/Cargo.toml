@@ -147,3 +147,7 @@ harness = false
 [[bench]]
 name = "parquet_timestamp_conversion"
 harness = false
+
+[[bench]]
+name = "merge_rows"
+harness = false
