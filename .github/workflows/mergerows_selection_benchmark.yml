@@ -29,7 +29,7 @@ permissions:
 env:
   RUST_VERSION: stable
   RUST_BACKTRACE: 1
-  CARGO_TARGET_DIR: ${{ runner.temp }}/mergerows-bench-target
+  CARGO_TARGET_DIR: /tmp/mergerows-bench-target
 
 jobs:
   benchmark:
