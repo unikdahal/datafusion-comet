@@ -59,6 +59,7 @@ import org.apache.comet.{CometConf, CometExecIterator, CometRuntimeException, Co
 import org.apache.comet.CometSparkSessionExtensions.{isCometShuffleEnabled, isSpark35Plus, withFallbackReason}
 import org.apache.comet.parquet.CometParquetUtils
 import org.apache.comet.rules.CometExecRule
+import org.apache.comet.shims.MergeRowsMetricsShim
 import org.apache.comet.serde.{CometOperatorSerde, Compatible, OperatorOuterClass, QueryContextInterner, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.{AggregateMode => CometAggregateMode, Operator}
 import org.apache.comet.serde.QueryPlanSerde
@@ -1770,11 +1771,10 @@ case class CometMergeRowsExec(
       rowIdOrdinal,
       child)
 
-  // Spark 4.1+ per-clause metrics require instruction context that earlier versions lack.
-  // Expose baseline metrics until that context is version-gated through native serde.
   override lazy val metrics: Map[String, SQLMetric] =
-    CometMetricNode.baselineMetrics(sparkContext) ++ Map(
-      "output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"))
+    CometMetricNode.baselineMetrics(sparkContext) ++
+      Map("output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches")) ++
+      MergeRowsMetricsShim.metrics(sparkContext)
 }
 
 object CometExplodeExec extends CometOperatorSerde[GenerateExec] {
