@@ -54,6 +54,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          git fetch --no-tags origin mergerows-operator-generic
           cp native/core/benches/merge_rows.rs /tmp/merge_rows.rs
           echo "HEAD_SHA=${GITHUB_SHA}" >> "${GITHUB_ENV}"
           echo "BASE_SHA=$(git rev-parse origin/mergerows-operator-generic)" >> "${GITHUB_ENV}"
