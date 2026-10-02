@@ -1,0 +1,180 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: MergeRows Selection Benchmark
+
+on:
+  push:
+    branches:
+      - perf/mergerows-selection-vectors
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: stable
+  RUST_BACKTRACE: 1
+  CARGO_TARGET_DIR: ${{ runner.temp }}/mergerows-bench-target
+
+jobs:
+  benchmark:
+    name: Base vs selection vectors
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: amd64/rust
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust and Java
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: ${{ env.RUST_VERSION }}
+          jdk-version: 17
+
+      - name: Save benchmark harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp native/core/benches/merge_rows.rs /tmp/merge_rows.rs
+          echo "HEAD_SHA=${GITHUB_SHA}" >> "${GITHUB_ENV}"
+          echo "BASE_SHA=$(git rev-parse origin/mergerows-operator-generic)" >> "${GITHUB_ENV}"
+
+      - name: Benchmark parent implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "${BASE_SHA}"
+          cp /tmp/merge_rows.rs native/core/benches/merge_rows.rs
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("native/core/Cargo.toml")
+          text = path.read_text()
+          stanza = '\n[[bench]]\nname = "merge_rows"\nharness = false\n'
+          if 'name = "merge_rows"' not in text:
+              path.write_text(text + stanza)
+          PY
+          cd native
+          cargo bench -p datafusion-comet --bench merge_rows --no-default-features --             --warm-up-time 1 --measurement-time 3 --sample-size 20
+          cd ..
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["CARGO_TARGET_DIR"]) / "criterion"
+          results = {}
+          for path in root.glob("**/new/estimates.json"):
+              if "mergerows_clause_dispatch" not in path.as_posix():
+                  continue
+              key = path.parent.parent.relative_to(root).as_posix()
+              data = json.loads(path.read_text())
+              results[key] = {
+                  "median_ns": data["median"]["point_estimate"],
+                  "mean_ns": data["mean"]["point_estimate"],
+              }
+          if not results:
+              raise SystemExit("no MergeRows Criterion estimates found for parent")
+          Path("/tmp/base-results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+          print(json.dumps(results, indent=2, sort_keys=True))
+          PY
+
+      - name: Benchmark optimized implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "${HEAD_SHA}"
+          cd native
+          cargo bench -p datafusion-comet --bench merge_rows --no-default-features --             --warm-up-time 1 --measurement-time 3 --sample-size 20
+          cd ..
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["CARGO_TARGET_DIR"]) / "criterion"
+          results = {}
+          for path in root.glob("**/new/estimates.json"):
+              if "mergerows_clause_dispatch" not in path.as_posix():
+                  continue
+              key = path.parent.parent.relative_to(root).as_posix()
+              data = json.loads(path.read_text())
+              results[key] = {
+                  "median_ns": data["median"]["point_estimate"],
+                  "mean_ns": data["mean"]["point_estimate"],
+              }
+          if not results:
+              raise SystemExit("no MergeRows Criterion estimates found for optimized head")
+          Path("/tmp/head-results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+          print(json.dumps(results, indent=2, sort_keys=True))
+          PY
+
+      - name: Compare benchmark results
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          base = json.loads(Path("/tmp/base-results.json").read_text())
+          head = json.loads(Path("/tmp/head-results.json").read_text())
+          keys = sorted(set(base) & set(head))
+          if not keys:
+              raise SystemExit("parent/head Criterion result sets do not overlap")
+
+          lines = [
+              "## MergeRows selection-vector benchmark",
+              "",
+              "| Benchmark | Parent median | Optimized median | Speedup | Change |",
+              "| --- | ---: | ---: | ---: | ---: |",
+          ]
+          for key in keys:
+              before = base[key]["median_ns"]
+              after = head[key]["median_ns"]
+              speedup = before / after
+              change = (1.0 - after / before) * 100.0
+              lines.append(
+                  f"| `{key}` | {before / 1e6:.3f} ms | {after / 1e6:.3f} ms | "
+                  f"{speedup:.3f}x | {change:+.1f}% |"
+              )
+
+          lines += [
+              "",
+              "Both variants ran sequentially on the same GitHub Actions runner with the same "
+              "Criterion harness and shared build target.",
+          ]
+          summary = "\n".join(lines) + "\n"
+          print(summary)
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(summary)
+          Path("/tmp/benchmark-summary.md").write_text(summary)
+          PY
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v6
+        with:
+          name: mergerows-selection-benchmark
+          path: |
+            /tmp/base-results.json
+            /tmp/head-results.json
+            /tmp/benchmark-summary.md
+          if-no-files-found: error
