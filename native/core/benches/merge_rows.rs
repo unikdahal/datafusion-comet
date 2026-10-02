@@ -70,8 +70,9 @@ fn input_batch(schema: &SchemaRef, batch_index: usize) -> RecordBatch {
 
     for column in 0..PAYLOAD_COLUMNS {
         columns.push(Arc::new(Int64Array::from_iter_values(
-            (0..ROWS_PER_BATCH)
-                .map(|row| ((batch_index * ROWS_PER_BATCH + row) * PAYLOAD_COLUMNS + column) as i64),
+            (0..ROWS_PER_BATCH).map(|row| {
+                ((batch_index * ROWS_PER_BATCH + row) * PAYLOAD_COLUMNS + column) as i64
+            }),
         )));
     }
 
@@ -84,10 +85,7 @@ fn output_projection(schema: &SchemaRef) -> Vec<Arc<dyn datafusion::physical_exp
         .collect()
 }
 
-fn matched_instructions(
-    schema: &SchemaRef,
-    clauses: usize,
-) -> Vec<MergeInstructionExec> {
+fn matched_instructions(schema: &SchemaRef, clauses: usize) -> Vec<MergeInstructionExec> {
     let thresholds: &[i32] = match clauses {
         4 => &[25, 50, 75],
         8 => &[12, 25, 37, 50, 62, 75, 87],
