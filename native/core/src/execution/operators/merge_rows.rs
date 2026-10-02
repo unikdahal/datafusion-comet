@@ -459,8 +459,7 @@ fn run_group(
 
         if !instr.outputs.is_empty() {
             // Share one selected input batch across both projections of Split.
-            let output_batch =
-                selection_batch(batch, &claimed, instr.outputs.iter().flatten())?;
+            let output_batch = selection_batch(batch, &claimed, instr.outputs.iter().flatten())?;
             for output_exprs in &instr.outputs {
                 out.push(project(&output_batch, output_exprs, schema)?);
             }
@@ -616,9 +615,7 @@ impl Stream for MergeRowsStream {
         let this = self.get_mut();
 
         if let Some(batch) = this.pending.pop_front() {
-            return this
-                .baseline
-                .record_poll(Poll::Ready(Some(Ok(batch))));
+            return this.baseline.record_poll(Poll::Ready(Some(Ok(batch))));
         }
 
         let mut discarded_budget = MAX_DISCARDED_BATCHES_PER_POLL;
