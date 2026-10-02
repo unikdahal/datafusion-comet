@@ -15,15 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow::array::{Array, ArrayRef, BooleanArray, Int64Array, RecordBatch};
-use arrow::compute::kernels::boolean::{and, and_not, not};
-use arrow::compute::{filter_record_batch, prep_null_mask_filter};
+use arrow::array::{
+    new_null_array, Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, UInt64Array,
+};
+use arrow::compute::kernels::boolean::{and, and_not};
+use arrow::compute::{prep_null_mask_filter, take};
 use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::utils::memory::estimate_memory_size;
 use datafusion::common::{DataFusionError, HashSet, ScalarValue};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::logical_expr::ColumnarValue;
+use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -38,6 +41,7 @@ use datafusion::{
 use datafusion_comet_common::{cast_and_stamp_schema, SparkError};
 use futures::{Stream, StreamExt};
 use std::{
+    collections::VecDeque,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -256,6 +260,7 @@ impl ExecutionPlan for MergeRowsExec {
             schema: Arc::clone(&self.schema),
             seen: HashSet::new(),
             reservation,
+            pending: VecDeque::new(),
             baseline: BaselineMetrics::new(&self.metrics, partition),
         }))
     }
@@ -280,6 +285,7 @@ pub struct MergeRowsStream {
     // Partition-scoped so duplicate matches across Arrow batches are still detected.
     seen: HashSet<i64>,
     reservation: Option<MemoryReservation>,
+    pending: VecDeque<RecordBatch>,
     baseline: BaselineMetrics,
 }
 
@@ -331,19 +337,73 @@ fn project(
     cast_and_stamp_schema("MergeRows", schema, columns, batch.num_rows())
 }
 
-fn filter_or_pass_through(
+/// Builds a batch for evaluating expressions against a row selection.
+///
+/// Row indices always refer to the original input batch. For non-contiguous selections we gather
+/// only columns referenced by the expressions; unreferenced columns are replaced with typed NULL
+/// arrays so the original schema/ordinals remain valid without copying unrelated payload columns.
+fn selection_batch<'a, I>(
     batch: &RecordBatch,
-    mask: &BooleanArray,
-) -> Result<RecordBatch, DataFusionError> {
-    if mask.true_count() == batch.num_rows() {
-        Ok(batch.clone())
-    } else {
-        filter_record_batch(batch, mask).map_err(|e| e.into())
+    row_indices: &[u64],
+    exprs: I,
+) -> Result<RecordBatch, DataFusionError>
+where
+    I: IntoIterator<Item = &'a Arc<dyn PhysicalExpr>>,
+{
+    if row_indices.is_empty() {
+        return Ok(batch.slice(0, 0));
     }
+
+    let first = row_indices[0] as usize;
+    let contiguous = first
+        .checked_add(row_indices.len())
+        .is_some_and(|end| end <= batch.num_rows())
+        && row_indices
+            .iter()
+            .enumerate()
+            .all(|(offset, &row)| row == (first + offset) as u64);
+    if contiguous {
+        return Ok(batch.slice(first, row_indices.len()));
+    }
+
+    let mut required = vec![false; batch.num_columns()];
+    for expr in exprs {
+        for column in collect_columns(expr) {
+            let index = column.index();
+            if index >= required.len() {
+                return Err(DataFusionError::Internal(format!(
+                    "MergeRows: expression references column {index}, but input has {} columns",
+                    required.len()
+                )));
+            }
+            required[index] = true;
+        }
+    }
+
+    // Expressions with no column references only need the selected row count (for scalar
+    // expansion); a zero-copy slice provides that without gathering payload columns.
+    if !required.iter().any(|required| *required) {
+        return Ok(batch.slice(0, row_indices.len()));
+    }
+
+    let indices = UInt64Array::from(row_indices.to_vec());
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (index, column) in batch.columns().iter().enumerate() {
+        if required[index] {
+            columns.push(take(column.as_ref(), &indices, None)?);
+        } else {
+            columns.push(new_null_array(column.data_type(), row_indices.len()));
+        }
+    }
+    RecordBatch::try_new(batch.schema(), columns).map_err(|e| e.into())
 }
 
 /// Applies an ordered instruction group with Spark's first-match-wins semantics.
-/// Output is grouped by the producing instruction; no physical row ordering is advertised.
+///
+/// Selection vectors keep row ownership in original-batch coordinates. A later predicate is built
+/// only from rows that remain unclaimed, preserving Spark's short-circuit/error behavior. Fired
+/// rows are materialized once for their output expressions and emitted as independent batches,
+/// avoiding the final concat copy.
 fn run_group(
     batch: &RecordBatch,
     group_mask: &BooleanArray,
@@ -354,25 +414,30 @@ fn run_group(
         return Ok(vec![]);
     }
 
-    // Only rows routed to this group may evaluate its clause predicates.
-    let mut current = filter_or_pass_through(batch, group_mask)?;
+    let mut remaining: Vec<u64> = group_mask
+        .values()
+        .set_indices()
+        .map(|row| row as u64)
+        .collect();
     let mut out = Vec::new();
     let last = instructions.len() - 1;
 
     for (idx, instr) in instructions.iter().enumerate() {
-        if current.num_rows() == 0 {
+        if remaining.is_empty() {
             break;
         }
 
-        // Remove claimed rows before evaluating later clauses. This matters for ANSI errors in
-        // predicates that Spark would never evaluate after an earlier clause matched.
-        let fire = match instr.condition.evaluate(&current)? {
+        // Evaluate the predicate only on unclaimed rows. This is the semantic invariant that
+        // prevents a later ANSI/erroring predicate from touching a row claimed by an earlier one.
+        let predicate_batch =
+            selection_batch(batch, &remaining, std::iter::once(&instr.condition))?;
+        let fire = match instr.condition.evaluate(&predicate_batch)? {
             ColumnarValue::Scalar(ScalarValue::Boolean(Some(true))) => {
-                BooleanArray::from(vec![true; current.num_rows()])
+                BooleanArray::from(vec![true; remaining.len()])
             }
             ColumnarValue::Scalar(ScalarValue::Boolean(Some(false) | None)) => continue,
             value => value
-                .into_array(current.num_rows())?
+                .into_array(remaining.len())?
                 .as_any()
                 .downcast_ref::<BooleanArray>()
                 .map(null_to_false)
@@ -381,21 +446,36 @@ fn run_group(
                 })?,
         };
 
-        if fire.true_count() == 0 {
+        let fire_count = fire.true_count();
+        if fire_count == 0 {
             continue;
         }
 
-        let filtered = filter_or_pass_through(&current, &fire)?;
-        for output_exprs in &instr.outputs {
-            out.push(project(&filtered, output_exprs, schema)?);
+        let claimed: Vec<u64> = fire
+            .values()
+            .set_indices()
+            .map(|index| remaining[index])
+            .collect();
+
+        if !instr.outputs.is_empty() {
+            // Share one selected input batch across both projections of Split.
+            let output_batch =
+                selection_batch(batch, &claimed, instr.outputs.iter().flatten())?;
+            for output_exprs in &instr.outputs {
+                out.push(project(&output_batch, output_exprs, schema)?);
+            }
         }
 
         if idx != last {
-            current = if fire.true_count() == current.num_rows() {
-                current.slice(0, 0)
+            if fire_count == remaining.len() {
+                remaining.clear();
             } else {
-                filter_record_batch(&current, &not(&fire)?)?
-            };
+                remaining = remaining
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| (!fire.value(index)).then_some(row))
+                    .collect();
+            }
         }
     }
 
@@ -470,13 +550,13 @@ fn check_cardinality(
     Ok(())
 }
 
-fn process_batch(
+fn process_batch_outputs(
     batch: RecordBatch,
     config: &MergeConfig,
     seen: &mut HashSet<i64>,
     reservation: Option<&mut MemoryReservation>,
     schema: &SchemaRef,
-) -> Result<RecordBatch, DataFusionError> {
+) -> Result<Vec<RecordBatch>, DataFusionError> {
     let source_present = eval_bool(&config.is_source_row_present, &batch)?;
     let target_present = eval_bool(&config.is_target_row_present, &batch)?;
 
@@ -507,11 +587,23 @@ fn process_batch(
         batches.extend(run_group(&batch, mask, instructions, schema)?);
     }
 
-    if batches.is_empty() {
-        return Ok(RecordBatch::new_empty(Arc::clone(schema)));
-    }
+    Ok(batches)
+}
 
-    arrow::compute::concat_batches(schema, &batches).map_err(|e| e.into())
+#[cfg(test)]
+fn process_batch(
+    batch: RecordBatch,
+    config: &MergeConfig,
+    seen: &mut HashSet<i64>,
+    reservation: Option<&mut MemoryReservation>,
+    schema: &SchemaRef,
+) -> Result<RecordBatch, DataFusionError> {
+    let batches = process_batch_outputs(batch, config, seen, reservation, schema)?;
+    match batches.len() {
+        0 => Ok(RecordBatch::new_empty(Arc::clone(schema))),
+        1 => Ok(batches.into_iter().next().unwrap()),
+        _ => arrow::compute::concat_batches(schema, &batches).map_err(|e| e.into()),
+    }
 }
 
 // Bound synchronous all-discard processing so a delete-heavy stream yields cooperatively.
@@ -522,21 +614,27 @@ impl Stream for MergeRowsStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        if let Some(batch) = this.pending.pop_front() {
+            return this
+                .baseline
+                .record_poll(Poll::Ready(Some(Ok(batch))));
+        }
+
         let mut discarded_budget = MAX_DISCARDED_BATCHES_PER_POLL;
         loop {
             let poll = match this.child_stream.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
                     // Keep elapsed_compute scoped to this operator, not the upstream poll.
                     let _timer = this.baseline.elapsed_compute().timer();
-                    let result = process_batch(
+                    match process_batch_outputs(
                         batch,
                         &this.config,
                         &mut this.seen,
                         this.reservation.as_mut(),
                         &this.schema,
-                    );
-                    match result {
-                        Ok(batch) if batch.num_rows() == 0 => {
+                    ) {
+                        Ok(mut batches) if batches.is_empty() => {
                             discarded_budget -= 1;
                             if discarded_budget == 0 {
                                 cx.waker().wake_by_ref();
@@ -544,7 +642,12 @@ impl Stream for MergeRowsStream {
                             }
                             continue;
                         }
-                        other => Poll::Ready(Some(other)),
+                        Ok(mut batches) => {
+                            let first = batches.remove(0);
+                            this.pending.extend(batches);
+                            Poll::Ready(Some(Ok(first)))
+                        }
+                        Err(err) => Poll::Ready(Some(Err(err))),
                     }
                 }
                 other => other,
@@ -1120,6 +1223,41 @@ mod tests {
             matches!(memory_err, DataFusionError::ResourcesExhausted(_)),
             "expected memory exhaustion for a new id at capacity, got {memory_err}"
         );
+    }
+
+    #[test]
+    fn process_batch_outputs_avoids_action_concat() {
+        let batch = test_batch(
+            vec![1, 2, 3, 4],
+            vec![10, 20, 30, 40],
+            vec![true, true, true, true],
+            vec![true, true, true, true],
+        );
+        let first = MergeInstructionExec {
+            condition: binary(
+                col("val", &test_schema()).unwrap(),
+                DFOperator::Lt,
+                lit(25i32),
+                &test_schema(),
+            )
+            .unwrap(),
+            outputs: vec![vec![col("val", &test_schema()).unwrap()]],
+        };
+        let rest = keep_all();
+        let config = test_config(vec![first, rest], vec![], vec![], None);
+
+        let batches = process_batch_outputs(
+            batch,
+            &config,
+            &mut HashSet::new(),
+            Some(&mut test_reservation()),
+            &out_schema(),
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 2);
+        assert_eq!(batches[1].num_rows(), 2);
     }
 
     #[test]
