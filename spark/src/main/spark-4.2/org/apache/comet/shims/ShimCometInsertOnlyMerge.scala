@@ -26,10 +26,10 @@ import org.apache.comet.serde.CometOperatorSerde
 import org.apache.comet.serde.operator.CometInsertOnlyMergeRows
 
 /**
- * Spark 4.2 rewrites MERGE statements containing only NOT MATCHED actions as
- * InsertOnlyMergeExec. For multiple clauses its query contains a MergeRowsExec, but the outer
- * write owns MergeSummary independently of that child's metrics. Register only the restricted
- * serde that recognizes this insert-only MergeRows shape.
+ * Spark 4.2 rewrites MERGE statements containing only NOT MATCHED actions as InsertOnlyMergeExec.
+ * For multiple clauses its query contains a MergeRowsExec, but the outer write owns MergeSummary
+ * independently of that child's metrics. Register only the restricted serde that recognizes this
+ * insert-only MergeRows shape.
  */
 object ShimCometInsertOnlyMerge {
   val nativeExecs: Map[Class[_ <: SparkPlan], CometOperatorSerde[_]] =
