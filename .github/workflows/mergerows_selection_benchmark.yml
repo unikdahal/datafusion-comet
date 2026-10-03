@@ -32,10 +32,10 @@ env:
   CARGO_TARGET_DIR: /tmp/mergerows-bench-target
 
 jobs:
-  benchmark-base:
-    name: Parent implementation
+  benchmark:
+    name: Repeated same-runner A/B
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     container:
       image: amd64/rust
 
@@ -50,14 +50,35 @@ jobs:
           rust-version: ${{ env.RUST_VERSION }}
           jdk-version: 17
 
-      - name: Prepare parent benchmark
+      - name: Build parent and optimized benchmark binaries
         shell: bash
         run: |
           set -euo pipefail
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           git fetch --no-tags origin mergerows-operator-generic
-          cp native/core/benches/merge_rows.rs /tmp/merge_rows.rs
+
+          HEAD_SHA="${GITHUB_SHA}"
           BASE_SHA="$(git rev-parse origin/mergerows-operator-generic)"
+          cp native/core/benches/merge_rows.rs /tmp/merge_rows.rs
+
+          build_bench() {
+            local variant="$1"
+            cd native
+            cargo bench -p datafusion-comet --bench merge_rows --no-default-features --no-run
+            cd ..
+            local bench_bin
+            bench_bin="$(
+              find "${CARGO_TARGET_DIR}/release/deps" -maxdepth 1 -type f -perm -111 -name 'merge_rows-*'                 -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-
+            )"
+            if [[ -z "${bench_bin}" ]]; then
+              echo "MergeRows benchmark executable not found"
+              exit 1
+            fi
+            cp "${bench_bin}" "/tmp/merge_rows-${variant}"
+            chmod +x "/tmp/merge_rows-${variant}"
+            sha256sum "/tmp/merge_rows-${variant}"
+          }
+
           git checkout --detach "${BASE_SHA}"
           cp /tmp/merge_rows.rs native/core/benches/merge_rows.rs
           python3 - <<'PY'
@@ -68,19 +89,31 @@ jobs:
           if 'name = "merge_rows"' not in text:
               path.write_text(text + stanza)
           PY
+          build_bench base
 
-      - name: Benchmark parent implementation
+          git reset --hard
+          git clean -fd
+          git checkout --detach "${HEAD_SHA}"
+          build_bench head
+
+      - name: Run repeated alternating benchmarks
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p /tmp/mergerows-results
           cd native
-          cargo bench -p datafusion-comet --bench merge_rows --no-default-features --             --warm-up-time 1 --measurement-time 3 --sample-size 20
-          cd ..
-          python3 - <<'PY'
+
+          capture_results() {
+            local variant="$1"
+            local round="$2"
+            python3 - "${variant}" "${round}" <<'PY'
           import json
           import os
+          import sys
           from pathlib import Path
 
+          variant = sys.argv[1]
+          round_number = sys.argv[2]
           root = Path(os.environ["CARGO_TARGET_DIR"]) / "criterion"
           results = {}
           for path in root.glob("**/new/estimates.json"):
@@ -88,144 +121,158 @@ jobs:
                   continue
               key = path.parent.parent.relative_to(root).as_posix()
               data = json.loads(path.read_text())
+              median = data["median"]
               results[key] = {
-                  "median_ns": data["median"]["point_estimate"],
+                  "median_ns": median["point_estimate"],
+                  "median_ci_lower_ns": median["confidence_interval"]["lower_bound"],
+                  "median_ci_upper_ns": median["confidence_interval"]["upper_bound"],
                   "mean_ns": data["mean"]["point_estimate"],
               }
           if not results:
-              raise SystemExit("no MergeRows Criterion estimates found for parent")
-          Path("/tmp/base-results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+              raise SystemExit(f"no MergeRows Criterion estimates found for {variant} round {round_number}")
+          output = Path("/tmp/mergerows-results") / f"{variant}-{round_number}.json"
+          output.write_text(json.dumps(results, indent=2, sort_keys=True))
+          print(f"{variant} round {round_number}:")
           print(json.dumps(results, indent=2, sort_keys=True))
           PY
+          }
 
-      - name: Upload parent results
-        uses: actions/upload-artifact@v6
-        with:
-          name: mergerows-selection-base
-          path: /tmp/base-results.json
-          if-no-files-found: error
+          run_variant() {
+            local variant="$1"
+            local round="$2"
+            rm -rf "${CARGO_TARGET_DIR}/criterion/mergerows_clause_dispatch"
+            "/tmp/merge_rows-${variant}"               --warm-up-time 2               --measurement-time 4               --sample-size 40
+            capture_results "${variant}" "${round}"
+          }
 
-  benchmark-head:
-    name: Optimized implementation
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    container:
-      image: amd64/rust
+          for round in 1 2 3 4; do
+            if (( round % 2 == 1 )); then
+              run_variant base "${round}"
+              run_variant head "${round}"
+            else
+              run_variant head "${round}"
+              run_variant base "${round}"
+            fi
+          done
 
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Rust and Java
-        uses: ./.github/actions/setup-builder
-        with:
-          rust-version: ${{ env.RUST_VERSION }}
-          jdk-version: 17
-
-      - name: Benchmark optimized implementation
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd native
-          cargo bench -p datafusion-comet --bench merge_rows --no-default-features --             --warm-up-time 1 --measurement-time 3 --sample-size 20
-          cd ..
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path(os.environ["CARGO_TARGET_DIR"]) / "criterion"
-          results = {}
-          for path in root.glob("**/new/estimates.json"):
-              if "mergerows_clause_dispatch" not in path.as_posix():
-                  continue
-              key = path.parent.parent.relative_to(root).as_posix()
-              data = json.loads(path.read_text())
-              results[key] = {
-                  "median_ns": data["median"]["point_estimate"],
-                  "mean_ns": data["mean"]["point_estimate"],
-              }
-          if not results:
-              raise SystemExit("no MergeRows Criterion estimates found for optimized head")
-          Path("/tmp/head-results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
-          print(json.dumps(results, indent=2, sort_keys=True))
-          PY
-
-      - name: Upload optimized results
-        uses: actions/upload-artifact@v6
-        with:
-          name: mergerows-selection-head
-          path: /tmp/head-results.json
-          if-no-files-found: error
-
-  compare:
-    name: Compare results
-    needs:
-      - benchmark-base
-      - benchmark-head
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-
-    steps:
-      - name: Download parent results
-        uses: actions/download-artifact@v7
-        with:
-          name: mergerows-selection-base
-          path: benchmark-results/base
-
-      - name: Download optimized results
-        uses: actions/download-artifact@v7
-        with:
-          name: mergerows-selection-head
-          path: benchmark-results/head
-
-      - name: Compare benchmark results
+      - name: Summarize benchmark stability
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json
+          import math
           import os
+          import statistics
           from pathlib import Path
 
-          base = json.loads(Path("benchmark-results/base/base-results.json").read_text())
-          head = json.loads(Path("benchmark-results/head/head-results.json").read_text())
-          keys = sorted(set(base) & set(head))
+          root = Path("/tmp/mergerows-results")
+          rounds = range(1, 5)
+          base = {r: json.loads((root / f"base-{r}.json").read_text()) for r in rounds}
+          head = {r: json.loads((root / f"head-{r}.json").read_text()) for r in rounds}
+
+          keys = sorted(set.intersection(*(set(base[r]) & set(head[r]) for r in rounds)))
           if not keys:
               raise SystemExit("parent/head Criterion result sets do not overlap")
 
+          def cv(values):
+              if len(values) < 2:
+                  return 0.0
+              return statistics.stdev(values) / statistics.mean(values) * 100.0
+
+          aggregate = {}
+          suspicious = []
           lines = [
               "## MergeRows selection-vector benchmark",
               "",
-              "| Benchmark | Parent median | Optimized median | Speedup | Change |",
-              "| --- | ---: | ---: | ---: | ---: |",
+              "Four base/head rounds ran on the same GitHub-hosted runner. Execution order alternated "
+              "base→head / head→base to reduce warm-cache and thermal-order bias. Each Criterion run "
+              "uses 2 s warm-up, 4 s measurement, and 40 samples.",
+              "",
+              "| Benchmark | Parent median | Optimized median | Speedup | Change | Paired speedup range | CV base/head | Stability |",
+              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
           ]
+
           for key in keys:
-              before = base[key]["median_ns"]
-              after = head[key]["median_ns"]
+              base_values = [base[r][key]["median_ns"] for r in rounds]
+              head_values = [head[r][key]["median_ns"] for r in rounds]
+              paired = [base[r][key]["median_ns"] / head[r][key]["median_ns"] for r in rounds]
+
+              before = statistics.median(base_values)
+              after = statistics.median(head_values)
               speedup = before / after
               change = (1.0 - after / before) * 100.0
+              base_cv = cv(base_values)
+              head_cv = cv(head_values)
+
+              reasons = []
+              if min(paired) <= 1.0:
+                  reasons.append("direction reversal")
+              if base_cv > 8.0 or head_cv > 8.0:
+                  reasons.append("high round variance")
+              if max(paired) / min(paired) > 1.20:
+                  reasons.append("wide speedup spread")
+              status = "stable" if not reasons else "noisy: " + ", ".join(reasons)
+              if reasons:
+                  suspicious.append({"benchmark": key, "reasons": reasons})
+
+              aggregate[key] = {
+                  "base_round_medians_ns": base_values,
+                  "head_round_medians_ns": head_values,
+                  "base_median_ns": before,
+                  "head_median_ns": after,
+                  "speedup": speedup,
+                  "change_percent": change,
+                  "paired_speedups": paired,
+                  "base_cv_percent": base_cv,
+                  "head_cv_percent": head_cv,
+                  "stability": status,
+              }
+
               lines.append(
                   f"| `{key}` | {before / 1e6:.3f} ms | {after / 1e6:.3f} ms | "
-                  f"{speedup:.3f}x | {change:+.1f}% |"
+                  f"{speedup:.3f}x | {change:+.1f}% | {min(paired):.3f}–{max(paired):.3f}x | "
+                  f"{base_cv:.1f}% / {head_cv:.1f}% | {status} |"
               )
 
           lines += [
               "",
-              "Parent and optimized variants ran in parallel on separate GitHub-hosted runners "
-              "with the same Criterion harness and benchmark settings.",
+              "The reported parent/optimized values are medians of the four per-round Criterion medians. "
+              "A case is flagged when a paired round reverses direction, either side exceeds 8% CV across "
+              "round medians, or the paired speedup range spans more than 20%.",
           ]
+          if suspicious:
+              lines += [
+                  "",
+                  "### Cases needing caution",
+                  "",
+                  *[
+                      f"- `{item['benchmark']}`: {', '.join(item['reasons'])}"
+                      for item in suspicious
+                  ],
+              ]
+          else:
+              lines += ["", "No benchmark case crossed the noise/suspicion thresholds."]
+
           summary = "\n".join(lines) + "\n"
           print(summary)
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(summary)
-          Path("benchmark-summary.md").write_text(summary)
+          Path("/tmp/benchmark-summary.md").write_text(summary)
+          Path("/tmp/benchmark-aggregate.json").write_text(
+              json.dumps(
+                  {"benchmarks": aggregate, "suspicious": suspicious},
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
           PY
 
-      - name: Upload benchmark summary
+      - name: Upload benchmark results
         uses: actions/upload-artifact@v6
         with:
           name: mergerows-selection-benchmark
           path: |
-            benchmark-results/base/base-results.json
-            benchmark-results/head/head-results.json
-            benchmark-summary.md
+            /tmp/mergerows-results/*.json
+            /tmp/benchmark-aggregate.json
+            /tmp/benchmark-summary.md
           if-no-files-found: error

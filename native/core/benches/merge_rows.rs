@@ -17,9 +17,9 @@
 
 //! Micro-benchmark for MergeRows clause dispatch.
 //!
-//! The workload is intentionally wide and uses ordered clauses that each claim a fraction of the
-//! remaining matched rows. This makes the cost of repeatedly filtering the working RecordBatch and
-//! concatenating action outputs visible while still exercising first-match-wins semantics.
+//! The matrix varies clause depth and payload width, with an extra clustered-row case to exercise
+//! the contiguous-selection fast path. The primary interleaved workload forces non-contiguous
+//! selections and makes repeated filter/concat costs visible while preserving first-match-wins.
 
 use std::sync::Arc;
 
@@ -37,41 +37,74 @@ use tokio::runtime::Runtime;
 
 const ROWS_PER_BATCH: usize = 32_768;
 const BATCHES: usize = 4;
-const PAYLOAD_COLUMNS: usize = 12;
 
-fn input_schema() -> SchemaRef {
+#[derive(Clone, Copy)]
+enum Distribution {
+    Interleaved,
+    Clustered,
+}
+
+impl Distribution {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Interleaved => "interleaved",
+            Self::Clustered => "clustered",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BenchCase {
+    distribution: Distribution,
+    payload_columns: usize,
+    clauses: usize,
+}
+
+fn input_schema(payload_columns: usize) -> SchemaRef {
     let mut fields = vec![
         Field::new("bucket", DataType::Int32, false),
         Field::new("target_present", DataType::Boolean, false),
         Field::new("source_present", DataType::Boolean, false),
     ];
-    for index in 0..PAYLOAD_COLUMNS {
+    for index in 0..payload_columns {
         fields.push(Field::new(format!("p{index}"), DataType::Int64, false));
     }
     Arc::new(Schema::new(fields))
 }
 
-fn output_schema() -> SchemaRef {
+fn output_schema(payload_columns: usize) -> SchemaRef {
     Arc::new(Schema::new(
-        (0..PAYLOAD_COLUMNS)
+        (0..payload_columns)
             .map(|index| Field::new(format!("p{index}"), DataType::Int64, false))
             .collect::<Vec<_>>(),
     ))
 }
 
-fn input_batch(schema: &SchemaRef, batch_index: usize) -> RecordBatch {
-    let mut columns: Vec<ArrayRef> = vec![
-        Arc::new(Int32Array::from_iter_values(
+fn input_batch(
+    schema: &SchemaRef,
+    batch_index: usize,
+    payload_columns: usize,
+    distribution: Distribution,
+) -> RecordBatch {
+    let bucket = match distribution {
+        Distribution::Interleaved => Int32Array::from_iter_values(
             (0..ROWS_PER_BATCH).map(|row| (row % 100) as i32),
-        )),
+        ),
+        Distribution::Clustered => Int32Array::from_iter_values(
+            (0..ROWS_PER_BATCH).map(|row| ((row * 100) / ROWS_PER_BATCH) as i32),
+        ),
+    };
+
+    let mut columns: Vec<ArrayRef> = vec![
+        Arc::new(bucket),
         Arc::new(BooleanArray::from(vec![true; ROWS_PER_BATCH])),
         Arc::new(BooleanArray::from(vec![true; ROWS_PER_BATCH])),
     ];
 
-    for column in 0..PAYLOAD_COLUMNS {
+    for column in 0..payload_columns {
         columns.push(Arc::new(Int64Array::from_iter_values(
             (0..ROWS_PER_BATCH).map(|row| {
-                ((batch_index * ROWS_PER_BATCH + row) * PAYLOAD_COLUMNS + column) as i64
+                ((batch_index * ROWS_PER_BATCH + row) * payload_columns + column) as i64
             }),
         )));
     }
@@ -79,43 +112,54 @@ fn input_batch(schema: &SchemaRef, batch_index: usize) -> RecordBatch {
     RecordBatch::try_new(Arc::clone(schema), columns).unwrap()
 }
 
-fn output_projection(schema: &SchemaRef) -> Vec<Arc<dyn datafusion::physical_expr::PhysicalExpr>> {
-    (0..PAYLOAD_COLUMNS)
+fn output_projection(
+    schema: &SchemaRef,
+    payload_columns: usize,
+) -> Vec<Arc<dyn datafusion::physical_expr::PhysicalExpr>> {
+    (0..payload_columns)
         .map(|index| col(&format!("p{index}"), schema).unwrap())
         .collect()
 }
 
-fn matched_instructions(schema: &SchemaRef, clauses: usize) -> Vec<MergeInstructionExec> {
-    let thresholds: &[i32] = match clauses {
-        4 => &[25, 50, 75],
-        8 => &[12, 25, 37, 50, 62, 75, 87],
-        _ => panic!("unsupported clause count"),
-    };
+fn matched_instructions(
+    schema: &SchemaRef,
+    clauses: usize,
+    payload_columns: usize,
+) -> Vec<MergeInstructionExec> {
+    assert!(clauses >= 2);
 
     let mut instructions = Vec::with_capacity(clauses);
-    for threshold in thresholds {
+    for index in 1..clauses {
+        let threshold = ((index * 100) / clauses) as i32;
         instructions.push(MergeInstructionExec {
             condition: binary(
                 col("bucket", schema).unwrap(),
                 DFOperator::Lt,
-                lit(*threshold),
+                lit(threshold),
                 schema,
             )
             .unwrap(),
-            outputs: vec![output_projection(schema)],
+            outputs: vec![output_projection(schema, payload_columns)],
         });
     }
     instructions.push(MergeInstructionExec {
         condition: lit(true),
-        outputs: vec![output_projection(schema)],
+        outputs: vec![output_projection(schema, payload_columns)],
     });
     instructions
 }
 
-fn merge_plan(clauses: usize) -> Arc<dyn ExecutionPlan> {
-    let schema = input_schema();
+fn merge_plan(case: BenchCase) -> Arc<dyn ExecutionPlan> {
+    let schema = input_schema(case.payload_columns);
     let batches = (0..BATCHES)
-        .map(|batch_index| input_batch(&schema, batch_index))
+        .map(|batch_index| {
+            input_batch(
+                &schema,
+                batch_index,
+                case.payload_columns,
+                case.distribution,
+            )
+        })
         .collect::<Vec<_>>();
     let source = MemorySourceConfig::try_new_exec(&[batches], Arc::clone(&schema), None).unwrap();
 
@@ -123,12 +167,12 @@ fn merge_plan(clauses: usize) -> Arc<dyn ExecutionPlan> {
         MergeRowsExec::try_new(
             col("source_present", &schema).unwrap(),
             col("target_present", &schema).unwrap(),
-            matched_instructions(&schema, clauses),
+            matched_instructions(&schema, case.clauses, case.payload_columns),
             vec![],
             vec![],
             None,
             source,
-            output_schema(),
+            output_schema(case.payload_columns),
         )
         .unwrap(),
     )
@@ -152,12 +196,37 @@ fn criterion_benchmark(c: &mut Criterion) {
             .with_session_config(SessionConfig::new().with_batch_size(ROWS_PER_BATCH)),
     );
 
-    let mut group = c.benchmark_group("mergerows_clause_dispatch");
+    let mut cases = Vec::new();
+    for payload_columns in [4usize, 12, 32] {
+        for clauses in [2usize, 4, 8, 16] {
+            cases.push(BenchCase {
+                distribution: Distribution::Interleaved,
+                payload_columns,
+                clauses,
+            });
+        }
+    }
     for clauses in [4usize, 8] {
-        let plan = merge_plan(clauses);
-        group.bench_with_input(BenchmarkId::from_parameter(clauses), &clauses, |b, _| {
-            b.iter(|| run(&runtime, &plan, &ctx))
+        cases.push(BenchCase {
+            distribution: Distribution::Clustered,
+            payload_columns: 12,
+            clauses,
         });
+    }
+
+    let mut group = c.benchmark_group("mergerows_clause_dispatch");
+    for case in cases {
+        let plan = merge_plan(case);
+        let label = format!(
+            "{}_w{}",
+            case.distribution.as_str(),
+            case.payload_columns
+        );
+        group.bench_with_input(
+            BenchmarkId::new(label, case.clauses),
+            &case,
+            |b, _| b.iter(|| run(&runtime, &plan, &ctx)),
+        );
     }
     group.finish();
 }
