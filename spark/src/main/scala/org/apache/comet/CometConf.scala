@@ -478,7 +478,8 @@ object CometConf extends ShimCometConf {
       .category(CATEGORY_EXEC)
       .doc(
         "Experimental opt-in: use a completed native hash join build's key domain to prune " +
-          "eligible native Parquet row groups and filter probe batches before the hash probe. " +
+          "eligible native Parquet or Iceberg row groups and filter probe batches before the " +
+          "hash probe. " +
           "Supports inner joins with one direct signed integer key and one native partition " +
           "per input, including both Spark build sides. The probe filter remains active " +
           "when reader pruning is unavailable. Unsupported joins retain their existing " +

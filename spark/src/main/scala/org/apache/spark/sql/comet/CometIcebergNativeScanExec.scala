@@ -213,6 +213,10 @@ case class CometIcebergNativeScanExec(
     val baseMetrics = Map(
       "output_rows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
       "bytes_scanned" -> SQLMetrics.createSizeMetric(sparkContext, "number of bytes scanned"),
+      "runtime_predicate_tasks" ->
+        SQLMetrics.createMetric(sparkContext, "runtime predicate file tasks"),
+      "runtime_row_groups_pruned" ->
+        SQLMetrics.createMetric(sparkContext, "row groups pruned by runtime predicates"),
       // Native read/decode time, aggregated across tasks. Fed by iceberg-rust's BaselineMetrics
       // (elapsed_compute, in nanoseconds) through the standard JNI metric path.
       "elapsed_compute" -> SQLMetrics.createNanoTimingMetric(sparkContext, "scan time"))

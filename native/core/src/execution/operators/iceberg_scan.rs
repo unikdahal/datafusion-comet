@@ -38,7 +38,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use futures::{Stream, StreamExt, TryStreamExt};
-use iceberg::arrow::ScanMetrics;
+use iceberg::arrow::{RuntimePredicateProvider, ScanMetrics};
 use iceberg::io::FileIO;
 use iceberg::Runtime as IcebergRuntime;
 use iceberg::{Error, ErrorKind};
@@ -83,6 +83,8 @@ pub struct IcebergScanExec {
     tasks: Vec<FileScanTask>,
     /// Number of data files to read concurrently
     data_file_concurrency_limit: usize,
+    /// Execution-time predicate source attached to this scan.
+    runtime_predicate_provider: Option<Arc<dyn RuntimePredicateProvider>>,
     /// Metrics
     metrics: ExecutionPlanMetricsSet,
 }
@@ -109,8 +111,49 @@ impl IcebergScanExec {
             catalog_name,
             tasks,
             data_file_concurrency_limit,
+            runtime_predicate_provider: None,
             metrics,
         })
+    }
+
+    pub(crate) fn runtime_predicate_field_name(&self, output_index: usize) -> Option<String> {
+        let mut field_id = None;
+        let mut field_name: Option<String> = None;
+
+        for task in &self.tasks {
+            let current_id = *task.project_field_ids().get(output_index)?;
+            if field_id.is_some_and(|expected| expected != current_id) {
+                return None;
+            }
+            let current_name = task.schema().field_by_id(current_id)?.name.clone();
+            if field_name
+                .as_ref()
+                .is_some_and(|expected| expected != &current_name)
+            {
+                return None;
+            }
+            field_id = Some(current_id);
+            field_name = Some(current_name);
+        }
+
+        field_name
+    }
+
+    pub(crate) fn with_runtime_predicate_provider(
+        &self,
+        runtime_predicate_provider: Arc<dyn RuntimePredicateProvider>,
+    ) -> Self {
+        Self {
+            metadata_location: self.metadata_location.clone(),
+            output_schema: Arc::clone(&self.output_schema),
+            plan_properties: Arc::clone(&self.plan_properties),
+            catalog_properties: self.catalog_properties.clone(),
+            catalog_name: self.catalog_name.clone(),
+            tasks: self.tasks.clone(),
+            data_file_concurrency_limit: self.data_file_concurrency_limit,
+            runtime_predicate_provider: Some(runtime_predicate_provider),
+            metrics: self.metrics.clone(),
+        }
     }
 
     fn compute_properties(schema: SchemaRef, num_partitions: usize) -> Arc<PlanProperties> {
@@ -214,12 +257,16 @@ impl IcebergScanExec {
                 DataFusionError::Execution(format!("Failed to build Iceberg runtime: {e}"))
             })?
         };
-        let reader = iceberg::arrow::ArrowReaderBuilder::new(file_io, iceberg_runtime)
+        let mut reader_builder = iceberg::arrow::ArrowReaderBuilder::new(file_io, iceberg_runtime)
             .with_batch_size(batch_size)
             .with_data_file_concurrency_limit(self.data_file_concurrency_limit)
             .with_row_selection_enabled(true)
-            .with_metadata_size_hint(512 * 1024) // Same as DataFusion's default
-            .build();
+            .with_metadata_size_hint(512 * 1024); // Same as DataFusion's default
+        if let Some(provider) = &self.runtime_predicate_provider {
+            reader_builder =
+                reader_builder.with_runtime_predicate_provider(Arc::clone(provider));
+        }
+        let reader = reader_builder.build();
 
         // Pass all tasks to iceberg-rust at once to utilize its flatten_unordered
         // parallelization, avoiding overhead of single-task streams
@@ -244,7 +291,11 @@ impl IcebergScanExec {
             baseline_metrics: metrics.baseline,
             scan_metrics,
             bytes_scanned: metrics.bytes_scanned,
+            runtime_predicate_tasks: metrics.runtime_predicate_tasks,
+            runtime_row_groups_pruned: metrics.runtime_row_groups_pruned,
             last_reported_bytes: 0,
+            last_reported_runtime_predicate_tasks: 0,
+            last_reported_runtime_row_groups_pruned: 0,
         };
 
         Ok(Box::pin(wrapped_stream))
@@ -389,6 +440,10 @@ struct IcebergScanMetrics {
     num_splits: Count,
     /// Total bytes read from storage
     bytes_scanned: Count,
+    /// Number of file tasks that received a runtime predicate
+    runtime_predicate_tasks: Count,
+    /// Number of row groups skipped by runtime predicate statistics
+    runtime_row_groups_pruned: Count,
 }
 
 impl IcebergScanMetrics {
@@ -397,6 +452,10 @@ impl IcebergScanMetrics {
             baseline: BaselineMetrics::new(metrics, 0),
             num_splits: MetricBuilder::new(metrics).counter("num_splits", 0),
             bytes_scanned: MetricBuilder::new(metrics).counter("bytes_scanned", 0),
+            runtime_predicate_tasks: MetricBuilder::new(metrics)
+                .counter("runtime_predicate_tasks", 0),
+            runtime_row_groups_pruned: MetricBuilder::new(metrics)
+                .counter("runtime_row_groups_pruned", 0),
         }
     }
 }
@@ -420,6 +479,10 @@ struct IcebergStreamWrapper<S> {
     bytes_scanned: Count,
     /// Last reported bytes_read value for delta computation
     last_reported_bytes: u64,
+    runtime_predicate_tasks: Count,
+    runtime_row_groups_pruned: Count,
+    last_reported_runtime_predicate_tasks: u64,
+    last_reported_runtime_row_groups_pruned: u64,
 }
 
 /// Cached projection state: file schema, adapter, and pre-built projection expressions.
@@ -492,6 +555,21 @@ where
             self.last_reported_bytes = current;
         }
 
+        let current_tasks = self.scan_metrics.runtime_predicate_tasks();
+        let task_delta = current_tasks.saturating_sub(self.last_reported_runtime_predicate_tasks);
+        if task_delta > 0 {
+            self.runtime_predicate_tasks.add(task_delta as usize);
+            self.last_reported_runtime_predicate_tasks = current_tasks;
+        }
+
+        let current_pruned = self.scan_metrics.runtime_row_groups_pruned();
+        let pruned_delta =
+            current_pruned.saturating_sub(self.last_reported_runtime_row_groups_pruned);
+        if pruned_delta > 0 {
+            self.runtime_row_groups_pruned.add(pruned_delta as usize);
+            self.last_reported_runtime_row_groups_pruned = current_pruned;
+        }
+
         self.baseline_metrics.record_poll(result)
     }
 }
@@ -526,6 +604,10 @@ impl fmt::Debug for IcebergScanExec {
                 &RedactedProperties(&self.catalog_properties),
             )
             .field("num_tasks", &self.tasks.len())
+            .field(
+                "runtime_predicate_attached",
+                &self.runtime_predicate_provider.is_some(),
+            )
             .field(
                 "data_file_concurrency_limit",
                 &self.data_file_concurrency_limit,

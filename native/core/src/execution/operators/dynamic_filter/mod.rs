@@ -17,6 +17,7 @@
 
 //! Runtime-filter wiring and shared filtering of decoded batches.
 
+mod iceberg_reader;
 mod join;
 mod parquet_reader;
 mod topk;

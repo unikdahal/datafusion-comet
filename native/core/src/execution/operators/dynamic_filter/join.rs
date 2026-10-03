@@ -45,6 +45,7 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
+use super::iceberg_reader::try_attach_iceberg_reader_filter;
 use super::parquet_reader::try_attach_parquet_reader_filter;
 use super::DynamicFilterExec;
 
@@ -89,11 +90,17 @@ impl DynamicFilterJoinExec {
             vec![Arc::clone(&self.template.on()[0].1)],
             lit(true),
         ));
-        let reader = try_attach_parquet_reader_filter(
+        let reader = match try_attach_parquet_reader_filter(
             self.template.right(),
             Arc::clone(&predicate),
             &self.config,
-        )?;
+        )? {
+            Some(reader) => Some(reader),
+            None => try_attach_iceberg_reader_filter(
+                self.template.right(),
+                Arc::clone(&predicate),
+            )?,
+        };
         let reader_filter_attached = reader.is_some();
         let consumer = Arc::new(DynamicFilterExec::new(
             reader.unwrap_or_else(|| Arc::clone(self.template.right())),

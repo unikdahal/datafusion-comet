@@ -1044,6 +1044,129 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("join runtime filter prunes native Iceberg row groups and bytes") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        "spark.sql.adaptive.enabled" -> "false",
+        "spark.sql.shuffle.partitions" -> "1",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+
+        spark.sql("""
+          CREATE TABLE test_cat.db.runtime_join_pruning_test (
+            id INT,
+            payload STRING
+          ) USING iceberg
+          TBLPROPERTIES (
+            'write.parquet.row-group-size-bytes' = '131072',
+            'write.parquet.compression-codec' = 'uncompressed'
+          )
+        """)
+
+        val numRows = 120000L
+        spark
+          .range(numRows)
+          .repartition(1)
+          .sortWithinPartitions("id")
+          .selectExpr("CAST(id AS INT) AS id", "sha2(cast(id AS STRING), 256) AS payload")
+          .write
+          .format("iceberg")
+          .mode("append")
+          .saveAsTable("test_cat.db.runtime_join_pruning_test")
+
+        val dataFiles = spark
+          .sql("SELECT file_path FROM test_cat.db.runtime_join_pruning_test.files")
+          .collect()
+        assert(
+          dataFiles.length == 1,
+          s"expected one data file, got ${dataFiles.mkString(", ")}")
+
+        val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
+          org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
+            new org.apache.hadoop.fs.Path(dataFiles.head.getString(0)),
+            spark.sessionState.newHadoopConf()))
+        try {
+          val rowGroupCount = reader.getRowGroups.size
+          assert(
+            rowGroupCount >= 8,
+            s"expected at least eight row groups for pruning coverage, got $rowGroupCount")
+        } finally {
+          reader.close()
+        }
+
+        val dimDir = new File(warehouseDir, "runtime_join_dim")
+        spark
+          .range(50000L, 50064L)
+          .coalesce(1)
+          .selectExpr("CAST(id AS INT) AS id")
+          .write
+          .mode("overwrite")
+          .parquet(dimDir.getAbsolutePath)
+        spark.read.parquet(dimDir.getAbsolutePath).createOrReplaceTempView("runtime_join_dim")
+
+        case class RunResult(
+            value: Long,
+            bytes: Long,
+            predicateTasks: Long,
+            rowGroupsPruned: Long)
+
+        def run(dynamicFilterEnabled: Boolean): RunResult = {
+          withSQLConf(
+            CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key ->
+              dynamicFilterEnabled.toString) {
+            val df = spark.sql("""
+              SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
+              FROM test_cat.db.runtime_join_pruning_test f
+              JOIN runtime_join_dim d
+                ON f.id = d.id
+            """)
+            val rows = df.collect()
+            assert(rows.length == 1)
+            val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
+            assert(
+              scans.length == 1,
+              s"expected one native Iceberg scan, got ${scans.length}")
+            val scan = scans.head
+            RunResult(
+              rows.head.getLong(0),
+              scan.metrics("bytes_scanned").value,
+              scan.metrics("runtime_predicate_tasks").value,
+              scan.metrics("runtime_row_groups_pruned").value)
+          }
+        }
+
+        try {
+          val disabled = run(dynamicFilterEnabled = false)
+          val enabled = run(dynamicFilterEnabled = true)
+
+          assert(disabled.value == 64L * 64L)
+          assert(enabled.value == disabled.value)
+          assert(disabled.predicateTasks == 0)
+          assert(disabled.rowGroupsPruned == 0)
+          assert(
+            enabled.predicateTasks > 0,
+            s"expected the Iceberg reader to receive a runtime predicate: $enabled")
+          assert(
+            enabled.rowGroupsPruned > 0,
+            s"expected runtime row-group pruning: $enabled")
+          assert(
+            enabled.bytes * 4 < disabled.bytes,
+            "runtime pruning should request under 25% of the unfiltered bytes: " +
+              s"enabled=${enabled.bytes}, disabled=${disabled.bytes}")
+        } finally {
+          spark.catalog.dropTempView("runtime_join_dim")
+          spark.sql("DROP TABLE test_cat.db.runtime_join_pruning_test")
+        }
+      }
+    }
+  }
+
   test("MOR table with EQUALITY deletes - verify deletes are applied") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 
