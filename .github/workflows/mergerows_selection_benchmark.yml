@@ -276,3 +276,275 @@ jobs:
             /tmp/benchmark-aggregate.json
             /tmp/benchmark-summary.md
           if-no-files-found: error
+
+
+  spark-comparison:
+    name: Spark vs Comet same-runner controls
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: amd64/rust
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust and Java
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: 17
+
+      - name: Record benchmark environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "== uname =="
+            uname -a
+            echo
+            echo "== CPU =="
+            lscpu
+            echo
+            echo "== memory =="
+            free -h
+            echo
+            echo "== processors =="
+            nproc
+            echo
+            echo "== Java =="
+            java -version
+            echo
+            echo "== Rust =="
+            rustc --version
+            cargo --version
+          } 2>&1 | tee /tmp/mergerows-spark-environment.txt
+
+      - name: Run parent and optimized Spark comparisons
+        shell: bash
+        env:
+          COMET_MERGEROWS_ROWS: "131072"
+          COMET_MERGEROWS_ROUNDS: "7"
+          COMET_MERGEROWS_WARMUPS: "2"
+          BENCH_HEAP: "7g"
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --no-tags origin mergerows-operator-generic
+
+          HEAD_SHA="$GITHUB_SHA"
+          BASE_SHA="$(git rev-parse origin/mergerows-operator-generic)"
+          cp spark/src/test/scala/org/apache/spark/sql/benchmark/CometMergeRowsBenchmark.scala             /tmp/CometMergeRowsBenchmark.scala
+
+          run_variant() {
+            variant="$1"
+            sha="$2"
+            echo "============================================================"
+            echo "Spark benchmark variant: $variant ($sha)"
+            echo "============================================================"
+
+            git reset --hard
+            git clean -fd
+            git checkout --detach "$sha"
+            mkdir -p spark/src/test/scala/org/apache/spark/sql/benchmark
+            cp /tmp/CometMergeRowsBenchmark.scala               spark/src/test/scala/org/apache/spark/sql/benchmark/CometMergeRowsBenchmark.scala
+
+            COMET_MERGEROWS_BENCH_JSON="/tmp/spark-$variant.json"               make PROFILES="-Pspark-3.5" BENCH_HEAP="$BENCH_HEAP"                 benchmark-org.apache.spark.sql.benchmark.CometMergeRowsBenchmark               2>&1 | tee "/tmp/spark-$variant.log"
+          }
+
+          run_variant parent "$BASE_SHA"
+          run_variant optimized "$HEAD_SHA"
+
+      - name: Summarize Spark and Comet comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          import statistics
+          from pathlib import Path
+
+          parent = json.loads(Path("/tmp/spark-parent.json").read_text())
+          optimized = json.loads(Path("/tmp/spark-optimized.json").read_text())
+
+          def workloads(doc):
+              return {w["name"]: w for w in doc["workloads"]}
+
+          pwork = workloads(parent)
+          owork = workloads(optimized)
+          keys = sorted(set(pwork) & set(owork))
+          if set(pwork) != set(owork):
+              raise SystemExit("parent/head Spark benchmark workload sets differ")
+
+          def median(values):
+              return statistics.median(values)
+
+          def mean(values):
+              return statistics.mean(values)
+
+          def cv(values):
+              m = mean(values)
+              if len(values) < 2 or m == 0:
+                  return 0.0
+              return statistics.stdev(values) / m * 100.0
+
+          def drift(a, b):
+              return abs(b / a - 1.0) * 100.0
+
+          def ratio_range(a, b):
+              ratios = [x / y for x, y in zip(a, b)]
+              return min(ratios), max(ratios), ratios
+
+          aggregate = {}
+          suspicious = []
+          lines = [
+              "## Spark vs Comet MergeRows benchmark",
+              "",
+              "The parent and optimized revisions were built and measured sequentially on the same "
+              "GitHub-hosted VM. Inside each revision, Spark-only, Comet with JVM MergeRows, and "
+              "Comet with native MergeRows share one SparkSession; seven measured rounds rotate "
+              "arm order after two equal warm-ups. Each arm is plan-verified and result-verified "
+              "before timing.",
+              "",
+              "| Workload | Spark only | Comet + JVM MR | Parent native | Optimized native | Spark → optimized | JVM MR → native | Parent → optimized | Spark/JVM control drift | Stability |",
+              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+          ]
+
+          for key in keys:
+              pw = pwork[key]["measurements_ms"]
+              ow = owork[key]["measurements_ms"]
+
+              p_spark = median(pw["spark"])
+              p_jvm = median(pw["comet_jvm"])
+              p_native = median(pw["comet_native"])
+              o_spark = median(ow["spark"])
+              o_jvm = median(ow["comet_jvm"])
+              o_native = median(ow["comet_native"])
+
+              spark_native = o_spark / o_native
+              jvm_native = o_jvm / o_native
+              parent_optimized = p_native / o_native
+              spark_drift = drift(p_spark, o_spark)
+              jvm_drift = drift(p_jvm, o_jvm)
+
+              spark_pair_min, spark_pair_max, spark_pairs = ratio_range(
+                  ow["spark"], ow["comet_native"])
+              jvm_pair_min, jvm_pair_max, jvm_pairs = ratio_range(
+                  ow["comet_jvm"], ow["comet_native"])
+
+              cvs = {
+                  "parent_spark": cv(pw["spark"]),
+                  "parent_jvm": cv(pw["comet_jvm"]),
+                  "parent_native": cv(pw["comet_native"]),
+                  "optimized_spark": cv(ow["spark"]),
+                  "optimized_jvm": cv(ow["comet_jvm"]),
+                  "optimized_native": cv(ow["comet_native"]),
+              }
+
+              reasons = []
+              if max(cvs.values()) > 10.0:
+                  reasons.append("CV > 10%")
+              if spark_drift > 8.0:
+                  reasons.append("Spark control drift > 8%")
+              if jvm_drift > 8.0:
+                  reasons.append("JVM control drift > 8%")
+              if spark_pair_max / spark_pair_min > 1.25:
+                  reasons.append("Spark/native paired spread > 25%")
+              if jvm_pair_max / jvm_pair_min > 1.25:
+                  reasons.append("JVM/native paired spread > 25%")
+
+              status = "stable" if not reasons else "caution: " + ", ".join(reasons)
+              if reasons:
+                  suspicious.append({"workload": key, "reasons": reasons})
+
+              aggregate[key] = {
+                  "parent_median_ms": {
+                      "spark": p_spark,
+                      "comet_jvm": p_jvm,
+                      "comet_native": p_native,
+                  },
+                  "optimized_median_ms": {
+                      "spark": o_spark,
+                      "comet_jvm": o_jvm,
+                      "comet_native": o_native,
+                  },
+                  "speedups": {
+                      "spark_to_optimized_native": spark_native,
+                      "optimized_jvm_to_native": jvm_native,
+                      "parent_native_to_optimized_native": parent_optimized,
+                  },
+                  "control_drift_percent": {
+                      "spark": spark_drift,
+                      "comet_jvm": jvm_drift,
+                  },
+                  "cv_percent": cvs,
+                  "optimized_paired_speedups": {
+                      "spark_to_native": spark_pairs,
+                      "jvm_to_native": jvm_pairs,
+                  },
+                  "stability": status,
+              }
+
+              lines.append(
+                  f"| `{key}` | {o_spark:.2f} ms | {o_jvm:.2f} ms | "
+                  f"{p_native:.2f} ms | {o_native:.2f} ms | {spark_native:.3f}x | "
+                  f"{jvm_native:.3f}x | {parent_optimized:.3f}x | "
+                  f"{spark_drift:.1f}% / {jvm_drift:.1f}% | {status} |"
+              )
+
+          lines += [
+              "",
+              "### Trust checks",
+              "",
+              "- Spark-only and Comet+JVM MergeRows are control arms present in both the parent and "
+              "optimized revisions. Their drift detects VM/JIT/environment movement unrelated to "
+              "the native MergeRows change.",
+              "- Within each revision, arm order rotates every round instead of always timing one "
+              "engine first.",
+              "- All six workloads use the same deterministic 131,072-row target/source corpus.",
+              "- Workloads cover 2/4/8/16 matched clauses at 12 payload columns and 8 clauses at "
+              "4/12/32 payload columns.",
+              "- Every arm must execute the expected plan and produce the expected row count and "
+              "checksum before any measurements are accepted.",
+              "- Raw per-round timings and complete build logs are uploaded with the summary.",
+          ]
+
+          if suspicious:
+              lines += ["", "### Results requiring caution", ""]
+              lines.extend(
+                  f"- `{item['workload']}`: {', '.join(item['reasons'])}"
+                  for item in suspicious
+              )
+          else:
+              lines += ["", "No workload crossed the configured noise/control thresholds."]
+
+          summary = "\n".join(lines) + "\n"
+          print(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write("\n" + summary)
+          Path("/tmp/spark-comparison-summary.md").write_text(summary)
+          Path("/tmp/spark-comparison-aggregate.json").write_text(
+              json.dumps(
+                  {"benchmarks": aggregate, "suspicious": suspicious},
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+          PY
+
+      - name: Upload Spark comparison results
+        uses: actions/upload-artifact@v6
+        with:
+          name: mergerows-spark-comparison
+          path: |
+            /tmp/spark-parent.json
+            /tmp/spark-optimized.json
+            /tmp/spark-parent.log
+            /tmp/spark-optimized.log
+            /tmp/spark-comparison-summary.md
+            /tmp/spark-comparison-aggregate.json
+            /tmp/mergerows-spark-environment.txt
+          if-no-files-found: error
