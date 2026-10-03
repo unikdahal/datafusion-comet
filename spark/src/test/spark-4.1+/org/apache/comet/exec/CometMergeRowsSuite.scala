@@ -120,9 +120,8 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       }
       .toSeq
       .headOption
-      .getOrElse(
-        fail(
-          s"MERGE plan not captured. Plans:\n${captured.map(_.executedPlan).mkString("\n--\n")}"))
+      .getOrElse(fail(
+        s"MERGE plan not captured. Plans:\n${captured.map(_.executedPlan).mkString("\n--\n")}"))
   }
 
   private def metricValues(node: SparkPlan): Map[String, Long] = {
