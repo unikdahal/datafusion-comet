@@ -248,7 +248,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
       rows: Int,
       resetTarget: () => Unit): Unit = {
     resetTarget()
-    val captured = mutable.ArrayBuffer.empty[QueryExecution]()
+    val captured = mutable.ArrayBuffer.empty[QueryExecution]
     val listener = new QueryExecutionListener {
       override def onSuccess(funcName: String, qe: QueryExecution, durationNs: Long): Unit =
         captured += qe
