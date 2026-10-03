@@ -39,14 +39,12 @@ during execution; the planning metrics are Iceberg's own scan-report counters, c
 Iceberg's Java planner on the driver and surfaced here so they show in the UI as they do for a
 plain Spark + Iceberg `BatchScan`.
 
-| Metric                                    | Description                                                                                                                                                                                                                                                                                                                                                |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `number of output rows`                   | Rows produced by the scan.                                                                                                                                                                                                                                                                                                                                 |
-| `number of bytes scanned`                 | Bytes read from storage, including data and delete files.                                                                                                                                                                                                                                                                                                  |
-| `number of file splits processed`         | File scan tasks (splits) read by this scan.                                                                                                                                                                                                                                                                                                                |
-| `runtime predicate file tasks`            | Data-file tasks whose native reader received a usable execution-time predicate.                                                                                                                                                                                                                                                                            |
-| `row groups pruned by runtime predicates` | Additional Parquet row groups rejected by execution-time predicate statistics after the task's planned predicate and split bounds.                                                                                                                                                                                                                         |
-| `scan time`                               | Time spent in the native scan's record-batch polling, covering the iceberg-rust reader plus Comet's schema adaptation. It excludes time the stream spends waiting between polls, so it is decode/compute time, not end-to-end scan latency. This differs from the `scan time` under `CometBatchScan`, which times batch reads from a DataSource V2 reader. |
+| Metric                            | Description                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `number of output rows`           | Rows produced by the scan.                                                                                                                                                                                                                                                                                                                                 |
+| `number of bytes scanned`         | Bytes read from storage, including data and delete files.                                                                                                                                                                                                                                                                                                  |
+| `number of file splits processed` | File scan tasks (splits) read by this scan.                                                                                                                                                                                                                                                                                                                |
+| `scan time`                       | Time spent in the native scan's record-batch polling, covering the iceberg-rust reader plus Comet's schema adaptation. It excludes time the stream spends waiting between polls, so it is decode/compute time, not end-to-end scan latency. This differs from the `scan time` under `CometBatchScan`, which times batch reads from a DataSource V2 reader. |
 
 The planning metrics below mirror Iceberg's `ScanReport`. They are driver-side values known after
 scan planning and do not change during execution.
@@ -105,10 +103,9 @@ eligibility and reader restrictions.
 | `dynamic_filter_join_filters_skipped`  | Executions whose probe input is ineligible for reader attachment. |
 
 The row counters measure residual filtering of decoded probe batches. They exclude rows skipped
-by the reader. An attached filter does not guarantee that any row groups are pruned. For native
-Parquet, compare `bytes_scanned` and `row_groups_pruned_statistics` with filtering disabled. For
-native Iceberg, compare `number of bytes scanned` and `row groups pruned by runtime predicates`.
-Existing join, scan, and intervening filter metrics retain their own meanings.
+by the reader. An attached filter does not guarantee that any row groups are pruned: compare the
+probe scan's `bytes_scanned` and `row_groups_pruned_statistics` with filtering disabled to assess
+reader savings. Existing join, scan, and intervening filter metrics retain their own meanings.
 
 ### Local TopK
 
