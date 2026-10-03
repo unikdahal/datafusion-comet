@@ -1830,7 +1830,8 @@ case class CometMergeRowsExec(
 
   override lazy val metrics: Map[String, SQLMetric] =
     CometMetricNode.baselineMetrics(sparkContext) ++
-      Map("output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches")) ++
+      Map(
+        "output_batches" -> SQLMetrics.createMetric(sparkContext, "number of output batches")) ++
       MergeRowsMetricsShim.metrics(sparkContext)
 }
 
