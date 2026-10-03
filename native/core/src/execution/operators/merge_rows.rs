@@ -834,16 +834,16 @@ mod tests {
         MergeInstructionExec {
             condition: lit(true),
             outputs: vec![vec![col("val", &test_schema()).unwrap()]],
-        }
             context: None,
+        }
     }
 
     fn discard_all() -> MergeInstructionExec {
         MergeInstructionExec {
             condition: lit(true),
             outputs: vec![],
-        }
             context: None,
+        }
     }
 
     fn test_config(
@@ -859,8 +859,8 @@ mod tests {
             not_matched_instructions,
             not_matched_by_source_instructions,
             row_id_ordinal,
-        }
             semantic_metrics_required: false,
+        }
     }
 
     #[test]
@@ -903,12 +903,12 @@ mod tests {
             )
             .unwrap(),
             outputs: vec![vec![lit(1i32)]],
-                    context: None,
+            context: None,
         };
         let cond_true = MergeInstructionExec {
             condition: lit(true),
             outputs: vec![vec![lit(2i32)]],
-                    context: None,
+            context: None,
         };
         let config = test_config(vec![cond_false, cond_true], vec![], vec![], None);
         let out = process_batch(
@@ -935,7 +935,7 @@ mod tests {
             )
             .unwrap(),
             outputs: vec![vec![lit(111i32)]],
-                    context: None,
+            context: None,
         };
         let divides_by_val = MergeInstructionExec {
             condition: binary(
@@ -952,7 +952,7 @@ mod tests {
             )
             .unwrap(),
             outputs: vec![vec![lit(222i32)]],
-                    context: None,
+            context: None,
         };
         let config = test_config(vec![claims_zero, divides_by_val], vec![], vec![], None);
         let out = process_batch(
@@ -990,12 +990,12 @@ mod tests {
             )
             .unwrap(),
             outputs: vec![vec![lit(1i32)]],
-                    context: None,
+            context: None,
         };
         let keep_catch_all = MergeInstructionExec {
             condition: lit(true),
             outputs: vec![vec![lit(2i32)]],
-                    context: None,
+            context: None,
         };
         let config = test_config(vec![cond_null, keep_catch_all], vec![], vec![], None);
         let out = process_batch(
@@ -1042,10 +1042,10 @@ mod tests {
             not_matched_by_source_instructions: vec![MergeInstructionExec {
                 condition: lit(true),
                 outputs: vec![vec![col("val", &schema).unwrap()]],
-                            context: None,
+                    context: None,
             }],
             row_id_ordinal: None,
-                    semantic_metrics_required: false,
+            semantic_metrics_required: false,
         };
         let out = process_batch(
             batch,
@@ -1078,7 +1078,7 @@ mod tests {
             )
             .unwrap(),
             outputs: vec![vec![col("val", &test_schema()).unwrap()]],
-                    context: None,
+            context: None,
         };
         assert!(
             eval_bool(&div_cond.condition, &batch).is_err(),
@@ -1314,7 +1314,7 @@ mod tests {
         let split = MergeInstructionExec {
             condition: lit(true),
             outputs: vec![vec![lit(1i32)], vec![lit(2i32)]],
-                    context: None,
+            context: None,
         };
         let config = test_config(vec![split], vec![], vec![], None);
         let out = process_batch(
@@ -1466,7 +1466,7 @@ mod tests {
         let invalid = MergeInstructionExec {
             condition: lit(true),
             outputs: vec![vec![lit(1i32)], vec![lit(2i32)], vec![lit(3i32)]],
-                    context: None,
+            context: None,
         };
         let err = MergeRowsExec::try_new(
             col("source_present", &test_schema()).unwrap(),
@@ -1489,7 +1489,7 @@ mod tests {
         let invalid = MergeInstructionExec {
             condition: lit(true),
             outputs: vec![vec![lit(1i32), lit(2i32)]],
-                    context: None,
+            context: None,
         };
         let err = MergeRowsExec::try_new(
             col("source_present", &test_schema()).unwrap(),
