@@ -28,7 +28,7 @@ import org.apache.spark.sql.execution.{SparkPlan, SQLExecution, UnaryExecNode}
 import org.apache.spark.sql.execution.datasources.v2.V2CommandExec
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 
-import org.apache.comet.iceberg.{IcebergDriverMetricsShim, IcebergReflection}
+import org.apache.comet.iceberg.{DeltaCommand, IcebergDriverMetricsShim, IcebergReflection}
 
 /**
  * Driver-side committer for Comet's split-operator Iceberg V2 write.
@@ -38,7 +38,9 @@ case class IcebergCommitExec(
     @transient batchWrite: BatchWrite,
     @transient write: Write,
     @transient refreshCache: IcebergCommitExec.RefreshCache,
-    child: SparkPlan)
+    child: SparkPlan,
+    command: Option[DeltaCommand] = None,
+    tableName: Option[String] = None)
     extends V2CommandExec
     with UnaryExecNode
     with Logging {
@@ -110,7 +112,7 @@ case class IcebergCommitExec(
 
     try {
       messages.foreach(batchWrite.onDataWriterCommit)
-      IcebergWriteSummaryShim.commit(batchWrite, messages, child)
+      IcebergWriteSummaryShim.commit(batchWrite, messages, child, command)
       logInfo(s"Iceberg commit succeeded with ${messages.length} task message(s)")
     } catch {
       case cause: Throwable =>
@@ -143,7 +145,7 @@ case class IcebergCommitExec(
     if (locations.nonEmpty) {
       val io = IcebergReflection
         .getOuterSparkWrite(batchWrite)
-        .flatMap(IcebergReflection.getTableFromSparkWrite)
+        .flatMap(IcebergReflection.getTableFromIcebergWrite)
         .flatMap(IcebergReflection.getTableIO)
       io match {
         case Some(fileIO) =>
@@ -176,7 +178,8 @@ case class IcebergCommitExec(
   override protected def withNewChildInternal(newChild: SparkPlan): IcebergCommitExec =
     copy(child = newChild)
 
-  override def nodeName: String = "IcebergCommit"
+  override def nodeName: String =
+    tableName.filter(_.nonEmpty).map(name => s"IcebergCommit $name").getOrElse("IcebergCommit")
 }
 
 object IcebergCommitExec {

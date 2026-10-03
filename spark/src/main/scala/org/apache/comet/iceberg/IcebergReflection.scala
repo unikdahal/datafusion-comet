@@ -26,6 +26,8 @@ import scala.util.control.NonFatal
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.connector.write.Write
 
 import org.apache.comet.util.ClassLoaders
 
@@ -204,6 +206,20 @@ object IcebergReflection extends Logging {
     batchWrite.getClass.getName.startsWith(ClassNames.SPARK_WRITE + "$")
   }
 
+  private val positionDeltaWriteClassName =
+    "org.apache.iceberg.spark.source.SparkPositionDeltaWrite"
+  private val positionDeltaBatchWriteClassPrefix =
+    "org.apache.iceberg.spark.source.SparkPositionDeltaWrite$PositionDeltaBatchWrite"
+
+  /** True only for Iceberg's JVM DeltaWrite implementation. */
+  def isIcebergPositionDeltaWrite(write: Any): Boolean =
+    write != null && tryLoadClass(positionDeltaWriteClassName).exists(_.isInstance(write))
+
+  /** True only for the BatchWrite enclosed by Iceberg's SparkPositionDeltaWrite. */
+  def isIcebergPositionDeltaBatchWrite(batchWrite: Any): Boolean =
+    batchWrite != null && batchWrite.getClass.getName.startsWith(
+      positionDeltaBatchWriteClassPrefix)
+
   def getOuterSparkWrite(batchWrite: Any): Option[Any] = {
     if (batchWrite == null) None
     else {
@@ -248,6 +264,63 @@ object IcebergReflection extends Logging {
         "write"
       ) // Option[Write]; field can be Some(null) so kept AnyRef
     } yield (table, query, originalTable, write)
+  }
+
+  /**
+   * Extract the version-specific logical WriteDelta contract. Spark 3.5 and early Spark 4.x
+   * expose the same logical members with small binary/API differences, while Spark 4.2 uses a
+   * typed shim.
+   */
+  def extractDeltaLogicalFields(plan: LogicalPlan): Option[DeltaLogicalFields] = {
+    def invokeNoArg(target: AnyRef, name: String): Option[AnyRef] =
+      try {
+        findMethodInHierarchy(target.getClass, name)
+          .flatMap(method => Option(method.invoke(target).asInstanceOf[AnyRef]))
+      } catch {
+        case NonFatal(_) => None
+      }
+
+    def member(name: String): Option[AnyRef] =
+      invokeNoArg(plan, name).orElse(reflectField(plan, name))
+
+    def optionalWrite(value: Option[AnyRef]): Option[Write] =
+      value.flatMap {
+        case option: Option[_] => option.collect { case write: Write => write }
+        case write: Write => Some(write)
+        case _ => None
+      }
+
+    for {
+      query <- member("query").collect { case value: LogicalPlan =>
+        value
+      }
+      table <- member("originalTable").orElse(member("table")).collect {
+        case value: org.apache.spark.sql.catalyst.analysis.NamedRelation => value
+      }
+      projections <- member("projections").collect {
+        case value: org.apache.spark.sql.catalyst.util.WriteDeltaProjections => value
+      }
+    } yield {
+      def enumCommand(value: AnyRef): Option[DeltaCommand] =
+        value.toString.toUpperCase(java.util.Locale.ROOT) match {
+          case "DELETE" => Some(DeltaDelete)
+          case "UPDATE" => Some(DeltaUpdate)
+          case "MERGE" => Some(DeltaMerge)
+          case _ => None
+        }
+
+      val command = member("operation").flatMap(operation => invokeNoArg(operation, "command"))
+        .flatMap(enumCommand)
+      val tableForName = member("table").orElse(member("originalTable"))
+      val tableName = tableForName.flatMap(relation => invokeNoArg(relation, "name")).map(_.toString)
+      DeltaLogicalFields(
+        query,
+        table,
+        projections,
+        optionalWrite(member("write")),
+        command,
+        tableName)
+    }
   }
 
   /**
@@ -1358,6 +1431,14 @@ object IcebergReflection extends Logging {
   def getTableFromSparkWrite(sparkWrite: Any): Option[Any] =
     getSparkWriteField(sparkWrite, "table")
 
+  /** Table owned by either Iceberg's regular SparkWrite or its position-delta write. */
+  def getTableFromIcebergWrite(write: Any): Option[Any] =
+    if (isIcebergPositionDeltaWrite(write)) {
+      reflectField(write, "table")
+    } else {
+      getTableFromSparkWrite(write)
+    }
+
   def getWritePropertiesFromSparkWrite(sparkWrite: Any): Option[Map[String, String]] = {
     import scala.jdk.CollectionConverters._
     getSparkWriteField(sparkWrite, "writeProperties")
@@ -1935,19 +2016,36 @@ object IcebergReflection extends Logging {
   }
 
   /**
-   * The locations of the data files carried by a `SparkWrite$TaskCommit` message (its
-   * package-private `files()`), or empty when `message` is not one. Used to clean up after a
-   * write job that failed before any commit was attempted.
+   * The newly written file locations carried by an Iceberg task commit message. Plain
+   * `SparkWrite$TaskCommit` exposes `files()`; position-delta commits expose separate
+   * `dataFiles()` and `deleteFiles()` arrays. Do not include `rewrittenDeleteFiles()`: those
+   * files pre-date this job and are only candidates for removal after a successful delta commit.
+   *
+   * Used to clean completed tasks after a write job fails before any commit is attempted. Both
+   * Iceberg write implementations keep their own cleanup disabled in that failure mode.
    */
-  def taskCommitFileLocations(message: AnyRef): Seq[String] =
+  def taskCommitFileLocations(message: AnyRef): Seq[String] = {
+    def locations(methodName: String): Seq[String] =
+      findMethodInHierarchy(message.getClass, methodName).toSeq
+        .flatMap { method =>
+          method.invoke(message) match {
+            case array: Array[_] =>
+              array.toSeq.flatMap(file => extractFileLocation(file.getClass, file))
+            case _ => Seq.empty
+          }
+        }
+
     findMethodInHierarchy(message.getClass, "files") match {
       case Some(files) =>
         files.invoke(message) match {
-          case array: Array[_] => array.toSeq.flatMap(f => extractFileLocation(f))
+          case array: Array[_] =>
+            array.toSeq.flatMap(file => extractFileLocation(file.getClass, file))
           case _ => Seq.empty
         }
-      case None => Seq.empty
+      case None =>
+        locations("dataFiles") ++ locations("deleteFiles")
     }
+  }
 
   /** The table's `FileIO` (`table.io()`). Iceberg requires `FileIO` to be `Serializable`. */
   def getTableIO(table: Any): Option[AnyRef] =
