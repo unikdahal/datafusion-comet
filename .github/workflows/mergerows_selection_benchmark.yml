@@ -103,6 +103,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The parent benchmark injects the head-only benchmark target into the base checkout.
+          # Restore a clean worktree before switching back to the optimized commit.
+          git reset --hard
+          git clean -fd
           git checkout --detach "${HEAD_SHA}"
           cd native
           cargo bench -p datafusion-comet --bench merge_rows --no-default-features --             --warm-up-time 1 --measurement-time 3 --sample-size 20
