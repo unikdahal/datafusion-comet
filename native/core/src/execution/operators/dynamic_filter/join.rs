@@ -19,7 +19,7 @@
 //!
 //! Comet does not run DataFusion's physical optimizer, which normally connects
 //! dynamic-filter producers and consumers. This targeted wiring filters probe
-//! batches and lets a direct Parquet reader use the same live predicate for
+//! batches and lets direct Parquet and Iceberg readers use safe constraints for
 //! pruning. The original join verifies matches, including hash collisions.
 //! This leaves Spark's operator tree and partitioning intact and does
 //! not cross Spark exchanges or JVM/Arrow boundaries.
@@ -61,7 +61,7 @@ pub(crate) struct DynamicFilterJoinExec {
 }
 
 /// Per-execution join state. The permanent plan keeps no live filter; this value
-/// records whether this execution also connected its filter to the Parquet reader.
+/// records whether this execution also connected its filter to a native reader.
 struct RuntimeDynamicFilterJoin {
     join: HashJoinExec,
     reader_filter_attached: bool,

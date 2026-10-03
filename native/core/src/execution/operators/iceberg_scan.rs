@@ -716,6 +716,106 @@ mod tests {
 
     use super::IcebergScanExec;
 
+    #[test]
+    fn runtime_field_mapping_respects_projection_identity_and_type() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use iceberg::spec::{NestedField, PrimitiveType, Type};
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(2, "value", Type::Primitive(PrimitiveType::Long)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let task = |ids| {
+            FileScanTask::builder()
+                .with_file_size_in_bytes(1024)
+                .with_start(0)
+                .with_length(0)
+                .with_data_file_path("/tmp/schema-only.parquet".into())
+                .with_data_file_format(DataFileFormat::Parquet)
+                .with_schema(Arc::clone(&schema))
+                .with_project_field_ids(ids)
+                .with_case_sensitive(false)
+                .build()
+                .unwrap()
+        };
+        let scan = |data_type, tasks| {
+            IcebergScanExec::new(
+                "/tmp/metadata.json".into(),
+                Arc::new(ArrowSchema::new(vec![Field::new("value", data_type, true)])),
+                Default::default(),
+                String::new(),
+                tasks,
+                1,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            scan(DataType::Int64, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            Some("value".into())
+        );
+        assert_eq!(
+            scan(DataType::Int32, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            None
+        );
+        assert_eq!(
+            scan(DataType::UInt64, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            None
+        );
+        assert_eq!(
+            scan(DataType::Int64, vec![task(vec![2]), task(vec![1])])
+                .runtime_predicate_field_name(0),
+            None
+        );
+        assert_eq!(
+            scan(DataType::Int64, vec![task(vec![2])]).runtime_predicate_field_name(1),
+            None
+        );
+        assert_eq!(
+            scan(DataType::Int64, vec![]).runtime_predicate_field_name(0),
+            None
+        );
+
+        let nested_schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(
+                        3,
+                        "nested",
+                        Type::Struct(iceberg::spec::StructType::new(vec![NestedField::optional(
+                            1,
+                            "value",
+                            Type::Primitive(PrimitiveType::Long),
+                        )
+                        .into()])),
+                    )
+                    .into(),
+                    NestedField::optional(2, "value", Type::Primitive(PrimitiveType::Long)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let nested_task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("/tmp/nested.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(nested_schema)
+            .with_project_field_ids(vec![1])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+        assert_eq!(
+            scan(DataType::Int64, vec![nested_task]).runtime_predicate_field_name(0),
+            None
+        );
+    }
+
     fn fs_file_io() -> FileIO {
         FileIOBuilder::new(Arc::new(OpenDalStorageFactory::Fs)).build()
     }

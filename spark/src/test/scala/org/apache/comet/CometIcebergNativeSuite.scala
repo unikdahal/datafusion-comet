@@ -1125,6 +1125,7 @@ class CometIcebergNativeSuite
             """
 
         def run(dynamicFilterEnabled: Boolean): RunResult = {
+          var result: Option[RunResult] = None
           withSQLConf(
             CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key ->
               dynamicFilterEnabled.toString) {
@@ -1136,13 +1137,15 @@ class CometIcebergNativeSuite
             val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
             assert(scans.length == 1, s"expected one native Iceberg scan, got ${scans.length}")
             val scan = scans.head
-            RunResult(
-              rows.head.getLong(0),
-              scan.metrics("bytes_scanned").value,
-              scan.metrics("iceberg_runtime_predicate_tasks").value,
-              scan.metrics("iceberg_runtime_row_groups_pruned").value,
-              millis)
+            result = Some(
+              RunResult(
+                rows.head.getLong(0),
+                scan.metrics("bytes_scanned").value,
+                scan.metrics("iceberg_runtime_predicate_tasks").value,
+                scan.metrics("iceberg_runtime_row_groups_pruned").value,
+                millis))
           }
+          result.get
         }
 
         try {
@@ -1151,14 +1154,15 @@ class CometIcebergNativeSuite
           require(repetitions >= 1)
 
           def checkAndMeasure(mode: String, expected: Long): Unit = {
-            val sparkValue = withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-              spark.sql(query).collect().head.getLong(0)
+            var sparkValue = 0L
+            withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+              sparkValue = spark.sql(query).collect().head.getLong(0)
             }
             assert(sparkValue == expected)
             // Warm both paths before timing; alternate order to reduce ordering bias.
             if (repetitions > 1) {
-              run(dynamicFilterEnabled = false)
-              run(dynamicFilterEnabled = true)
+              val _ = run(dynamicFilterEnabled = false)
+              val _ = run(dynamicFilterEnabled = true)
             }
             (0 until repetitions).foreach { iteration =>
               val results = (if (iteration % 2 == 0) Seq(false, true) else Seq(true, false)).map {
@@ -1182,7 +1186,7 @@ class CometIcebergNativeSuite
                   s"""{"mode":"$mode","iteration":$iteration,"enabled":$flag,"rows":$numRows,"row_groups":$rowGroupCount,"value":${r.value},"bytes_scanned":${r.bytes},"runtime_predicate_tasks":${r.predicateTasks},"runtime_row_groups_pruned":${r.rowGroupsPruned},"wall_ms":${r.millis}}"""
                 println(s"ICEBERG_RUNTIME_BENCHMARK $json")
                 sys.env.get("COMET_ICEBERG_BENCHMARK_OUTPUT").foreach { output =>
-                  java.nio.file.Files.write(
+                  val _ = java.nio.file.Files.write(
                     java.nio.file.Paths.get(output),
                     (json + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     java.nio.file.StandardOpenOption.CREATE,
@@ -1202,6 +1206,7 @@ class CometIcebergNativeSuite
             .loadTable(ident)
             .asInstanceOf[org.apache.iceberg.spark.source.SparkTable]
             .table()
+          val initialSnapshotId = table.currentSnapshot().snapshotId()
           val out =
             table.io().newOutputFile(new File(warehouseDir, "pos-delete.parquet").toString)
           val deleteFile = org.apache.iceberg.data.CometEqualityDeletes
@@ -1215,6 +1220,9 @@ class CometIcebergNativeSuite
               .exists(_.getInt(0) == 1))
           checkAndMeasure("position_deletes", 31L * 64L)
 
+          table.refresh()
+          table.manageSnapshots().rollbackTo(initialSnapshotId).commit()
+          spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
           val deletedPayload = spark
             .sql("SELECT payload FROM test_cat.db.runtime_join_pruning_test WHERE id = 50002")
             .collect()
@@ -1233,6 +1241,10 @@ class CometIcebergNativeSuite
               .sql("SELECT content FROM test_cat.db.runtime_join_pruning_test.delete_files")
               .collect()
               .exists(_.getInt(0) == 2))
+          checkAndMeasure("equality_deletes", 31L * 64L)
+          table.refresh()
+          table.newRowDelta().addDeletes(deleteFile).commit()
+          spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
           checkAndMeasure("position_and_equality_deletes", 30L * 64L)
         } finally {
           spark.catalog.dropTempView("runtime_join_dim")

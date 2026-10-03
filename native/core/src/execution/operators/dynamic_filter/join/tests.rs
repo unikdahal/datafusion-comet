@@ -1589,6 +1589,7 @@ fn iceberg_reader_attachment_keeps_exact_consumer() {
         .with_data_file_format(DataFileFormat::Parquet)
         .with_schema(schema)
         .with_project_field_ids(vec![1, 2])
+        .with_case_sensitive(false)
         .build()
         .unwrap();
     let probe: Arc<dyn ExecutionPlan> = Arc::new(
