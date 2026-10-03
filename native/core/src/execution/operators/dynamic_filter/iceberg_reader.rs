@@ -64,11 +64,7 @@ impl RuntimePredicateProvider for IcebergRuntimePredicateProvider {
             )
         })?;
         Ok(RuntimePredicateSnapshot::new(
-            extract_iceberg_predicate(
-                &current,
-                self.probe_column_index,
-                &self.iceberg_field_name,
-            ),
+            extract_iceberg_predicate(&current, self.probe_column_index, &self.iceberg_field_name),
             generation,
         ))
     }
@@ -120,7 +116,9 @@ pub(super) fn try_attach_iceberg_reader_filter(
             column.index(),
             iceberg_field_name,
         ));
-    Ok(Some(Arc::new(scan.with_runtime_predicate_provider(provider))))
+    Ok(Some(Arc::new(
+        scan.with_runtime_predicate_provider(provider),
+    )))
 }
 
 fn extract_iceberg_predicate(
@@ -131,16 +129,8 @@ fn extract_iceberg_predicate(
     if let Some(binary) = expr.downcast_ref::<BinaryExpr>() {
         if binary.op() == &Operator::And {
             return match (
-                extract_iceberg_predicate(
-                    binary.left(),
-                    probe_column_index,
-                    iceberg_field_name,
-                ),
-                extract_iceberg_predicate(
-                    binary.right(),
-                    probe_column_index,
-                    iceberg_field_name,
-                ),
+                extract_iceberg_predicate(binary.left(), probe_column_index, iceberg_field_name),
+                extract_iceberg_predicate(binary.right(), probe_column_index, iceberg_field_name),
             ) {
                 (Some(left), Some(right)) => Some(left.and(right)),
                 (Some(predicate), None) | (None, Some(predicate)) => Some(predicate),
@@ -150,10 +140,11 @@ fn extract_iceberg_predicate(
         return extract_bound(binary, probe_column_index, iceberg_field_name);
     }
 
-    expr.downcast_ref::<Literal>().and_then(|literal| match literal.value() {
-        ScalarValue::Boolean(Some(false)) => Some(Predicate::AlwaysFalse),
-        _ => None,
-    })
+    expr.downcast_ref::<Literal>()
+        .and_then(|literal| match literal.value() {
+            ScalarValue::Boolean(Some(false)) => Some(Predicate::AlwaysFalse),
+            _ => None,
+        })
 }
 
 fn extract_bound(
@@ -202,18 +193,17 @@ mod tests {
             Operator::GtEq,
             lit(100_i32),
         ));
-        let upper: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
-            key,
-            Operator::LtEq,
-            lit(199_i32),
-        ));
-        let expr: Arc<dyn PhysicalExpr> =
-            Arc::new(BinaryExpr::new(lower, Operator::And, upper));
+        let upper: Arc<dyn PhysicalExpr> =
+            Arc::new(BinaryExpr::new(key, Operator::LtEq, lit(199_i32)));
+        let expr: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(lower, Operator::And, upper));
 
         let expected = Reference::new("iceberg_key")
             .greater_than_or_equal_to(Datum::int(100))
             .and(Reference::new("iceberg_key").less_than_or_equal_to(Datum::int(199)));
-        assert_eq!(extract_iceberg_predicate(&expr, 0, "iceberg_key"), Some(expected));
+        assert_eq!(
+            extract_iceberg_predicate(&expr, 0, "iceberg_key"),
+            Some(expected)
+        );
     }
 
     #[test]
@@ -240,6 +230,9 @@ mod tests {
             extract_iceberg_predicate(&false_expr, 0, "iceberg_key"),
             Some(Predicate::AlwaysFalse)
         );
-        assert_eq!(extract_iceberg_predicate(&true_expr, 0, "iceberg_key"), None);
+        assert_eq!(
+            extract_iceberg_predicate(&true_expr, 0, "iceberg_key"),
+            None
+        );
     }
 }

@@ -263,8 +263,7 @@ impl IcebergScanExec {
             .with_row_selection_enabled(true)
             .with_metadata_size_hint(512 * 1024); // Same as DataFusion's default
         if let Some(provider) = &self.runtime_predicate_provider {
-            reader_builder =
-                reader_builder.with_runtime_predicate_provider(Arc::clone(provider));
+            reader_builder = reader_builder.with_runtime_predicate_provider(Arc::clone(provider));
         }
         let reader = reader_builder.build();
 

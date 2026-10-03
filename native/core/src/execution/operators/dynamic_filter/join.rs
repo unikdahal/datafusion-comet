@@ -96,10 +96,9 @@ impl DynamicFilterJoinExec {
             &self.config,
         )? {
             Some(reader) => Some(reader),
-            None => try_attach_iceberg_reader_filter(
-                self.template.right(),
-                Arc::clone(&predicate),
-            )?,
+            None => {
+                try_attach_iceberg_reader_filter(self.template.right(), Arc::clone(&predicate))?
+            }
         };
         let reader_filter_attached = reader.is_some();
         let consumer = Arc::new(DynamicFilterExec::new(
