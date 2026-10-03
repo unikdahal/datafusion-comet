@@ -282,8 +282,9 @@ object CometConf extends ShimCometConf {
       "mergeRows",
       defaultValue = false,
       notes = Some(
-        "Ignored on Spark 4.1 and later, where MergeRowsExec remains on Spark so V2 writers " +
-          "can consume its row-level metrics"))
+        "On Spark 4.1 and later, general MergeRowsExec remains on Spark so V2 writers can " +
+          "consume its row-level metrics. Spark 4.2 insert-only MERGE rewrites are eligible " +
+          "because InsertOnlyMergeExec owns the write summary."))
 
   val COMET_EXEC_IN_MEMORY_CACHE_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.exec.inMemoryCache.enabled")

@@ -20,16 +20,18 @@
 package org.apache.comet.shims
 
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
 
 import org.apache.comet.serde.CometOperatorSerde
+import org.apache.comet.serde.operator.CometInsertOnlyMergeRows
 
 /**
- * Spark 4.1+ derives a `MergeSummary` from the write plan. General `MergeRowsExec` therefore
- * stays on Spark. Spark 4.2's insert-only rewrite is different: `InsertOnlyMergeExec` owns the
- * summary itself, so the minor-version shim may enable the restricted insert-only MergeRows
- * child.
+ * Spark 4.2 rewrites MERGE statements containing only NOT MATCHED actions as InsertOnlyMergeExec.
+ * For multiple clauses its query contains a MergeRowsExec, but the outer write owns MergeSummary
+ * independently of that child's metrics. Register only the restricted serde that recognizes this
+ * insert-only MergeRows shape.
  */
-object ShimCometMergeRows {
+object ShimCometInsertOnlyMerge {
   val nativeExecs: Map[Class[_ <: SparkPlan], CometOperatorSerde[_]] =
-    ShimCometInsertOnlyMerge.nativeExecs
+    Map(classOf[MergeRowsExec] -> CometInsertOnlyMergeRows)
 }
