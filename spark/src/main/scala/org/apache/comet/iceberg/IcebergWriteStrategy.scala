@@ -120,11 +120,12 @@ case class IcebergWriteStrategy(session: SparkSession) extends SparkStrategy {
     // `originalTable`.
     val refresh: () => Unit = () => IcebergRefreshCacheShim.refreshCache(session, rel)
     Some(
-      IcebergCommitExec(
-        batchWrite,
-        write,
-        refresh,
-        // `replaceDataDispatch` may project the data into the format the writer expects.
-        planLater(IcebergWriteLogical(query, batchWrite, replaceDataDispatch))))
+      IcebergCommitPlanShim.wrap(
+        IcebergCommitExec(
+          batchWrite,
+          write,
+          refresh,
+          // `replaceDataDispatch` may project the data into the format the writer expects.
+          planLater(IcebergWriteLogical(query, batchWrite, replaceDataDispatch)))))
   }
 }
