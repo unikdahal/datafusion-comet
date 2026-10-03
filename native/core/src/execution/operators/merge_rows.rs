@@ -1042,7 +1042,7 @@ mod tests {
             not_matched_by_source_instructions: vec![MergeInstructionExec {
                 condition: lit(true),
                 outputs: vec![vec![col("val", &schema).unwrap()]],
-                    context: None,
+                context: None,
             }],
             row_id_ordinal: None,
             semantic_metrics_required: false,
