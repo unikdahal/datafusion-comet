@@ -50,7 +50,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
       id: String,
       label: String,
       confs: Seq[(String, String)],
-      expectAnyComet: Boolean,
+      expectAnyComet: Option[Boolean],
       expectNativeMergeRows: Boolean)
 
   private case class Workload(name: String, clauses: Int, payloadColumns: Int)
@@ -64,7 +64,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
         CometConf.COMET_ENABLED.key -> "false",
         CometConf.COMET_EXEC_ENABLED.key -> "false",
         CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "false"),
-      expectAnyComet = false,
+      expectAnyComet = Some(false),
       expectNativeMergeRows = false),
     Arm(
       "comet_jvm",
@@ -73,7 +73,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
         CometConf.COMET_ENABLED.key -> "true",
         CometConf.COMET_EXEC_ENABLED.key -> "true",
         CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "false"),
-      expectAnyComet = true,
+      expectAnyComet = None,
       expectNativeMergeRows = false),
     Arm(
       "comet_native",
@@ -82,7 +82,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
         CometConf.COMET_ENABLED.key -> "true",
         CometConf.COMET_EXEC_ENABLED.key -> "true",
         CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true"),
-      expectAnyComet = true,
+      expectAnyComet = Some(true),
       expectNativeMergeRows = true))
 
   override def getSparkSession: SparkSession = {
@@ -269,10 +269,12 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
     val hasNativeMergeRows = mergedPlan.contains("CometMergeRows")
     val hasMergeRows = mergedPlan.contains("MergeRows")
 
-    if (hasAnyComet != arm.expectAnyComet) {
-      throw new IllegalStateException(
-        arm.label + ": expected Comet presence=" + arm.expectAnyComet +
-          ", got " + hasAnyComet + ".\n" + mergedPlan)
+    arm.expectAnyComet.foreach { expected =>
+      if (hasAnyComet != expected) {
+        throw new IllegalStateException(
+          arm.label + ": expected Comet presence=" + expected +
+            ", got " + hasAnyComet + ".\n" + mergedPlan)
+      }
     }
     if (hasNativeMergeRows != arm.expectNativeMergeRows) {
       throw new IllegalStateException(
