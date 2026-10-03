@@ -62,9 +62,9 @@ import org.apache.comet.rules.CometExecRule
 import org.apache.comet.serde.{CometOperatorSerde, Compatible, OperatorOuterClass, QueryContextInterner, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.{AggregateMode => CometAggregateMode, Operator}
 import org.apache.comet.serde.QueryPlanSerde
-import org.apache.comet.shims.MergeRowsMetricsShim
 import org.apache.comet.serde.QueryPlanSerde.{aggExprToProto, exprToProto, isStringCollationType, supportedSortType}
 import org.apache.comet.serde.operator.CometSink
+import org.apache.comet.shims.MergeRowsMetricsShim
 
 /**
  * Trait for injecting per-partition planning data into operator nodes.

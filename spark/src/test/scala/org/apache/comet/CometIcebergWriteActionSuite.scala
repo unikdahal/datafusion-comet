@@ -464,9 +464,9 @@ class CometIcebergWriteActionSuite
         properties = Some("'write.merge.mode'='copy-on-write'"))
       coalesceInsert("merge_summary", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
 
-      val snapshot = withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
+      withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
         withNativeEnabled {
-          captureWrite("merge_summary") {
+          val snapshot = captureWrite("merge_summary") {
             spark.sql(s"""
               |MERGE INTO $catalog.$ns.merge_summary t
               |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
@@ -476,16 +476,16 @@ class CometIcebergWriteActionSuite
               |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
               |""".stripMargin)
           }
+          assert(
+            snapshot.plans.exists(plan =>
+              collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }.nonEmpty),
+            s"expected native MergeRows in Spark 4.1+ MERGE. Plans:\n${snapshot.plans.mkString("\n--\n")}")
+          assert(
+            snapshot.plans.exists(plan =>
+              collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }.nonEmpty),
+            s"expected native Iceberg writer in Spark 4.1+ MERGE. Plans:\n${snapshot.plans.mkString("\n--\n")}")
         }
       }
-      assert(
-        snapshot.plans.exists(plan =>
-          collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }.nonEmpty),
-        s"expected native MergeRows in Spark 4.1+ MERGE. Plans:\n${snapshot.plans.mkString("\n--\n")}")
-      assert(
-        snapshot.plans.exists(plan =>
-          collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }.nonEmpty),
-        s"expected native Iceberg writer in Spark 4.1+ MERGE. Plans:\n${snapshot.plans.mkString("\n--\n")}")
 
       val summary = spark
         .sql(s"SELECT summary FROM $catalog.$ns.merge_summary.snapshots " +
