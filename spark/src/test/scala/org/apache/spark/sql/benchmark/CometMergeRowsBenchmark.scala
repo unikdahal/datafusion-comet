@@ -252,10 +252,8 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
     val listener = new QueryExecutionListener {
       override def onSuccess(funcName: String, qe: QueryExecution, durationNs: Long): Unit =
         captured += qe
-      override def onFailure(
-          funcName: String,
-          qe: QueryExecution,
-          exception: Exception): Unit = ()
+      override def onFailure(funcName: String, qe: QueryExecution, exception: Exception): Unit =
+        ()
     }
 
     spark.listenerManager.register(listener)
