@@ -107,6 +107,14 @@ pub(super) fn try_attach_iceberg_reader_filter(
         return Ok(None);
     };
 
+    if scan
+        .schema()
+        .fields()
+        .get(column.index())
+        .is_none_or(|field| field.name() != column.name())
+    {
+        return Ok(None);
+    }
     let Some(iceberg_field_name) = scan.runtime_predicate_field_name(column.index()) else {
         return Ok(None);
     };
@@ -126,6 +134,8 @@ fn extract_iceberg_predicate(
     probe_column_index: usize,
     iceberg_field_name: &str,
 ) -> Option<Predicate> {
+    // An AND permits a conservative subset of its constraints. Do not descend
+    // through OR, NOT, casts, or the exact hash-membership expression.
     if let Some(binary) = expr.downcast_ref::<BinaryExpr>() {
         if binary.op() == &Operator::And {
             return match (
@@ -161,10 +171,7 @@ fn extract_bound(
     let reference = Reference::new(iceberg_field_name);
 
     match binary.op() {
-        Operator::Eq => Some(reference.equal_to(datum)),
-        Operator::Gt => Some(reference.greater_than(datum)),
         Operator::GtEq => Some(reference.greater_than_or_equal_to(datum)),
-        Operator::Lt => Some(reference.less_than(datum)),
         Operator::LtEq => Some(reference.less_than_or_equal_to(datum)),
         _ => None,
     }
@@ -233,6 +240,150 @@ mod tests {
         assert_eq!(
             extract_iceberg_predicate(&true_expr, 0, "iceberg_key"),
             None
+        );
+    }
+
+    #[test]
+    fn unsupported_shapes_fail_open() {
+        use arrow::datatypes::DataType;
+        use datafusion::physical_expr::expressions::CastExpr;
+
+        let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let bound: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::clone(&column),
+            Operator::GtEq,
+            lit(10_i32),
+        ));
+        let expressions: Vec<Arc<dyn PhysicalExpr>> = vec![
+            Arc::new(BinaryExpr::new(bound, Operator::Or, lit(true))),
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&column),
+                Operator::Eq,
+                lit(10_i32),
+            )),
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&column),
+                Operator::GtEq,
+                lit(10_u32),
+            )),
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&column),
+                Operator::GtEq,
+                lit(10_f64),
+            )),
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&column),
+                Operator::GtEq,
+                lit(ScalarValue::Int32(None)),
+            )),
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("other", 1)),
+                Operator::GtEq,
+                lit(10_i32),
+            )),
+            Arc::new(BinaryExpr::new(
+                Arc::new(CastExpr::new(column, DataType::Int64, None)),
+                Operator::GtEq,
+                lit(10_i64),
+            )),
+            Arc::new(BinaryExpr::new(
+                lit(10_i32),
+                Operator::LtEq,
+                Arc::new(Column::new("key", 0)),
+            )),
+        ];
+        for expression in expressions {
+            assert_eq!(
+                extract_iceberg_predicate(&expression, 0, "key"),
+                None,
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_samples_live_bounds() {
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::clone(&key)],
+            lit(true),
+        ));
+        let provider = IcebergRuntimePredicateProvider::new(Arc::clone(&dynamic), 0, "id".into());
+        assert!(provider.snapshot().unwrap().predicate().is_none());
+        dynamic
+            .update(Arc::new(BinaryExpr::new(key, Operator::LtEq, lit(42_i64))))
+            .unwrap();
+        let snapshot = provider.snapshot().unwrap();
+        assert_eq!(
+            snapshot.predicate(),
+            Some(&Reference::new("id").less_than_or_equal_to(Datum::long(42)))
+        );
+        assert_eq!(snapshot.generation(), dynamic.snapshot_generation());
+    }
+
+    #[tokio::test]
+    async fn extracts_bounds_from_real_hash_membership_filter() {
+        use arrow::array::{Int32Array, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::common::{JoinType, NullEquality};
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::physical_plan::collect;
+        use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
+        use datafusion::prelude::{SessionConfig, SessionContext};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Int32, false)]));
+        let input = |values| {
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int32Array::from(values))],
+            )
+            .unwrap();
+            MemorySourceConfig::try_new_exec(&[vec![batch]], Arc::clone(&schema), None).unwrap()
+        };
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::clone(&key)],
+            lit(true),
+        ));
+        let join = HashJoinExec::try_new(
+            input(vec![100, 103]),
+            input(vec![100, 101, 102, 103]),
+            vec![(Arc::clone(&key), key)],
+            None,
+            &JoinType::Inner,
+            None,
+            PartitionMode::Partitioned,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap()
+        .with_dynamic_filter_expr(Arc::clone(&dynamic))
+        .unwrap();
+        let mut config = SessionConfig::new();
+        config
+            .options_mut()
+            .optimizer
+            .hash_join_inlist_pushdown_max_size = 0;
+        config
+            .options_mut()
+            .optimizer
+            .hash_join_inlist_pushdown_max_distinct_values = 0;
+        let session = SessionContext::new_with_config(config);
+        let result = collect(Arc::new(join), session.task_ctx()).await.unwrap();
+        assert_eq!(result.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        assert!(dynamic
+            .current()
+            .unwrap()
+            .to_string()
+            .contains("hash_lookup"));
+        let provider = IcebergRuntimePredicateProvider::new(dynamic, 0, "id".into());
+        assert_eq!(
+            provider.snapshot().unwrap().predicate(),
+            Some(
+                &Reference::new("id")
+                    .greater_than_or_equal_to(Datum::int(100))
+                    .and(Reference::new("id").less_than_or_equal_to(Datum::int(103)))
+            )
         );
     }
 }

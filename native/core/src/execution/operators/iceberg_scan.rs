@@ -117,6 +117,10 @@ impl IcebergScanExec {
     }
 
     pub(crate) fn runtime_predicate_field_name(&self, output_index: usize) -> Option<String> {
+        use arrow::datatypes::DataType;
+        use iceberg::spec::{PrimitiveType, Type};
+
+        let output = self.output_schema.fields().get(output_index)?;
         let mut field_id = None;
         let mut field_name: Option<String> = None;
 
@@ -125,7 +129,23 @@ impl IcebergScanExec {
             if field_id.is_some_and(|expected| expected != current_id) {
                 return None;
             }
-            let current_name = task.schema().field_by_id(current_id)?.name.clone();
+            // Only top-level signed integer fields have a direct output-column mapping.
+            // Looking up a nested leaf by id and then binding its short name could prune
+            // an unrelated top-level field with that name.
+            let field = task
+                .schema()
+                .as_struct()
+                .fields()
+                .iter()
+                .find(|f| f.id == current_id)?;
+            if !matches!(
+                (output.data_type(), field.field_type.as_ref()),
+                (DataType::Int32, Type::Primitive(PrimitiveType::Int))
+                    | (DataType::Int64, Type::Primitive(PrimitiveType::Long))
+            ) {
+                return None;
+            }
+            let current_name = field.name.clone();
             if field_name
                 .as_ref()
                 .is_some_and(|expected| expected != &current_name)
@@ -452,9 +472,9 @@ impl IcebergScanMetrics {
             num_splits: MetricBuilder::new(metrics).counter("num_splits", 0),
             bytes_scanned: MetricBuilder::new(metrics).counter("bytes_scanned", 0),
             runtime_predicate_tasks: MetricBuilder::new(metrics)
-                .counter("runtime_predicate_tasks", 0),
+                .counter("iceberg_runtime_predicate_tasks", 0),
             runtime_row_groups_pruned: MetricBuilder::new(metrics)
-                .counter("runtime_row_groups_pruned", 0),
+                .counter("iceberg_runtime_row_groups_pruned", 0),
         }
     }
 }

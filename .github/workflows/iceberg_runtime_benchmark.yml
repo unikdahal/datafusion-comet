@@ -1,0 +1,136 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Lightweight CI for benchmark-only changes - verifies compilation and linting
+# without running full test suites
+
+name: Fork Iceberg Runtime Pruning Benchmark
+
+on:
+  push:
+    branches: [feat/iceberg-runtime-pruning]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-iceberg-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: "-Clink-arg=-fuse-ld=bfd"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  native:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: '17'
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fork-runtime-registry-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: Linux-cargo-ci-
+      - name: Format Rust and build release library
+        run: |
+          cd native
+          cargo fmt --all
+          cargo build --release --locked
+      - name: Export formatting patch
+        if: always()
+        run: git diff -- native > rust-format.patch
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: runtime-rust-format
+          path: rust-format.patch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: runtime-release-library
+          path: native/target/release/libcomet.so
+  benchmark:
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: amd64/rust
+    strategy:
+      fail-fast: false
+      matrix:
+        spark: ['3.5', '4.1']
+    env:
+      SPARK_LOCAL_HOSTNAME: localhost
+      SPARK_LOCAL_IP: 127.0.0.1
+      COMET_ICEBERG_BENCHMARK_REPEATS: '5'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: '17'
+      - uses: actions/download-artifact@v8
+        with:
+          name: runtime-release-library
+          path: native/target/release
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.m2/repository
+            /root/.m2/repository
+          key: runtime-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: Linux-java-maven-
+      - name: Format Scala
+        env:
+          SPARK_PROFILE: ${{ matrix.spark }}
+        run: |
+          ./mvnw -B spotless:apply -Pspark-$SPARK_PROFILE
+          git diff -- spark > scala-format.patch
+      - name: Spark correctness, deletes, and repeated OFF/ON benchmark
+        env:
+          SPARK_PROFILE: ${{ matrix.spark }}
+        run: |
+          export SPARK_HOME="$GITHUB_WORKSPACE"
+          export COMET_ICEBERG_BENCHMARK_OUTPUT="$GITHUB_WORKSPACE/runtime-benchmark.jsonl"
+          ./mvnw -B -Prelease -Pspark-$SPARK_PROFILE test -Dtest=none \
+            '-Dsuites=org.apache.comet.CometIcebergNativeSuite join runtime filter prunes native Iceberg row groups and bytes'
+      - name: Summarize measurements
+        if: always()
+        run: python3 dev/ci/summarize-iceberg-runtime-benchmark.py runtime-benchmark.jsonl > runtime-benchmark.md
+      - name: Publish summary
+        if: always()
+        run: cat runtime-benchmark.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: iceberg-runtime-benchmark-spark-${{ matrix.spark }}
+          path: |
+            runtime-benchmark.jsonl
+            runtime-benchmark.md
+            scala-format.patch
+            **/target/surefire-reports/*
+            **/target/unit-tests.log
