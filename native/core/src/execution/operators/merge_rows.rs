@@ -395,7 +395,28 @@ where
             columns.push(new_null_array(column.data_type(), row_indices.len()));
         }
     }
-    RecordBatch::try_new(batch.schema(), columns).map_err(|e| e.into())
+
+    // Placeholder columns contain NULLs even when the original input field is non-nullable.
+    // Relax nullability only for those placeholders; referenced columns retain the original field
+    // metadata and nullability, while expression column ordinals remain unchanged.
+    let fields = batch
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            if required[index] {
+                Arc::clone(field)
+            } else {
+                Arc::new(field.as_ref().clone().with_nullable(true))
+            }
+        })
+        .collect::<Vec<_>>();
+    let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        fields,
+        batch.schema().metadata().clone(),
+    ));
+    RecordBatch::try_new(schema, columns).map_err(|e| e.into())
 }
 
 /// Applies an ordered instruction group with Spark's first-match-wins semantics.
@@ -900,6 +921,36 @@ mod tests {
         let mut got: Vec<i32> = vals.iter().flatten().collect();
         got.sort();
         assert_eq!(got, vec![111, 222]);
+    }
+
+    #[test]
+    fn selection_batch_allows_null_placeholders_for_non_nullable_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("unused", DataType::Int32, false),
+            Field::new("payload", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+        let payload = col("payload", &schema).unwrap();
+
+        let selected = selection_batch(&batch, &[0, 2], std::iter::once(&payload)).unwrap();
+
+        assert_eq!(selected.num_rows(), 2);
+        assert!(selected.schema().field(0).is_nullable());
+        assert!(!selected.schema().field(1).is_nullable());
+
+        let payload = selected
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(payload.values(), &[10, 30]);
     }
 
     #[test]
