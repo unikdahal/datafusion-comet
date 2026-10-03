@@ -87,9 +87,9 @@ fn input_batch(
     distribution: Distribution,
 ) -> RecordBatch {
     let bucket = match distribution {
-        Distribution::Interleaved => Int32Array::from_iter_values(
-            (0..ROWS_PER_BATCH).map(|row| (row % 100) as i32),
-        ),
+        Distribution::Interleaved => {
+            Int32Array::from_iter_values((0..ROWS_PER_BATCH).map(|row| (row % 100) as i32))
+        }
         Distribution::Clustered => Int32Array::from_iter_values(
             (0..ROWS_PER_BATCH).map(|row| ((row * 100) / ROWS_PER_BATCH) as i32),
         ),
@@ -217,16 +217,10 @@ fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("mergerows_clause_dispatch");
     for case in cases {
         let plan = merge_plan(case);
-        let label = format!(
-            "{}_w{}",
-            case.distribution.as_str(),
-            case.payload_columns
-        );
-        group.bench_with_input(
-            BenchmarkId::new(label, case.clauses),
-            &case,
-            |b, _| b.iter(|| run(&runtime, &plan, &ctx)),
-        );
+        let label = format!("{}_w{}", case.distribution.as_str(), case.payload_columns);
+        group.bench_with_input(BenchmarkId::new(label, case.clauses), &case, |b, _| {
+            b.iter(|| run(&runtime, &plan, &ctx))
+        });
     }
     group.finish();
 }

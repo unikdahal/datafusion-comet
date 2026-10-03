@@ -54,9 +54,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
       expectNativeMergeRows: Boolean)
 
   private case class Workload(name: String, clauses: Int, payloadColumns: Int)
-  private case class WorkloadResult(
-      workload: Workload,
-      measurementsMs: Map[String, Seq[Double]])
+  private case class WorkloadResult(workload: Workload, measurementsMs: Map[String, Seq[Double]])
 
   private val arms = Seq(
     Arm(
@@ -93,9 +91,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
       .set("spark.master", "local[4]")
       .setIfMissing("spark.driver.memory", "6g")
       .setIfMissing("spark.executor.memory", "6g")
-      .set(
-        "spark.sql.catalog." + catalog,
-        classOf[InMemoryRowLevelOperationTableCatalog].getName)
+      .set("spark.sql.catalog." + catalog, classOf[InMemoryRowLevelOperationTableCatalog].getName)
       .set("spark.sql.autoBroadcastJoinThreshold", "-1")
       .set("spark.sql.adaptive.autoBroadcastJoinThreshold", "-1")
       .set("spark.sql.shuffle.partitions", "8")
@@ -145,9 +141,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
     val results = workloads.map(runWorkload(_, rows, rounds, warmups))
     val json = renderJson(rows, rounds, warmups, results)
     val outputPath =
-      sys.env.getOrElse(
-        "COMET_MERGEROWS_BENCH_JSON",
-        "/tmp/comet-mergerows-spark-benchmark.json")
+      sys.env.getOrElse("COMET_MERGEROWS_BENCH_JSON", "/tmp/comet-mergerows-spark-benchmark.json")
     Files.write(Paths.get(outputPath), json.getBytes(StandardCharsets.UTF_8))
 
     // scalastyle:off println
@@ -211,8 +205,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
         }
       }
 
-      val measured =
-        arms.map(a => a.id -> mutable.ArrayBuffer.empty[Double]).toMap
+      val measured = arms.map(a => a.id -> mutable.ArrayBuffer.empty[Double]).toMap
       val rotations = Seq(
         Seq("spark", "comet_jvm", "comet_native"),
         Seq("comet_native", "spark", "comet_jvm"),
@@ -232,14 +225,12 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
           println(
             workload.name + " round=" + (round + 1) + " " + arm.label +
               " " + f"$elapsedMs%.3f" + " ms")
-          // scalastyle:on println
+        // scalastyle:on println
         }
         round += 1
       }
 
-      WorkloadResult(
-        workload,
-        measured.map { case (key, value) => key -> value.toSeq })
+      WorkloadResult(workload, measured.map { case (key, value) => key -> value.toSeq })
     } finally {
       dropTables()
     }
@@ -261,7 +252,10 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
     val listener = new QueryExecutionListener {
       override def onSuccess(funcName: String, qe: QueryExecution, durationNs: Long): Unit =
         captured += qe
-      override def onFailure(funcName: String, qe: QueryExecution, exception: Exception): Unit = ()
+      override def onFailure(
+          funcName: String,
+          qe: QueryExecution,
+          exception: Exception): Unit = ()
     }
 
     spark.listenerManager.register(listener)
@@ -292,9 +286,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
         arm.label + ": no MergeRows operator in executed plan.\n" + mergedPlan)
     }
 
-    val aggregate = spark
-      .sql("SELECT count(*) AS c, sum(p0) AS s FROM " + target)
-      .head()
+    val aggregate = spark.sql("SELECT count(*) AS c, sum(p0) AS s FROM " + target).head()
     val actualRows = aggregate.getLong(0)
     val actualSum = aggregate.getLong(1)
     val expectedSum = 17L * rows.toLong * (rows.toLong - 1L) / 2L
@@ -322,8 +314,7 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
       clauses: Int,
       payloadColumns: Int): String = {
     require(clauses >= 2)
-    val assignments =
-      (0 until payloadColumns).map(i => "t.p" + i + " = s.p" + i).mkString(", ")
+    val assignments = (0 until payloadColumns).map(i => "t.p" + i + " = s.p" + i).mkString(", ")
     val conditional = (1 until clauses).map { index =>
       val threshold = index * 100 / clauses
       "WHEN MATCHED AND s.bucket < " + threshold + " THEN UPDATE SET " + assignments
@@ -351,9 +342,8 @@ object CometMergeRowsBenchmark extends CometBenchmarkBase {
       .map { result =>
         val measurements = arms
           .map { arm =>
-            val values = result.measurementsMs(arm.id)
-              .map(v => f"$v%.6f")
-              .mkString("[", ",", "]")
+            val values =
+              result.measurementsMs(arm.id).map(v => f"$v%.6f").mkString("[", ",", "]")
             quote(arm.id) + ":" + values
           }
           .mkString("{", ",", "}")

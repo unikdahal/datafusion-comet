@@ -141,7 +141,10 @@ jobs:
             local variant="$1"
             local round="$2"
             rm -rf "${CARGO_TARGET_DIR}/criterion/mergerows_clause_dispatch"
-            "/tmp/merge_rows-${variant}"               --warm-up-time 2               --measurement-time 4               --sample-size 40
+            "/tmp/merge_rows-${variant}" --bench \
+              --warm-up-time 2 \
+              --measurement-time 4 \
+              --sample-size 40
             capture_results "${variant}" "${round}"
           }
 
