@@ -43,7 +43,7 @@ import org.apache.comet.{CometConf, CometSparkSessionExtensions}
  * Criterion benchmark remains the lower-level base-vs-head attribution benchmark.
  */
 object CometMergeRowsBenchmark extends CometBenchmarkBase {
-  private val catalog = "benchmark_rowlevel"
+  private def catalog: String = "benchmark_rowlevel"
   private val namespace = "default"
 
   private case class Arm(
