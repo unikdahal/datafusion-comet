@@ -70,7 +70,7 @@ class CometMergeRowsSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       "not matched insert",
       "(1, 10.0)",
       "(2, 20.0)",
-      "WHEN NOT MATCHED THEN INSERT (id, amount) VALUES (s.id, s.amount)",
+      "WHEN MATCHED THEN UPDATE SET t.amount = s.amount\nWHEN NOT MATCHED THEN INSERT (id, amount) VALUES (s.id, s.amount)",
       "numTargetRowsInserted"),
     MergeCase(
       "not matched by source update",
