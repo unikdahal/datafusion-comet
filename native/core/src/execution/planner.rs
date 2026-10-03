@@ -39,7 +39,10 @@ use crate::execution::operators::DynamicFilterJoinExec;
 use crate::execution::operators::IcebergScanExec;
 use crate::execution::operators::TopKReaderFilterExec;
 use crate::execution::{
-    operators::{ExecutionError, MergeActionContext, MergeInstructionExec, MergeRowsExec, ScanExec, ShuffleScanExec},
+    operators::{
+        ExecutionError, MergeActionContext, MergeInstructionExec, MergeRowsExec, ScanExec,
+        ShuffleScanExec,
+    },
     planner::expression_registry::ExpressionRegistry,
     planner::operator_registry::OperatorRegistry,
     serde::{to_arrow_datatype, to_arrow_field},
