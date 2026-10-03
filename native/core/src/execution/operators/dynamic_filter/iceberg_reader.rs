@@ -347,7 +347,12 @@ mod tests {
         ));
         let join = HashJoinExec::try_new(
             input(vec![100, 103]),
-            input(vec![100, 101, 102, 103]),
+            Arc::new(super::super::DynamicFilterExec::new(
+                input(vec![100, 101, 102, 103]),
+                Arc::clone(&dynamic),
+                datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new(),
+                "adapter_test",
+            )),
             vec![(Arc::clone(&key), key)],
             None,
             &JoinType::Inner,

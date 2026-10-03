@@ -27,6 +27,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: fork-iceberg-runtime-${{ github.ref }}
@@ -45,6 +46,8 @@ jobs:
       image: amd64/rust
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup-builder
         with:
           rust-version: stable
@@ -56,14 +59,29 @@ jobs:
             ~/.cargo/git
           key: fork-runtime-registry-${{ hashFiles('native/Cargo.lock') }}
           restore-keys: Linux-cargo-ci-
-      - name: Format Rust and build release library
+      - name: Format Rust
         run: |
-          cd native
-          cargo fmt --all
-          cargo build --release --locked
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd native && cargo fmt --all
+      - name: Find a release library with identical native sources
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 dev/ci/reuse-iceberg-runtime-library.py
+      - uses: actions/download-artifact@v8
+        if: steps.reuse.outputs.artifact_id != ''
+        with:
+          artifact-ids: ${{ steps.reuse.outputs.artifact_id }}
+          run-id: ${{ steps.reuse.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: native/target/release
+      - name: Build release library
+        if: steps.reuse.outputs.artifact_id == ''
+        run: cd native && cargo build --release --locked
       - name: Export formatting patch
         if: always()
-        run: git diff -- native > rust-format.patch
+        continue-on-error: true
+        run: git -C "$GITHUB_WORKSPACE" diff -- native > rust-format.patch
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -108,6 +126,7 @@ jobs:
         env:
           SPARK_PROFILE: ${{ matrix.spark }}
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ./mvnw -B spotless:apply -Pspark-$SPARK_PROFILE
           git diff -- spark > scala-format.patch
       - name: Spark correctness, deletes, and repeated OFF/ON benchmark

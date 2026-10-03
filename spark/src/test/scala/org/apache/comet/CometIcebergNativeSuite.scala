@@ -1161,8 +1161,9 @@ class CometIcebergNativeSuite
             assert(sparkValue == expected)
             // Warm both paths before timing; alternate order to reduce ordering bias.
             if (repetitions > 1) {
-              val _ = run(dynamicFilterEnabled = false)
-              val _ = run(dynamicFilterEnabled = true)
+              Seq(false, true).foreach { flag =>
+                assert(run(flag).value == sparkValue)
+              }
             }
             (0 until repetitions).foreach { iteration =>
               val results = (if (iteration % 2 == 0) Seq(false, true) else Seq(true, false)).map {
