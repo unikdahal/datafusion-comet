@@ -29,7 +29,6 @@ permissions:
 env:
   RUST_VERSION: stable
   RUST_BACKTRACE: 1
-  CARGO_TARGET_DIR: /tmp/mergerows-bench-target
 
 jobs:
   benchmark:
@@ -38,6 +37,8 @@ jobs:
     timeout-minutes: 90
     container:
       image: amd64/rust
+    env:
+      CARGO_TARGET_DIR: /tmp/mergerows-bench-target
 
     steps:
       - uses: actions/checkout@v7
