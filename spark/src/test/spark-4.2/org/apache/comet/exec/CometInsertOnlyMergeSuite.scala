@@ -46,10 +46,7 @@ class CometInsertOnlyMergeSuite extends CometTestBase with AdaptiveSparkPlanHelp
       .set("spark.sql.shuffle.partitions", "4")
   }
 
-  private case class MergeResult(
-      plans: Seq[SparkPlan],
-      rows: Seq[String],
-      summary: MergeSummary)
+  private case class MergeResult(plans: Seq[SparkPlan], rows: Seq[String], summary: MergeSummary)
 
   private def resetTables(target: String, source: String, sourceRows: String): Unit = {
     sql(s"DROP TABLE IF EXISTS $catalog.default.$target")
@@ -74,10 +71,7 @@ class CometInsertOnlyMergeSuite extends CometTestBase with AdaptiveSparkPlanHelp
       .asInstanceOf[MergeSummary]
   }
 
-  private def runMerge(
-      target: String,
-      mergeSql: String,
-      cometEnabled: Boolean): MergeResult = {
+  private def runMerge(target: String, mergeSql: String, cometEnabled: Boolean): MergeResult = {
     val captured = ArrayBuffer[QueryExecution]()
     val listener = new QueryExecutionListener {
       override def onSuccess(funcName: String, qe: QueryExecution, durationNs: Long): Unit =
@@ -114,8 +108,7 @@ class CometInsertOnlyMergeSuite extends CometTestBase with AdaptiveSparkPlanHelp
       find(plan) { case _: CometMergeRowsExec => true; case _ => false }.nonEmpty)
 
   private def hasSparkMergeRows(plans: Seq[SparkPlan]): Boolean =
-    plans.exists(plan =>
-      find(plan) { case _: MergeRowsExec => true; case _ => false }.nonEmpty)
+    plans.exists(plan => find(plan) { case _: MergeRowsExec => true; case _ => false }.nonEmpty)
 
   private def assertInsertOnlySummary(summary: MergeSummary, inserted: Long): Unit = {
     assert(summary.numTargetRowsInserted() == inserted)
@@ -147,7 +140,9 @@ class CometInsertOnlyMergeSuite extends CometTestBase with AdaptiveSparkPlanHelp
 
     assert(hasInsertOnlyMerge(comet.plans), "expected Spark 4.2 InsertOnlyMergeExec")
     assert(hasCometMergeRows(comet.plans), "insert-only MergeRows child did not execute natively")
-    assert(!hasSparkMergeRows(comet.plans), "native insert-only path retained Spark MergeRowsExec")
+    assert(
+      !hasSparkMergeRows(comet.plans),
+      "native insert-only path retained Spark MergeRowsExec")
     assertInsertOnlySummary(comet.summary, inserted = 3)
 
     resetTables(target, source, sourceRows)
