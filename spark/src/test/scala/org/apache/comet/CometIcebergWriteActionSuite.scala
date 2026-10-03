@@ -52,7 +52,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.sql.types.{DoubleType, IntegerType, StringType, StructField, StructType}
 
-import org.apache.comet.CometSparkSessionExtensions.{isSpark35Plus, isSpark41Plus}
+import org.apache.comet.CometSparkSessionExtensions.{isSpark35Plus, isSpark41Plus, isSpark42Plus}
 import org.apache.comet.iceberg.{IcebergReflection, IcebergWriteReportListener}
 
 private case class WriteSnapshot(snapshotDelta: Long, plans: Seq[SparkPlan])
@@ -95,6 +95,30 @@ class CometIcebergWriteActionSuite
       .set(
         "spark.sql.extensions",
         "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+  }
+
+  test("Spark 4.2 split writes use a transaction-aware commit node") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    assume(isSpark42Plus, "transaction-aware split commits start with Spark 4.2")
+    withIcebergCatalog { warehouseDir =>
+      createTable(warehouseDir, "transactional_commit", partitionSpec = "")
+      val snapshot = captureWrite("transactional_commit") {
+        spark.sql("INSERT INTO cat.db.transactional_commit VALUES (1, 'a', 10.0)")
+      }
+      val transactionalCommits = snapshot.plans.flatMap { plan =>
+        collectWithSubqueries(plan) {
+          case node
+              if node.getClass.getName ==
+                "org.apache.spark.sql.comet.IcebergTransactionalCommitExec" =>
+            node
+        }
+      }
+      assert(
+        transactionalCommits.nonEmpty,
+        "expected Spark 4.2 split write to expose a TransactionalExec commit node. Plans:\n" +
+          snapshot.plans.mkString("\n--\n"))
+      assertRows("transactional_commit", expectedIds = Seq(1))
+    }
   }
 
   test("AppendData unpartitioned INSERT INTO routes through two-op") {
