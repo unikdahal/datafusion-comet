@@ -631,7 +631,7 @@ impl Stream for MergeRowsStream {
                         this.reservation.as_mut(),
                         &this.schema,
                     ) {
-                        Ok(mut batches) if batches.is_empty() => {
+                        Ok(batches) if batches.is_empty() => {
                             discarded_budget -= 1;
                             if discarded_budget == 0 {
                                 cx.waker().wake_by_ref();
