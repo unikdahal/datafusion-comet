@@ -29,7 +29,7 @@ use arrow::record_batch::RecordBatch;
 use comet::execution::operators::{MergeInstructionExec, MergeRowsExec};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use datafusion::datasource::memory::MemorySourceConfig;
-use datafusion::execution::TaskContext;
+use datafusion::execution::{config::SessionConfig, TaskContext};
 use datafusion::logical_expr::Operator as DFOperator;
 use datafusion::physical_expr::expressions::{binary, col, lit};
 use datafusion::physical_plan::{common::collect, ExecutionPlan};
@@ -144,7 +144,13 @@ fn run(runtime: &Runtime, plan: &Arc<dyn ExecutionPlan>, ctx: &Arc<TaskContext>)
 
 fn criterion_benchmark(c: &mut Criterion) {
     let runtime = Runtime::new().unwrap();
-    let ctx = Arc::new(TaskContext::default());
+    // Keep each synthetic input batch intact. MemorySourceConfig otherwise splits batches at
+    // the default session batch size, which turns the BooleanArray inputs into slices and
+    // benchmarks an unrelated Arrow 59.3 sliced-and_not bug in the baseline implementation.
+    let ctx = Arc::new(
+        TaskContext::default()
+            .with_session_config(SessionConfig::new().with_batch_size(ROWS_PER_BATCH)),
+    );
 
     let mut group = c.benchmark_group("mergerows_clause_dispatch");
     for clauses in [4usize, 8] {
