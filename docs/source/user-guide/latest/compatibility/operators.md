@@ -116,15 +116,12 @@ strict floating-point mode.
 Spark `MergeRowsExec` appears as `CometMergeRows` when native execution is enabled.
 
 Comet can run `MergeRowsExec` (Spark's row-level `MERGE INTO` dispatch operator) natively on
-Spark 3.5.x and Spark 4.0.x, but it is disabled by default. Enable it with
+Spark 3.5+, but it is disabled by default. Enable it with
 `spark.comet.exec.mergeRows.enabled=true`.
 
-Spark 4.1+ intentionally falls back to Spark even when that flag is enabled. Starting in Spark
-4.1, the V2 existing-table writer locates the concrete Spark `MergeRowsExec`, builds a
-`MergeSummary` from its row-level metrics, and passes that summary to the summary-aware
-`BatchWrite.commit` overload. Replacing the node with `CometMergeRowsExec` would make summary
-discovery fail and silently switch the data source to the legacy summary-less commit overload.
-Comet will keep Spark 4.1+ `MERGE` on the JVM until it can preserve that writer contract end-to-end.
+On Spark 4.1+, native MergeRows also preserves the eight semantic action counters used to build
+`MergeSummary` and forwards them through the summary-aware `BatchWrite.commit` contract. Spark
+4.2 uses last-attempt metrics for these counters, matching Spark's retry-aware summary semantics.
 
 **Undeclared physical output order can differ from Spark:** native execution is set-at-a-time. Within
 an input batch it emits rows grouped by the MERGE instruction that produced them, and it processes

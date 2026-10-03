@@ -19,18 +19,11 @@
 
 package org.apache.comet.shims
 
-import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.execution.datasources.v2.MergeRowsExec
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.execution.metric.SQLMetric
 
-import org.apache.comet.serde.CometOperatorSerde
-import org.apache.comet.serde.operator.CometMergeRows
-
-/**
- * Spark 4.1+ derives row-level write summaries from semantic action counters. Comet preserves
- * those counters on its native MergeRows wrapper and supplies the same summary-aware V2 commit
- * contract.
- */
-object ShimCometMergeRows {
-  val nativeExecs: Map[Class[_ <: SparkPlan], CometOperatorSerde[_]] =
-    Map(classOf[MergeRowsExec] -> CometMergeRows)
+/** Spark versions before 4.1 do not expose semantic MERGE summary metrics. */
+object MergeRowsMetricsShim {
+  def metrics(sc: SparkContext): Map[String, SQLMetric] = Map.empty
+  def value(metric: SQLMetric): Long = metric.value
 }

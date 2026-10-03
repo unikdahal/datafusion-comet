@@ -465,14 +465,28 @@ class CometIcebergWriteActionSuite
         properties = Some("'write.merge.mode'='copy-on-write'"))
       coalesceInsert("merge_summary", Seq((1, "us-east", 10.0), (2, "us-west", 20.0)))
 
-      spark.sql(s"""
-        |MERGE INTO $catalog.$ns.merge_summary t
-        |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
-        |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
-        |ON t.id = s.id
-        |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
-        |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
-        |""".stripMargin)
+      withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
+        withNativeEnabled {
+          val snapshot = captureWrite("merge_summary") {
+            spark.sql(s"""
+              |MERGE INTO $catalog.$ns.merge_summary t
+              |USING (SELECT 2 AS id, 'us-west' AS region, 200.0 AS amount UNION ALL
+              |       SELECT 3 AS id, 'eu' AS region, 30.0 AS amount) s
+              |ON t.id = s.id
+              |WHEN MATCHED THEN UPDATE SET t.amount = s.amount
+              |WHEN NOT MATCHED THEN INSERT (id, region, amount) VALUES (s.id, s.region, s.amount)
+              |""".stripMargin)
+          }
+          assert(
+            snapshot.plans.exists(plan =>
+              collectWithSubqueries(plan) { case e: CometMergeRowsExec => e }.nonEmpty),
+            s"expected native MergeRows in Spark 4.1+ MERGE. Plans:\n${snapshot.plans.mkString("\n--\n")}")
+          assert(
+            snapshot.plans.exists(plan =>
+              collectWithSubqueries(plan) { case e: CometIcebergWriteExec => e }.nonEmpty),
+            s"expected native Iceberg writer in Spark 4.1+ MERGE. Plans:\n${snapshot.plans.mkString("\n--\n")}")
+        }
+      }
 
       val summary = spark
         .sql(s"SELECT summary FROM $catalog.$ns.merge_summary.snapshots " +
@@ -1028,7 +1042,7 @@ class CometIcebergWriteActionSuite
       }
 
       withSQLConf(CometConf.COMET_EXEC_MERGE_ROWS_ENABLED.key -> "true") {
-        if (isSpark41Plus || !isSpark35Plus) {
+        if (!isSpark35Plus) {
           assertNativeWriteDoesNotEngage("native_cow_merge", Seq(1, 2, 3))(runMerge())
         } else {
           val snapshot = withNativeEnabled {
@@ -1064,9 +1078,7 @@ class CometIcebergWriteActionSuite
 
   test("native MergeRows matches Spark on partitioned Iceberg copy-on-write and merge-on-read") {
     assumeNativeAcceleration()
-    assume(
-      isSpark35Plus && !isSpark41Plus,
-      "native MergeRows is registered only on Spark 3.5 and 4.0")
+    assume(isSpark35Plus, "native MergeRows requires Spark 3.5+")
     withIcebergCatalog { warehouseDir =>
       spark
         .range(0, 20000, 1, 8)
@@ -1201,9 +1213,7 @@ class CometIcebergWriteActionSuite
 
   test("native MergeRows Iceberg cardinality violation matches Spark") {
     assumeNativeAcceleration()
-    assume(
-      isSpark35Plus && !isSpark41Plus,
-      "native MergeRows is registered only on Spark 3.5 and 4.0")
+    assume(isSpark35Plus, "native MergeRows requires Spark 3.5+")
     withIcebergCatalog { warehouseDir =>
       val nativeTable = "merge_cardinality_native"
       val sparkTable = "merge_cardinality_spark"
