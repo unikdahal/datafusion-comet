@@ -1078,9 +1078,7 @@ class CometIcebergWriteActionSuite
 
   test("native MergeRows matches Spark on partitioned Iceberg copy-on-write and merge-on-read") {
     assumeNativeAcceleration()
-    assume(
-      isSpark35Plus,
-      "native MergeRows requires Spark 3.5+")
+    assume(isSpark35Plus, "native MergeRows requires Spark 3.5+")
     withIcebergCatalog { warehouseDir =>
       spark
         .range(0, 20000, 1, 8)
@@ -1215,9 +1213,7 @@ class CometIcebergWriteActionSuite
 
   test("native MergeRows Iceberg cardinality violation matches Spark") {
     assumeNativeAcceleration()
-    assume(
-      isSpark35Plus,
-      "native MergeRows requires Spark 3.5+")
+    assume(isSpark35Plus, "native MergeRows requires Spark 3.5+")
     withIcebergCatalog { warehouseDir =>
       val nativeTable = "merge_cardinality_native"
       val sparkTable = "merge_cardinality_spark"
