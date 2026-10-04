@@ -21,7 +21,6 @@ use arrow::compute::{filter_record_batch, prep_null_mask_filter};
 use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, ScalarValue};
-use roaring::RoaringTreemap;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
@@ -37,6 +36,7 @@ use datafusion::{
 };
 use datafusion_comet_common::{cast_and_stamp_schema, SparkError};
 use futures::{Stream, StreamExt};
+use roaring::RoaringTreemap;
 use std::{
     pin::Pin,
     sync::Arc,
