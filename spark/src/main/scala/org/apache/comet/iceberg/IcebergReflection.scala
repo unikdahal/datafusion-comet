@@ -499,9 +499,10 @@ object IcebergReflection extends Logging {
       if (icebergScan == null) return Map.empty
       val scanClass = loadClass("org.apache.iceberg.Scan")
       // Restrict statistics to the candidate key columns where Iceberg supports it.
-      val withStats = findMethod(scanClass, "includeColumnStats", classOf[java.util.Collection[_]])
-        .map(_.invoke(icebergScan, java.util.Arrays.asList(columns: _*)))
-        .getOrElse(getMethod(scanClass, "includeColumnStats").invoke(icebergScan))
+      val withStats =
+        findMethod(scanClass, "includeColumnStats", classOf[java.util.Collection[_]])
+          .map(_.invoke(icebergScan, java.util.Arrays.asList(columns: _*)))
+          .getOrElse(getMethod(scanClass, "includeColumnStats").invoke(icebergScan))
       val planned = getMethod(scanClass, "planFiles").invoke(withStats)
       try {
         val result = Map.newBuilder[String, AnyRef]
