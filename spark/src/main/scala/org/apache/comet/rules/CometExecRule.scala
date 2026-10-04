@@ -162,6 +162,14 @@ object CometExecRule {
    */
   val SKIP_COMET_BROADCAST_TAG: org.apache.spark.sql.catalyst.trees.TreeNodeTag[Unit] =
     org.apache.spark.sql.catalyst.trees.TreeNodeTag[Unit]("comet.skipCometBroadcast")
+
+  /**
+   * Tag set by the Spark 3.4 AQE DPP compatibility rule on aggregates whose physical identity must
+   * remain stable while Spark resolves broadcast reuse. Those aggregates keep their existing
+   * native Scan leaf instead of adopting a ShuffleScan during the compatibility replan.
+   */
+  val SKIP_STALE_SHUFFLE_REFRESH_TAG: org.apache.spark.sql.catalyst.trees.TreeNodeTag[Unit] =
+    org.apache.spark.sql.catalyst.trees.TreeNodeTag[Unit]("comet.skipStaleShuffleRefresh")
 }
 
 /**
@@ -647,10 +655,9 @@ case class CometExecRule(session: SparkSession)
    * relies on and re-run serde on a node that is already planned.
    */
   private def refreshStaleShuffleScans(op: SparkPlan): SparkPlan = op match {
-    // Spark 3.4 uses a separate AQE DPP compatibility path that relies on Spark's broadcast
-    // exchange reuse. Refreshing a reused native operator here can make that plan structurally
-    // different from the DPP broadcast and break Spark's reuse check.
-    case _ if !isSpark35Plus => op
+    case native: CometNativeExec
+        if native.getTagValue(CometExecRule.SKIP_STALE_SHUFFLE_REFRESH_TAG).isDefined =>
+      op
     case _ if scansChildAsSeparateBlock(op) => op
     case native: CometNativeExec if native.children.nonEmpty =>
       refreshedNativeOp(native) match {
@@ -1105,6 +1112,9 @@ case class CometExecRule(session: SparkSession)
           .convert(op, builder, childOp: _*)
           .map { nativeOp =>
             val exec = serde.createExec(nativeOp, op)
+            if (op.getTagValue(CometExecRule.SKIP_STALE_SHUFFLE_REFRESH_TAG).isDefined) {
+              exec.setTagValue(CometExecRule.SKIP_STALE_SHUFFLE_REFRESH_TAG, ())
+            }
             rollUpInfoMessages(op, exec)
             exec
           }
@@ -1113,6 +1123,9 @@ case class CometExecRule(session: SparkSession)
           .convert(op, builder)
           .map { nativeOp =>
             val exec = serde.createExec(nativeOp, op)
+            if (op.getTagValue(CometExecRule.SKIP_STALE_SHUFFLE_REFRESH_TAG).isDefined) {
+              exec.setTagValue(CometExecRule.SKIP_STALE_SHUFFLE_REFRESH_TAG, ())
+            }
             rollUpInfoMessages(op, exec)
             exec
           }
