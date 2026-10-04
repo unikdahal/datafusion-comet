@@ -380,10 +380,7 @@ fn estimate_batch_roaring_peak(ids: &[u64]) -> Result<usize, DataFusionError> {
 
         let cardinality = u64::try_from(end_index - index).map_err(|_| seen_memory_overflow())?;
         total = checked_seen_add(total, SEEN_CONTAINER_OVERHEAD_BYTES)?;
-        total = checked_seen_add(
-            total,
-            projected_container_payload_headroom(0, cardinality)?,
-        )?;
+        total = checked_seen_add(total, projected_container_payload_headroom(0, cardinality)?)?;
         index = end_index;
     }
 
@@ -674,7 +671,8 @@ fn check_cardinality(
     reserve_seen_batch(seen, &ids, ids_capacity, reservation)?;
     let batch_seen = RoaringTreemap::from_sorted_iter(ids.into_iter()).map_err(|_| {
         DataFusionError::Internal(
-            "MergeRows: sorted cardinality ids unexpectedly failed roaring construction".to_string(),
+            "MergeRows: sorted cardinality ids unexpectedly failed roaring construction"
+                .to_string(),
         )
     })?;
     *seen |= batch_seen;
