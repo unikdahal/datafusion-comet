@@ -1089,9 +1089,8 @@ class CometIcebergNativeSuite
         val icebergTable = spark.sessionState.catalogManager
           .catalog("test_cat")
           .asInstanceOf[org.apache.iceberg.spark.SparkCatalog]
-          .loadTable(
-            org.apache.spark.sql.connector.catalog.Identifier
-              .of(Array("db"), "runtime_file_pruning"))
+          .loadTable(org.apache.spark.sql.connector.catalog.Identifier
+            .of(Array("db"), "runtime_file_pruning"))
           .asInstanceOf[org.apache.iceberg.spark.source.SparkTable]
           .table()
         val initialSnapshot = icebergTable.currentSnapshot().snapshotId()
@@ -1273,10 +1272,7 @@ class CometIcebergNativeSuite
         }
 
         try {
-          def checkPruning(
-              mode: String,
-              expected: Long,
-              maximumBytePercent: Long = 25L): Unit = {
+          def checkPruning(mode: String, expected: Long, maximumBytePercent: Long = 25L): Unit = {
             val adaptiveSplits = mode == "adaptive_splits_no_deletes"
             val factReader = spark.read.format("iceberg")
             val configuredReader =
