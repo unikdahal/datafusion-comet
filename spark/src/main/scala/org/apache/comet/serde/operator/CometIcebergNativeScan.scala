@@ -51,6 +51,45 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
 
   override def enabledConfig: Option[ConfigEntry[Boolean]] = None
 
+  /** Retains manifest statistics without decoding bounds or mutating Iceberg ByteBuffers. */
+  private def fileMetrics(
+      contentFileClass: Class[_],
+      dataFile: AnyRef,
+      fieldIds: Set[Int]): OperatorOuterClass.IcebergFileMetrics = {
+    val metrics = OperatorOuterClass.IcebergFileMetrics.newBuilder()
+    metrics.setRecordCount(
+      IcebergReflection
+        .getMethod(contentFileClass, "recordCount")
+        .invoke(dataFile)
+        .asInstanceOf[Long])
+    def counts(name: String, put: (Integer, java.lang.Long) => Unit): Unit = {
+      val values = IcebergReflection
+        .getMethod(contentFileClass, name)
+        .invoke(dataFile)
+        .asInstanceOf[java.util.Map[Integer, java.lang.Long]]
+      if (values != null) values.asScala.foreach { case (id, count) =>
+        if (fieldIds.contains(id.intValue())) put(id, count)
+      }
+    }
+    def bounds(name: String, put: (Integer, com.google.protobuf.ByteString) => Unit): Unit = {
+      val values = IcebergReflection
+        .getMethod(contentFileClass, name)
+        .invoke(dataFile)
+        .asInstanceOf[java.util.Map[Integer, java.nio.ByteBuffer]]
+      if (values != null) values.asScala.foreach { case (id, value) =>
+        if (fieldIds.contains(id.intValue())) {
+          put(id, com.google.protobuf.ByteString.copyFrom(value.duplicate()))
+        }
+      }
+    }
+    counts("valueCounts", (id, value) => { metrics.putValueCounts(id, value); () })
+    counts("nullValueCounts", (id, value) => { metrics.putNullValueCounts(id, value); () })
+    counts("nanValueCounts", (id, value) => { metrics.putNanValueCounts(id, value); () })
+    bounds("lowerBounds", (id, value) => { metrics.putLowerBounds(id, value); () })
+    bounds("upperBounds", (id, value) => { metrics.putUpperBounds(id, value); () })
+    metrics.build()
+  }
+
   /**
    * Constants specific to Iceberg expression conversion (not in shared IcebergReflection).
    */
@@ -975,6 +1014,10 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     val nameMappingToPoolIndex = mutable.HashMap[String, Int]()
     val projectFieldIdsToPoolIndex = mutable.HashMap[Seq[Int], Int]()
     val partitionDataToPoolIndex = mutable.HashMap[String, Int]()
+    val runtimeMetricsEnabled = CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get() ||
+      CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get() ||
+      CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get()
+    val fileMetricsToPoolIndex = mutable.HashMap[String, Int]()
     // Individual delete files are interned into a flat pool; deleteFilesToPoolIndex then dedups
     // the per-task sets as lists of indices into it, so a delete file that applies to many data
     // files (Iceberg's default partition delete granularity) is serialized once rather than once
@@ -1189,6 +1232,31 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                           "or metadata field IDs. This indicates a bug in CometScanRule " +
                           "validation -- all output columns should be resolvable.")
                     }
+                }
+
+                if (runtimeMetricsEnabled) {
+                  // Current runtime producers support direct INT/BIGINT keys. Avoid
+                  // serializing unrelated payload statistics, particularly wide strings.
+                  val runtimeFieldIds = output
+                    .zip(projectFieldIds)
+                    .collect {
+                      case (attr, id)
+                          if attr.dataType == IntegerType || attr.dataType == LongType =>
+                        id
+                    }
+                    .toSet
+                  val metricsIdx = fileMetricsToPoolIndex.getOrElseUpdate(
+                    taskBuilder.getDataFilePath, {
+                      val idx = fileMetricsToPoolIndex.size
+                      commonBuilder.addFileMetricsPool(
+                        fileMetrics(
+                          contentFileClass,
+                          metadata.runtimeFileStatistics
+                            .getOrElse(taskBuilder.getDataFilePath, dataFile),
+                          runtimeFieldIds))
+                      idx
+                    })
+                  taskBuilder.setFileMetricsIdx(metricsIdx)
                 }
 
                 val projectFieldIdsIdx = projectFieldIdsToPoolIndex.getOrElseUpdate(

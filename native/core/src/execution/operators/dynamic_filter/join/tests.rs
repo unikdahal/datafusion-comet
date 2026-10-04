@@ -1564,3 +1564,58 @@ fn wrapper_preserves_join_statistics_and_distribution() {
         );
     }
 }
+
+#[test]
+fn iceberg_reader_attachment_keeps_exact_consumer() {
+    use iceberg::scan::FileScanTask;
+    use iceberg::spec::{
+        DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
+    };
+
+    let schema = Arc::new(
+        IcebergSchema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(2, "payload", Type::Primitive(PrimitiveType::Int)).into(),
+            ])
+            .build()
+            .unwrap(),
+    );
+    let task = FileScanTask::builder()
+        .with_file_size_in_bytes(1024)
+        .with_start(0)
+        .with_length(0)
+        .with_data_file_path("/tmp/attachment-only.parquet".into())
+        .with_data_file_format(DataFileFormat::Parquet)
+        .with_schema(schema)
+        .with_project_field_ids(vec![1, 2])
+        .with_case_sensitive(false)
+        .build()
+        .unwrap();
+    let probe: Arc<dyn ExecutionPlan> = Arc::new(
+        crate::execution::operators::IcebergScanExec::new(
+            "/tmp/metadata.json".into(),
+            Arc::new(Schema::new(vec![
+                Field::new("key", DataType::Int32, true),
+                Field::new("payload", DataType::Int32, true),
+            ])),
+            Default::default(),
+            String::new(),
+            vec![task],
+            1,
+        )
+        .unwrap(),
+    );
+    let build = input(vec![Some(100), Some(103)], &DataType::Int32, 1);
+    let plan = join(build, probe, false);
+    let wrapper = DynamicFilterJoinExec::try_new(
+        plan.downcast_ref::<HashJoinExec>().unwrap(),
+        &ConfigOptions::default(),
+    )
+    .unwrap()
+    .unwrap();
+    let runtime = wrapper.build_runtime_join().unwrap();
+    assert!(runtime.reader_filter_attached);
+    assert!(runtime.join.right().is::<DynamicFilterExec>());
+    assert!(runtime.join.right().children()[0].is::<crate::execution::operators::IcebergScanExec>());
+}

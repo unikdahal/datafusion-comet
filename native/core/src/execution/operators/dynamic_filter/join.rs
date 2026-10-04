@@ -19,7 +19,7 @@
 //!
 //! Comet does not run DataFusion's physical optimizer, which normally connects
 //! dynamic-filter producers and consumers. This targeted wiring filters probe
-//! batches and lets a direct Parquet reader use the same live predicate for
+//! batches and lets direct Parquet and Iceberg readers use safe constraints for
 //! pruning. The original join verifies matches, including hash collisions.
 //! This leaves Spark's operator tree and partitioning intact and does
 //! not cross Spark exchanges or JVM/Arrow boundaries.
@@ -45,6 +45,7 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
+use super::iceberg_reader::try_attach_iceberg_reader_filter;
 use super::parquet_reader::try_attach_parquet_reader_filter;
 use super::DynamicFilterExec;
 
@@ -60,7 +61,7 @@ pub(crate) struct DynamicFilterJoinExec {
 }
 
 /// Per-execution join state. The permanent plan keeps no live filter; this value
-/// records whether this execution also connected its filter to the Parquet reader.
+/// records whether this execution also connected its filter to a native reader.
 struct RuntimeDynamicFilterJoin {
     join: HashJoinExec,
     reader_filter_attached: bool,
@@ -89,11 +90,16 @@ impl DynamicFilterJoinExec {
             vec![Arc::clone(&self.template.on()[0].1)],
             lit(true),
         ));
-        let reader = try_attach_parquet_reader_filter(
+        let reader = match try_attach_parquet_reader_filter(
             self.template.right(),
             Arc::clone(&predicate),
             &self.config,
-        )?;
+        )? {
+            Some(reader) => Some(reader),
+            None => {
+                try_attach_iceberg_reader_filter(self.template.right(), Arc::clone(&predicate))?
+            }
+        };
         let reader_filter_attached = reader.is_some();
         let consumer = Arc::new(DynamicFilterExec::new(
             reader.unwrap_or_else(|| Arc::clone(self.template.right())),

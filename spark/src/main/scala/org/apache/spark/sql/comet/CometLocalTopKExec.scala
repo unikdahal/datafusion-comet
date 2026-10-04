@@ -40,14 +40,17 @@ object CometLocalTopKExec {
       return None
     }
 
-    // Initially support one direct signed integer column in a native Parquet scan.
+    // Support one direct signed integer column in a native Parquet or Iceberg scan.
     // Other plans retain the existing TopKInput execution path.
     (op.child, op.sortOrder) match {
-      case (scan: CometNativeScanExec, Seq(order))
-          if order.child.isInstanceOf[Attribute] && (order.dataType match {
-            case ByteType | ShortType | IntegerType | LongType => true
-            case _ => false
-          }) =>
+      case (scan: CometLeafExec, Seq(order))
+          if (scan.isInstanceOf[CometNativeScanExec] ||
+            (scan.isInstanceOf[CometIcebergNativeScanExec] &&
+              (order.dataType == IntegerType || order.dataType == LongType))) &&
+            order.child.isInstanceOf[Attribute] && (order.dataType match {
+              case ByteType | ShortType | IntegerType | LongType => true
+              case _ => false
+            }) =>
         exprToProto(order, scan.output).map { sortOrder =>
           // Spark's physical limit already includes the offset. Each partition retains that
           // many candidates; only the final TopK applies the offset after the shuffle.
