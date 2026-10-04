@@ -164,8 +164,8 @@ object CometExecRule {
     org.apache.spark.sql.catalyst.trees.TreeNodeTag[Unit]("comet.skipCometBroadcast")
 
   /**
-   * Tag set by the Spark 3.4 AQE DPP compatibility rule on aggregates whose physical identity must
-   * remain stable while Spark resolves broadcast reuse. Those aggregates keep their existing
+   * Tag set by the Spark 3.4 AQE DPP compatibility rule on aggregates whose physical identity
+   * must remain stable while Spark resolves broadcast reuse. Those aggregates keep their existing
    * native Scan leaf instead of adopting a ShuffleScan during the compatibility replan.
    */
   val SKIP_STALE_SHUFFLE_REFRESH_TAG: org.apache.spark.sql.catalyst.trees.TreeNodeTag[Unit] =
