@@ -1423,6 +1423,13 @@ class CometIcebergNativeSuite
               withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
                 expected = spark.sql(query).collect().toSeq
               }
+              val best = numRows / 2 - 1 - (mode match {
+                case "no_deletes" => 0
+                case "both_deletes" => 2
+                case _ => 1
+              })
+              val expectedValue = if (expression == "max(hi)") best else -best
+              assert(expected.head.get(0).asInstanceOf[Number].longValue() == expectedValue)
               def run(enabled: Boolean): Long = {
                 var bytes = 0L
                 withSQLConf(
