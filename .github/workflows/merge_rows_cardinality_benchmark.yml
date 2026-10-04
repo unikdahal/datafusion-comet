@@ -1,0 +1,54 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements. See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership. The ASF licenses this file
+# to you under the Apache License, Version 2.0.
+
+name: MergeRows Cardinality Benchmark
+
+on:
+  push:
+    branches:
+      - mergerows-roaring-cardinality
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Cardinality before/after
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust and Java
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: 17
+
+      - name: Check formatting
+        run: |
+          cd native
+          cargo fmt --all -- --check --color=never
+
+      - name: Run MergeRows unit tests
+        run: |
+          cd native
+          cargo test --profile ci -p datafusion-comet merge_rows --lib -- --nocapture
+
+      - name: Run before/after benchmark
+        run: |
+          cd native
+          cargo run --profile ci -p datafusion-comet --example merge_rows_cardinality_bench \
+            | tee merge_rows_cardinality_benchmark.md
+          cat merge_rows_cardinality_benchmark.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark output
+        uses: actions/upload-artifact@v6
+        with:
+          name: merge-rows-cardinality-benchmark
+          path: native/merge_rows_cardinality_benchmark.md
