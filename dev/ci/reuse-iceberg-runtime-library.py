@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Find a fork release artifact built from the identical native source tree."""
+"""Find a fork release artifact with identical release inputs."""
 
 import json
 import os
@@ -32,7 +32,26 @@ def tree(ref, path):
     return subprocess.check_output(["git", "rev-parse", f"{ref}:{path}"], text=True).strip()
 
 
-paths = ("native", "rust-toolchain.toml", ".github/actions/setup-builder/action.yaml")
+# This one external fixture is explicitly gated by #[cfg(test)] in join.rs.
+# Its parent module and every other native input still must be identical.
+TEST_FIXTURE = "native/core/src/execution/operators/dynamic_filter/join/tests.rs"
+
+
+def native_matches(ref):
+    if tree(ref, "native") == tree("HEAD", "native"):
+        return True
+    changed = subprocess.check_output([
+        "git", "diff", "--name-only", ref, "HEAD", "--", "native"
+    ], text=True).splitlines()
+    if changed != [TEST_FIXTURE]:
+        return False
+    parent = subprocess.check_output([
+        "git", "show", "HEAD:native/core/src/execution/operators/dynamic_filter/join.rs"
+    ], text=True)
+    return bool(re.search(r"#\[cfg\(test\)\]\s+mod tests;", parent))
+
+
+paths = ("rust-toolchain.toml", ".github/actions/setup-builder/action.yaml")
 current = tuple(tree("HEAD", path) for path in paths)
 
 
@@ -61,11 +80,11 @@ for artifact in artifacts:
         previous = tuple(tree(run["head_sha"], path) for path in paths)
     except subprocess.CalledProcessError:
         continue
-    if previous != current or build_settings(run["head_sha"]) != settings:
+    if previous != current or not native_matches(run["head_sha"]) or build_settings(run["head_sha"]) != settings:
         continue
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write(f"artifact_id={artifact['id']}\nrun_id={run['id']}\n")
-    print(f"Reusing release artifact {artifact['id']} from {run['head_sha']}; native tree {current[0]} is identical.")
+    print(f"Reusing release artifact {artifact['id']} from {run['head_sha']}; release inputs are identical (only the cfg(test) join fixture may differ).")
     break
 else:
-    print("No release artifact matches the native tree; building from source.")
+    print("No release artifact matches the release inputs; building from source.")

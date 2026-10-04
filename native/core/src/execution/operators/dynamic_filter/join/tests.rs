@@ -1606,7 +1606,7 @@ fn iceberg_reader_attachment_keeps_exact_consumer() {
         )
         .unwrap(),
     );
-    let build = input(vec![Some(100), Some(103)], &DataType::Int32, 0);
+    let build = input(vec![Some(100), Some(103)], &DataType::Int32, 1);
     let plan = join(build, probe, false);
     let wrapper = DynamicFilterJoinExec::try_new(
         plan.downcast_ref::<HashJoinExec>().unwrap(),

@@ -15,8 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Lightweight CI for benchmark-only changes - verifies compilation and linting
-# without running full test suites
+# Fork-only release build, correctness checks, and paired runtime-pruning measurements.
 
 name: Fork Iceberg Runtime Pruning Benchmark
 
@@ -31,7 +30,8 @@ permissions:
 
 concurrency:
   group: fork-iceberg-runtime-${{ github.ref }}
-  cancel-in-progress: true
+  # Preserve an active measurement run when a later test or report fix is pushed.
+  cancel-in-progress: false
 
 env:
   RUSTFLAGS: "-Clink-arg=-fuse-ld=bfd"
