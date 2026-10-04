@@ -478,6 +478,8 @@ impl IcebergScanExec {
             .with_partition_spec(task.partition_spec().cloned())
             .with_name_mapping(task.name_mapping().cloned())
             .with_unified_partition_type(task.unified_partition_type().cloned())
+            .with_sort_order_id(task.sort_order_id())
+            .with_sort_order(task.sort_order().cloned())
             .with_case_sensitive(task.case_sensitive())
             .with_key_metadata(task.key_metadata().map(Box::from))
             .build()
@@ -1052,6 +1054,60 @@ mod tests {
             record_count: None,
             key_metadata: None,
         }
+    }
+
+    #[test]
+    fn rebuild_task_with_deletes_preserves_sort_metadata() {
+        use iceberg::spec::{
+            NestedField, NullOrder, PrimitiveType, SortDirection, SortField, SortOrder, Transform,
+            Type,
+        };
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![NestedField::optional(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into()])
+                .build()
+                .unwrap(),
+        );
+        let order = Arc::new(
+            SortOrder::builder()
+                .with_order_id(7)
+                .with_sort_field(
+                    SortField::builder()
+                        .source_id(1)
+                        .transform(Transform::Identity)
+                        .direction(SortDirection::Ascending)
+                        .null_order(NullOrder::First)
+                        .build(),
+                )
+                .build(&schema)
+                .unwrap(),
+        );
+        let task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("data.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(schema)
+            .with_project_field_ids(vec![1])
+            .with_sort_order_id(Some(7))
+            .with_sort_order(Some(Arc::clone(&order)))
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+
+        let rebuilt =
+            IcebergScanExec::rebuild_task_with_deletes(&task, vec![delete_file("delete.parquet")])
+                .unwrap();
+        assert_eq!(rebuilt.sort_order_id(), Some(7));
+        assert_eq!(rebuilt.sort_order(), Some(&order));
+        assert_eq!(rebuilt.deletes().len(), 1);
     }
 
     // A delete file we cannot stat must fail the scan, not be silently read with a missing/0 size.
