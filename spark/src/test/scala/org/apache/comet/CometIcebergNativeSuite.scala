@@ -1139,6 +1139,25 @@ class CometIcebergNativeSuite
             val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
             assert(scans.length == 1, s"expected one native Iceberg scan, got ${scans.length}")
             val scan = scans.head
+            val ranges = scan.perPartitionData.toSeq.flatMap { bytes =>
+              org.apache.comet.serde.OperatorOuterClass.IcebergScan
+                .parseFrom(bytes)
+                .getFileScanTasksList
+                .asScala
+                .map { task =>
+                  s"start=${task.getStart},length=${task.getLength},size=${task.getFileSizeInBytes}"
+                }
+            }
+            println(
+              s"ICEBERG_RUNTIME_TASK_RANGES enabled=$dynamicFilterEnabled ${ranges.mkString("; ")}")
+            val readConfField = Class
+              .forName("org.apache.iceberg.spark.source.SparkScan")
+              .getDeclaredField("readConf")
+            readConfField.setAccessible(true)
+            val readConf = readConfField.get(scan.originalPlan.scan)
+            val splitSize = readConf.getClass.getMethod("splitSize").invoke(readConf)
+            val splitOption = readConf.getClass.getMethod("splitSizeOption").invoke(readConf)
+            println(s"ICEBERG_RUNTIME_SPLIT_CONF size=$splitSize option=$splitOption")
             result = Some(
               RunResult(
                 rows.head.getLong(0),
