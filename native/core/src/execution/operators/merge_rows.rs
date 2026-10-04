@@ -586,7 +586,7 @@ fn check_cardinality(
 
     // Reserve conservative growth headroom before roaring is allowed to allocate. Once insertion
     // completes, shrink the reservation back to the backing-capacity estimate.
-    reserve_seen_batch(seen, &ids, reservation)?
+    reserve_seen_batch(seen, &ids, reservation)?;
     for id in ids {
         debug_assert!(
             seen.insert(id),
