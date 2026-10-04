@@ -647,6 +647,10 @@ case class CometExecRule(session: SparkSession)
    * relies on and re-run serde on a node that is already planned.
    */
   private def refreshStaleShuffleScans(op: SparkPlan): SparkPlan = op match {
+    // Spark 3.4 uses a separate AQE DPP compatibility path that relies on Spark's broadcast
+    // exchange reuse. Refreshing a reused native operator here can make that plan structurally
+    // different from the DPP broadcast and break Spark's reuse check.
+    case _ if !isSpark35Plus => op
     case _ if scansChildAsSeparateBlock(op) => op
     case native: CometNativeExec if native.children.nonEmpty =>
       refreshedNativeOp(native) match {
