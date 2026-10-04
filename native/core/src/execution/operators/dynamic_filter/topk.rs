@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Connect a local TopK's improving threshold to its native Parquet reader.
+//! Connect a local TopK's improving threshold to its native Parquet or Iceberg reader.
 
 use std::fmt::Formatter;
 use std::sync::Arc;

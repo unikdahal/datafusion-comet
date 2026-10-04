@@ -20,7 +20,7 @@ use std::sync::Arc;
 use datafusion::common::{Result, ScalarValue};
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::expressions::{
-    BinaryExpr, Column, DynamicFilterPhysicalExpr, Literal,
+    BinaryExpr, Column, DynamicFilterPhysicalExpr, IsNotNullExpr, IsNullExpr, Literal,
 };
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ExecutionPlan;
@@ -154,7 +154,7 @@ fn extract_iceberg_predicate(
     iceberg_field_name: &str,
 ) -> Option<Predicate> {
     // An AND permits a conservative subset of its constraints. Do not descend
-    // through OR, NOT, casts, or the exact hash-membership expression.
+    // through arbitrary OR, NOT, casts, or exact hash membership.
     if let Some(binary) = expr.downcast_ref::<BinaryExpr>() {
         if binary.op() == &Operator::And {
             return match (
@@ -166,7 +166,31 @@ fn extract_iceberg_predicate(
                 (None, None) => None,
             };
         }
+        if binary.op() == &Operator::Or {
+            // DataFusion's single-key NULLS FIRST TopK emits exactly
+            // IS NULL(key) OR key < / > threshold. Both arms must be
+            // translated completely; an arbitrary OR still fails open.
+            let null = binary.left().downcast_ref::<IsNullExpr>()?;
+            if null.arg().downcast_ref::<Column>()?.index() != probe_column_index {
+                return None;
+            }
+            let comparison = binary.right().downcast_ref::<BinaryExpr>()?;
+            if !matches!(comparison.op(), Operator::Lt | Operator::Gt) {
+                return None;
+            }
+            return extract_bound(comparison, probe_column_index, iceberg_field_name)
+                .map(|bound| Reference::new(iceberg_field_name).is_null().or(bound));
+        }
         return extract_bound(binary, probe_column_index, iceberg_field_name);
+    }
+
+    if let Some(check) = expr.downcast_ref::<IsNullExpr>() {
+        return (check.arg().downcast_ref::<Column>()?.index() == probe_column_index)
+            .then(|| Reference::new(iceberg_field_name).is_null());
+    }
+    if let Some(check) = expr.downcast_ref::<IsNotNullExpr>() {
+        return (check.arg().downcast_ref::<Column>()?.index() == probe_column_index)
+            .then(|| Reference::new(iceberg_field_name).is_not_null());
     }
 
     expr.downcast_ref::<Literal>()
@@ -284,6 +308,36 @@ mod tests {
             extract_iceberg_predicate(&expr, 0, "iceberg_key"),
             Some(Reference::new("iceberg_key").greater_than_or_equal_to(Datum::long(10)))
         );
+    }
+
+    #[test]
+    fn topk_nulls_first_keeps_the_null_arm_and_rejects_partial_or() {
+        let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let nulls: Arc<dyn PhysicalExpr> = Arc::new(IsNullExpr::new(Arc::clone(&column)));
+        let bound: Arc<dyn PhysicalExpr> =
+            Arc::new(BinaryExpr::new(column, Operator::Lt, lit(10_i32)));
+        let expression: Arc<dyn PhysicalExpr> =
+            Arc::new(BinaryExpr::new(Arc::clone(&nulls), Operator::Or, bound));
+        assert_eq!(
+            extract_iceberg_predicate(&expression, 0, "id"),
+            Some(
+                Reference::new("id")
+                    .is_null()
+                    .or(Reference::new("id").less_than(Datum::int(10))),
+            )
+        );
+        for other in [
+            lit(true),
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("other", 1)),
+                Operator::Lt,
+                lit(10_i32),
+            )) as Arc<dyn PhysicalExpr>,
+        ] {
+            let expression: Arc<dyn PhysicalExpr> =
+                Arc::new(BinaryExpr::new(Arc::clone(&nulls), Operator::Or, other));
+            assert!(extract_iceberg_predicate(&expression, 0, "id").is_none());
+        }
     }
 
     #[test]

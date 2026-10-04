@@ -45,6 +45,12 @@ pub(super) fn try_attach_topk_reader_filter(
     predicate: Arc<DynamicFilterPhysicalExpr>,
     config: &ConfigOptions,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    if let Some(scan) = super::super::iceberg_reader::try_attach_iceberg_reader_filter(
+        input,
+        Arc::clone(&predicate),
+    )? {
+        return Ok(Some(scan));
+    }
     let Some(scan) = input.downcast_ref::<DataSourceExec>() else {
         return Ok(None);
     };

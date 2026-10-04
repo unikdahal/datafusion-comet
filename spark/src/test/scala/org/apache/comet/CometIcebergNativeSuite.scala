@@ -1422,6 +1422,113 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("TopK live thresholds prune unread native Iceberg row groups") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        "spark.sql.adaptive.enabled" -> "false",
+        "spark.sql.shuffle.partitions" -> "1",
+        "spark.sql.iceberg.aggregate-push-down.enabled" -> "false",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_TOPK_FUSION_ENABLED.key -> "true",
+        CometConf.COMET_BATCH_SIZE.key -> "1024",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+        val table = "test_cat.db.runtime_topk_test"
+        spark.sql(s"""
+          CREATE TABLE $table (hi INT, lo BIGINT, payload STRING) USING iceberg
+          TBLPROPERTIES (
+            'format-version' = '2',
+            'read.split.adaptive-size.enabled' = 'false',
+            'read.split.open-file-cost' = '1',
+            'write.parquet.row-group-size-bytes' = '131072',
+            'write.parquet.compression-codec' = 'uncompressed')
+        """)
+        try {
+          val numRows = 240000L
+          // Both order keys establish their best non-NULL candidates in the first row group.
+          // Select only the key so tied rows have deterministic answers.
+          spark
+            .range(numRows)
+            .repartition(1)
+            .sortWithinPartitions("id")
+            .selectExpr(
+              s"CASE WHEN id % 17 = 0 THEN NULL ELSE CAST(($numRows - id) DIV 2 AS INT) END AS hi",
+              s"CASE WHEN id % 17 = 0 THEN NULL ELSE -CAST(($numRows - id) DIV 2 AS BIGINT) END AS lo",
+              "sha2(cast(id AS STRING), 256) AS payload")
+            .write
+            .format("iceberg")
+            .mode("append")
+            .saveAsTable(table)
+          val files = spark.sql(s"SELECT file_path FROM $table.files").collect()
+          assert(files.length == 1)
+          val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
+            org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
+              new org.apache.hadoop.fs.Path(files.head.getString(0)),
+              spark.sessionState.newHadoopConf()))
+          try {
+            assert(reader.getRowGroups.size >= 8)
+          } finally {
+            reader.close()
+          }
+          spark.read
+            .format("iceberg")
+            .option("split-size", "134217728")
+            .load(table)
+            .createOrReplaceTempView("runtime_topk_fact")
+          for ((key, direction) <- Seq(("hi", "DESC"), ("lo", "ASC"));
+            nullOrder <- Seq("FIRST", "LAST")) {
+            val query =
+              s"SELECT $key FROM runtime_topk_fact ORDER BY $key $direction NULLS $nullOrder LIMIT 10"
+            var expected = Seq.empty[Row]
+            withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+              expected = spark.sql(query).collect().toSeq
+            }
+            def run(enabled: Boolean): Long = {
+              var bytes = 0L
+              withSQLConf(
+                CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key ->
+                  enabled.toString) {
+                val df = spark.sql(query)
+                assert(df.collect().toSeq == expected)
+                val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
+                assert(scans.length == 1)
+                val scan = scans.head
+                assert(scan.metrics("num_splits").value == 1)
+                bytes = scan.metrics("bytes_scanned").value
+                assert(bytes > 0)
+                // Initial predicate is TRUE. Every saved row group must come
+                // from a bound published while this file is being consumed.
+                assert(scan.metrics("iceberg_runtime_row_groups_pruned_initial").value == 0)
+                if (enabled) {
+                  assert(scan.metrics("iceberg_runtime_predicate_tasks").value > 0)
+                  assert(scan.metrics("iceberg_runtime_live_pruning_tasks").value > 0)
+                  assert(scan.metrics("iceberg_runtime_predicate_refreshes").value > 0)
+                  assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value > 0)
+                } else {
+                  assert(scan.metrics("iceberg_runtime_predicate_tasks").value == 0)
+                  assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value == 0)
+                }
+              }
+              bytes
+            }
+            val fullBytes = run(false)
+            val liveBytes = run(true)
+            assert(
+              liveBytes < fullBytes,
+              s"$key $direction NULLS $nullOrder: live=$liveBytes full=$fullBytes")
+          }
+        } finally {
+          spark.catalog.dropTempView("runtime_topk_fact")
+          spark.sql(s"DROP TABLE IF EXISTS $table PURGE")
+        }
+      }
+    }
+  }
+
   test("MOR table with EQUALITY deletes - verify deletes are applied") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 
