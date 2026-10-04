@@ -350,8 +350,9 @@ fn projected_container_payload_headroom(
             .ok_or_else(seen_memory_overflow)?
     } else {
         // Cover the one-time array growth plus array-to-bitmap conversion. In roaring 0.11.5 the
-        // array stores u32 values and the bitmap payload is 8 KiB, so 32 KiB remains conservative
-        // even while the old array allocation is still live.
+        // array stores u16 values and the bitmap payload is 8 KiB. A 4,097th insert can first grow
+        // the array allocation and then allocate the bitmap before the old array is dropped, so
+        // 32 KiB remains conservative for that transient overlap.
         SEEN_BITMAP_TRANSITION_HEADROOM_BYTES
     };
     usize::try_from(bytes).map_err(|_| seen_memory_overflow())
