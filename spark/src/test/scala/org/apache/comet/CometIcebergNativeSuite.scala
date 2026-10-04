@@ -1104,6 +1104,12 @@ class CometIcebergNativeSuite
             .selectExpr("CAST(id AS INT) AS id")
             .write
             .parquet(new File(warehouse, "code_before_after_dim").getAbsolutePath)
+          spark
+            .range(0L, numRows, numRows - 1L)
+            .coalesce(1)
+            .selectExpr("CAST(id AS INT) AS id")
+            .write
+            .parquet(new File(warehouse, "code_before_after_wide_dim").getAbsolutePath)
         }
       }
       val files = spark.sql(s"SELECT file_path FROM $table.files").collect()
