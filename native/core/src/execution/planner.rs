@@ -4120,6 +4120,34 @@ fn partition_data_to_struct(
 ///
 /// This function uses deduplication pools from the IcebergScanCommon to avoid redundant
 /// parsing of schemas, partition specs, partition types, name mappings, and other repeated data.
+fn parse_iceberg_file_metrics(
+    metrics: &spark_operator::IcebergFileMetrics,
+    schema: &iceberg::spec::Schema,
+) -> iceberg::scan::FileScanTaskMetrics {
+    let bounds = |values: &std::collections::HashMap<i32, Vec<u8>>| {
+        values
+            .iter()
+            .filter_map(|(id, bytes)| {
+                let field = schema.field_by_id(*id)?;
+                let data_type = field.field_type.as_primitive_type()?;
+                // Invalid or historical encodings fail open for this column. In
+                // particular, an old INT bound need not decode as a promoted BIGINT.
+                iceberg::spec::Datum::try_from_bytes(bytes, data_type.clone())
+                    .ok()
+                    .map(|datum| (*id, datum))
+            })
+            .collect()
+    };
+    iceberg::scan::FileScanTaskMetrics {
+        record_count: metrics.record_count,
+        value_counts: metrics.value_counts.clone(),
+        null_value_counts: metrics.null_value_counts.clone(),
+        nan_value_counts: metrics.nan_value_counts.clone(),
+        lower_bounds: bounds(&metrics.lower_bounds),
+        upper_bounds: bounds(&metrics.upper_bounds),
+    }
+}
+
 fn parse_file_scan_tasks_from_common(
     proto_common: &spark_operator::IcebergScanCommon,
     proto_tasks: &[spark_operator::IcebergFileScanTask],
@@ -4456,6 +4484,12 @@ fn parse_file_scan_tasks_from_common(
                 .with_start(proto_task.start)
                 .with_length(proto_task.length)
                 .with_record_count(proto_task.record_count)
+                .with_file_metrics(
+                    proto_task
+                        .file_metrics
+                        .as_ref()
+                        .map(|metrics| Arc::new(parse_iceberg_file_metrics(metrics, &schema_ref))),
+                )
                 // RAW data-file path -- do NOT rewrite the alias to s3://. iceberg-rust matches
                 // positional deletes by comparing this against the path recorded inside the delete
                 // file, so changing the scheme drops deletes. The S3 backend opens a raw alias path
@@ -4829,6 +4863,43 @@ fn needs_fields_coercion(sig: &TypeSignature) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn iceberg_file_metrics_decode_bounds_and_ignore_unusable_encodings() {
+        use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
+        let schema = Schema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(2, "promoted", Type::Primitive(PrimitiveType::Long)).into(),
+            ])
+            .build()
+            .unwrap();
+        let proto = spark_operator::IcebergFileMetrics {
+            record_count: 20,
+            lower_bounds: std::collections::HashMap::from([
+                (1, (-10_i32).to_le_bytes().to_vec()),
+                (2, 10_i32.to_le_bytes().to_vec()),
+                (99, 10_i32.to_le_bytes().to_vec()),
+            ]),
+            upper_bounds: std::collections::HashMap::from([
+                (1, 30_i32.to_le_bytes().to_vec()),
+                (2, vec![1]),
+            ]),
+            null_value_counts: std::collections::HashMap::from([(1, 2)]),
+            ..Default::default()
+        };
+        let metrics = super::parse_iceberg_file_metrics(&proto, &schema);
+        assert_eq!(metrics.record_count, 20);
+        assert_eq!(
+            metrics.lower_bounds,
+            std::collections::HashMap::from([(1, Datum::int(-10))])
+        );
+        assert_eq!(
+            metrics.upper_bounds,
+            std::collections::HashMap::from([(1, Datum::int(30))])
+        );
+        assert_eq!(metrics.null_value_counts.get(&1), Some(&2));
+    }
+
     mod empty_native_scan;
 
     use futures::{poll, StreamExt};

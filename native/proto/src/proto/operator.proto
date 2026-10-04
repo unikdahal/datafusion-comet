@@ -424,6 +424,9 @@ message IcebergFileScanTask {
   // decodes this directly; no KMS unwrap is needed on the native side.
   optional bytes key_metadata = 6;
 
+  // Whole-file manifest statistics, including when this task is a byte-range split.
+  optional IcebergFileMetrics file_metrics = 7;
+
   // Indices into IcebergScan deduplication pools
   uint32 schema_idx = 15;
   optional uint32 partition_spec_idx = 17;
@@ -432,6 +435,16 @@ message IcebergFileScanTask {
   optional uint32 partition_data_idx = 20;
   optional uint32 delete_files_idx = 21;
   optional uint32 residual_idx = 22;
+}
+
+// Iceberg binary bounds are decoded against the task schema in native code.
+message IcebergFileMetrics {
+  uint64 record_count = 1;
+  map<int32, uint64> value_counts = 2;
+  map<int32, uint64> null_value_counts = 3;
+  map<int32, uint64> nan_value_counts = 4;
+  map<int32, bytes> lower_bounds = 5;
+  map<int32, bytes> upper_bounds = 6;
 }
 
 // Iceberg delete file for MOR tables (positional or equality deletes)

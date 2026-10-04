@@ -213,6 +213,10 @@ case class CometIcebergNativeScanExec(
     val baseMetrics = Map(
       "output_rows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
       "bytes_scanned" -> SQLMetrics.createSizeMetric(sparkContext, "number of bytes scanned"),
+      "iceberg_runtime_file_tasks_considered" ->
+        SQLMetrics.createMetric(sparkContext, "runtime file tasks considered"),
+      "iceberg_runtime_file_tasks_pruned" ->
+        SQLMetrics.createMetric(sparkContext, "runtime file tasks pruned before opening"),
       "iceberg_runtime_predicate_tasks" ->
         SQLMetrics.createMetric(sparkContext, "runtime predicate file tasks"),
       "iceberg_runtime_row_groups_pruned" ->

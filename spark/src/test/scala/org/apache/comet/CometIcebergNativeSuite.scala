@@ -1044,6 +1044,118 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("runtime file statistics skip footer reads and preserve Iceberg deletes") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        "spark.sql.adaptive.enabled" -> "false",
+        "spark.sql.shuffle.partitions" -> "1",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+        val table = "test_cat.db.runtime_file_pruning"
+        spark.sql(s"""CREATE TABLE $table (id INT, payload STRING) USING iceberg
+          TBLPROPERTIES ('format-version'='2', 'write.distribution-mode'='none',
+            'read.split.adaptive-size.enabled'='false', 'read.split.open-file-cost'='1',
+            'write.delete.mode'='merge-on-read', 'write.merge.mode'='merge-on-read',
+            'write.parquet.row-group-size-bytes'='131072',
+            'write.parquet.compression-codec'='uncompressed')""")
+        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+          spark
+            .range(32768)
+            .repartitionByRange(8, col("id"))
+            .sortWithinPartitions("id")
+            .selectExpr("CAST(id AS INT) AS id", "sha2(cast(id AS STRING), 256) AS payload")
+            .write
+            .format("iceberg")
+            .mode("append")
+            .saveAsTable(table)
+          spark
+            .range(15000L, 15032L, 2L)
+            .coalesce(1)
+            .selectExpr("CAST(id AS INT) AS id")
+            .write
+            .parquet(new File(warehouseDir, "file_pruning_dim").getAbsolutePath)
+        }
+        val fileCount = spark.sql(s"SELECT count(*) FROM $table.files").collect().head.getLong(0)
+        assert(fileCount >= 6)
+        spark.read
+          .parquet(new File(warehouseDir, "file_pruning_dim").getAbsolutePath)
+          .createOrReplaceTempView("file_pruning_dim")
+        val icebergTable =
+          new org.apache.iceberg.hadoop.HadoopTables(spark.sessionState.newHadoopConf())
+            .load(new File(warehouseDir, "db/runtime_file_pruning").getAbsolutePath)
+        val initialSnapshot = icebergTable.currentSnapshot().snapshotId()
+        val query = """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
+          FROM file_pruning_fact f JOIN file_pruning_dim d ON f.id = d.id"""
+        def checkMode(expectedRows: Long): Unit = {
+          spark.read
+            .format("iceberg")
+            .option("split-size", "1073741824")
+            .load(table)
+            .createOrReplaceTempView("file_pruning_fact")
+          var expected = Seq.empty[Row]
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            expected = spark.sql(query).collect().toSeq
+          }
+          assert(expected == Seq(Row(expectedRows * 64L)))
+          val readings = Seq(false, true).map { enabled =>
+            var bytes = 0L
+            withSQLConf(
+              CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+              val df = spark.sql(query)
+              assert(df.collect().toSeq == expected)
+              val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
+              assert(scans.nonEmpty)
+              bytes = scans.map(_.metrics("bytes_scanned").value).sum
+              val pruned = scans.map(_.metrics("iceberg_runtime_file_tasks_pruned").value).sum
+              if (enabled) {
+                assert(
+                  pruned >= fileCount - 2,
+                  s"too few tasks rejected before footer I/O: $pruned")
+              } else { assert(pruned == 0) }
+            }
+            bytes
+          }
+          assert(readings(1) < readings(0) / 3, s"file pruning did not reduce I/O: $readings")
+        }
+        try {
+          checkMode(16)
+          spark.sql(s"DELETE FROM $table WHERE id = 15000")
+          spark.catalog.refreshTable(table)
+          checkMode(15)
+          icebergTable.refresh()
+          icebergTable.manageSnapshots().rollbackTo(initialSnapshot).commit()
+          spark.catalog.refreshTable(table)
+          val payload = spark
+            .sql(s"SELECT payload FROM $table WHERE id=15002")
+            .collect()
+            .head
+            .getString(0)
+          commitEqualityDelete(
+            "test_cat",
+            "db",
+            "runtime_file_pruning",
+            "payload",
+            payload,
+            warehouseDir)
+          spark.catalog.refreshTable(table)
+          checkMode(15)
+          spark.sql(s"DELETE FROM $table WHERE id = 15000")
+          spark.catalog.refreshTable(table)
+          checkMode(14)
+        } finally {
+          spark.catalog.dropTempView("file_pruning_dim")
+          spark.catalog.dropTempView("file_pruning_fact")
+          spark.sql(s"DROP TABLE $table")
+        }
+      }
+    }
+  }
+
   test("true code before after native Iceberg benchmark") {
     assume(icebergAvailable, "Iceberg not available in classpath")
     assume(sys.env.contains("COMET_CODE_BENCHMARK_WAREHOUSE"), "fork Actions benchmark only")
@@ -1104,6 +1216,12 @@ class CometIcebergNativeSuite
             .selectExpr("CAST(id AS INT) AS id")
             .write
             .parquet(new File(warehouse, "code_before_after_dim").getAbsolutePath)
+          spark
+            .range(0L, numRows, numRows - 1L)
+            .coalesce(1)
+            .selectExpr("CAST(id AS INT) AS id")
+            .write
+            .parquet(new File(warehouse, "code_before_after_wide_dim").getAbsolutePath)
         }
       }
       val files = spark.sql(s"SELECT file_path FROM $table.files").collect()

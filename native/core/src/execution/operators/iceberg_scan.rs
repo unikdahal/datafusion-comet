@@ -268,13 +268,19 @@ impl IcebergScanExec {
         // fill_delete_file_sizes).
         let fill_io = file_io.clone();
         let concurrency_limit = self.data_file_concurrency_limit;
-        let task_stream = futures::stream::once(async move {
-            let mut tasks = tasks;
-            Self::fill_delete_file_sizes(&mut tasks, &fill_io, concurrency_limit).await?;
-            Ok::<_, Error>(futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)))
-        })
-        .try_flatten()
-        .boxed();
+        let task_stream = if self.runtime_predicate_provider.is_some() {
+            // Unknown delete sizes are resolved by iceberg-rust's cached loader
+            // only for retained tasks, after the pre-open runtime file decision.
+            futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)).boxed()
+        } else {
+            futures::stream::once(async move {
+                let mut tasks = tasks;
+                Self::fill_delete_file_sizes(&mut tasks, &fill_io, concurrency_limit).await?;
+                Ok::<_, Error>(futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)))
+            })
+            .try_flatten()
+            .boxed()
+        };
 
         // iceberg-rust's ArrowReader spawns IO/CPU work onto an iceberg::Runtime, which only needs
         // a tokio handle. execute() runs on the JVM-called thread outside any tokio context, so we
@@ -321,6 +327,8 @@ impl IcebergScanExec {
             baseline_metrics: metrics.baseline,
             scan_metrics,
             bytes_scanned: metrics.bytes_scanned,
+            runtime_file_tasks_considered: metrics.runtime_file_tasks_considered,
+            runtime_file_tasks_pruned: metrics.runtime_file_tasks_pruned,
             runtime_predicate_tasks: metrics.runtime_predicate_tasks,
             runtime_row_groups_pruned: metrics.runtime_row_groups_pruned,
             runtime_live_pruning_tasks: metrics.runtime_live_pruning_tasks,
@@ -330,6 +338,8 @@ impl IcebergScanExec {
             runtime_row_groups_pruned_live: metrics.runtime_row_groups_pruned_live,
 
             last_reported_bytes: 0,
+            last_reported_runtime_file_tasks_considered: 0,
+            last_reported_runtime_file_tasks_pruned: 0,
             last_reported_runtime_predicate_tasks: 0,
             last_reported_runtime_row_groups_pruned: 0,
             last_reported_runtime_live_pruning_tasks: 0,
@@ -455,6 +465,7 @@ impl IcebergScanExec {
             .with_start(task.start())
             .with_length(task.length())
             .with_record_count(task.record_count())
+            .with_file_metrics(task.file_metrics().cloned())
             .with_first_row_id(task.first_row_id())
             .with_data_sequence_number(task.data_sequence_number())
             .with_data_file_path(task.data_file_path().to_string())
@@ -482,6 +493,8 @@ struct IcebergScanMetrics {
     /// Total bytes read from storage
     bytes_scanned: Count,
     /// Number of file tasks that received a runtime predicate
+    runtime_file_tasks_considered: Count,
+    runtime_file_tasks_pruned: Count,
     runtime_predicate_tasks: Count,
     /// Number of row groups skipped by runtime predicate statistics
     runtime_row_groups_pruned: Count,
@@ -498,6 +511,10 @@ impl IcebergScanMetrics {
             baseline: BaselineMetrics::new(metrics, 0),
             num_splits: MetricBuilder::new(metrics).counter("num_splits", 0),
             bytes_scanned: MetricBuilder::new(metrics).counter("bytes_scanned", 0),
+            runtime_file_tasks_considered: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_file_tasks_considered", 0),
+            runtime_file_tasks_pruned: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_file_tasks_pruned", 0),
             runtime_predicate_tasks: MetricBuilder::new(metrics)
                 .counter("iceberg_runtime_predicate_tasks", 0),
             runtime_row_groups_pruned: MetricBuilder::new(metrics)
@@ -535,6 +552,8 @@ struct IcebergStreamWrapper<S> {
     bytes_scanned: Count,
     /// Last reported bytes_read value for delta computation
     last_reported_bytes: u64,
+    runtime_file_tasks_considered: Count,
+    runtime_file_tasks_pruned: Count,
     runtime_predicate_tasks: Count,
     runtime_row_groups_pruned: Count,
     runtime_live_pruning_tasks: Count,
@@ -543,6 +562,8 @@ struct IcebergStreamWrapper<S> {
     runtime_row_groups_pruned_initial: Count,
     runtime_row_groups_pruned_live: Count,
 
+    last_reported_runtime_file_tasks_considered: u64,
+    last_reported_runtime_file_tasks_pruned: u64,
     last_reported_runtime_predicate_tasks: u64,
     last_reported_runtime_row_groups_pruned: u64,
     last_reported_runtime_live_pruning_tasks: u64,
@@ -620,6 +641,20 @@ where
         if delta > 0 {
             self.bytes_scanned.add(delta as usize);
             self.last_reported_bytes = current;
+        }
+
+        let current = self.scan_metrics.runtime_file_tasks_considered();
+        let delta = current.saturating_sub(self.last_reported_runtime_file_tasks_considered);
+        if delta > 0 {
+            self.runtime_file_tasks_considered.add(delta as usize);
+            self.last_reported_runtime_file_tasks_considered = current;
+        }
+
+        let current = self.scan_metrics.runtime_file_tasks_pruned();
+        let delta = current.saturating_sub(self.last_reported_runtime_file_tasks_pruned);
+        if delta > 0 {
+            self.runtime_file_tasks_pruned.add(delta as usize);
+            self.last_reported_runtime_file_tasks_pruned = current;
         }
 
         let current_tasks = self.scan_metrics.runtime_predicate_tasks();

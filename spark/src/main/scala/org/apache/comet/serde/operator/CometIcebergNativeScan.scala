@@ -51,6 +51,40 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
 
   override def enabledConfig: Option[ConfigEntry[Boolean]] = None
 
+  /** Retains manifest statistics without decoding bounds or mutating Iceberg ByteBuffers. */
+  private def fileMetrics(
+      contentFileClass: Class[_],
+      dataFile: AnyRef): OperatorOuterClass.IcebergFileMetrics = {
+    val metrics = OperatorOuterClass.IcebergFileMetrics.newBuilder()
+    metrics.setRecordCount(
+      IcebergReflection
+        .getMethod(contentFileClass, "recordCount")
+        .invoke(dataFile)
+        .asInstanceOf[Long])
+    def counts(name: String, put: (Integer, java.lang.Long) => Unit): Unit = {
+      val values = IcebergReflection
+        .getMethod(contentFileClass, name)
+        .invoke(dataFile)
+        .asInstanceOf[java.util.Map[Integer, java.lang.Long]]
+      if (values != null) values.asScala.foreach { case (id, count) => put(id, count) }
+    }
+    def bounds(name: String, put: (Integer, com.google.protobuf.ByteString) => Unit): Unit = {
+      val values = IcebergReflection
+        .getMethod(contentFileClass, name)
+        .invoke(dataFile)
+        .asInstanceOf[java.util.Map[Integer, java.nio.ByteBuffer]]
+      if (values != null) values.asScala.foreach { case (id, value) =>
+        put(id, com.google.protobuf.ByteString.copyFrom(value.duplicate()))
+      }
+    }
+    counts("valueCounts", (id, value) => { metrics.putValueCounts(id, value); () })
+    counts("nullValueCounts", (id, value) => { metrics.putNullValueCounts(id, value); () })
+    counts("nanValueCounts", (id, value) => { metrics.putNanValueCounts(id, value); () })
+    bounds("lowerBounds", (id, value) => { metrics.putLowerBounds(id, value); () })
+    bounds("upperBounds", (id, value) => { metrics.putUpperBounds(id, value); () })
+    metrics.build()
+  }
+
   /**
    * Constants specific to Iceberg expression conversion (not in shared IcebergReflection).
    */
@@ -1087,6 +1121,7 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                 val taskBuilder = OperatorOuterClass.IcebergFileScanTask.newBuilder()
 
                 val dataFile = fileMethod.invoke(task)
+                taskBuilder.setFileMetrics(fileMetrics(contentFileClass, dataFile))
 
                 val filePathOpt =
                   IcebergReflection.extractFileLocation(contentFileClass, dataFile)
