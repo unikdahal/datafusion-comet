@@ -1137,11 +1137,16 @@ class CometIcebergNativeSuite
       spark.read
         .parquet(new File(warehouse, "code_before_after_dim").getAbsolutePath)
         .createOrReplaceTempView("code_benchmark_dim")
+      spark.read
+        .parquet(new File(warehouse, "code_before_after_wide_dim").getAbsolutePath)
+        .createOrReplaceTempView("code_benchmark_wide_dim")
       val queries = Seq(
         "join" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
           FROM code_benchmark_fact f JOIN code_benchmark_dim d ON f.id = d.id""",
+        "join_no_pruning" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
+          FROM code_benchmark_fact f JOIN code_benchmark_wide_dim d ON f.id = d.id""",
         "min" -> "SELECT min(id) FROM code_benchmark_fact",
-        "topk" -> "SELECT id FROM code_benchmark_fact ORDER BY id ASC LIMIT 10")
+        "topk" -> "SELECT id, payload FROM code_benchmark_fact ORDER BY id ASC LIMIT 10")
       for ((queryName, query) <- queries) {
         var expected = Seq.empty[Row]
         withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
@@ -1150,6 +1155,7 @@ class CometIcebergNativeSuite
         val expectedNumbers = expected.map(_.get(0).asInstanceOf[Number].longValue())
         val values = queryName match {
           case "join" => Seq(expectedValue)
+          case "join_no_pruning" => Seq(2L * 64L * payloadRepeats)
           case "min" => Seq(0L)
           case "topk" => (0L until 10L)
         }
@@ -1173,9 +1179,14 @@ class CometIcebergNativeSuite
         val refreshes = scan.metrics("iceberg_runtime_predicate_refreshes").value
         assert(bytes > 0)
         if (variant == "after") {
-          assert(tasks > 0 && pruned > 0)
+          assert(tasks > 0)
+          if (queryName == "join_no_pruning") {
+            assert(pruned == 0 && initial == 0 && live == 0)
+          } else { assert(pruned > 0) }
           if (queryName == "join") { assert(initial > 0 && live == 0) }
-          else { assert(initial == 0 && live > 0 && refreshes > 0) }
+          else if (queryName != "join_no_pruning") {
+            assert(initial == 0 && live > 0 && refreshes > 0)
+          }
         } else { assert(tasks == 0 && pruned == 0) }
         val iteration = sys.env("COMET_CODE_BENCHMARK_ITERATION").toInt
         val revision = sys.env("COMET_CODE_BENCHMARK_REVISION")
