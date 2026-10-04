@@ -1327,11 +1327,8 @@ mod tests {
             SEEN_BITMAP_TRANSITION_HEADROOM_BYTES as usize
         );
         assert_eq!(
-            projected_container_payload_headroom(
-                SEEN_ARRAY_LIMIT + 1,
-                SEEN_ARRAY_LIMIT + 2
-            )
-            .unwrap(),
+            projected_container_payload_headroom(SEEN_ARRAY_LIMIT + 1, SEEN_ARRAY_LIMIT + 2)
+                .unwrap(),
             0
         );
     }
