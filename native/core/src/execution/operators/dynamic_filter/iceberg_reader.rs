@@ -328,12 +328,13 @@ mod tests {
             lit(true),
         ));
         let provider = IcebergRuntimePredicateProvider::new(Arc::clone(&dynamic), 0, "id".into());
-        assert_eq!(provider.generation(), 0);
+        let initial_generation = dynamic.snapshot_generation();
+        assert_eq!(provider.generation(), initial_generation);
         assert!(provider.snapshot().unwrap().predicate().is_none());
         dynamic
             .update(Arc::new(BinaryExpr::new(key, Operator::LtEq, lit(42_i64))))
             .unwrap();
-        assert_eq!(provider.generation(), 1);
+        assert_eq!(provider.generation(), initial_generation + 1);
         let snapshot = provider.snapshot().unwrap();
         assert_eq!(
             snapshot.predicate(),
@@ -350,6 +351,7 @@ mod tests {
             lit(true),
         ));
         let provider = IcebergRuntimePredicateProvider::new(Arc::clone(&dynamic), 0, "id".into());
+        let initial_generation = dynamic.snapshot_generation();
         let producer = Arc::clone(&dynamic);
         let writer = std::thread::spawn(move || {
             for value in 1..=1000_i64 {
@@ -366,7 +368,7 @@ mod tests {
             // A continuously changing publication may fail open. Every
             // successful snapshot must carry its expression's generation.
             if let Ok(snapshot) = provider.snapshot() {
-                if snapshot.generation() == 0 {
+                if snapshot.generation() == initial_generation {
                     assert!(snapshot.predicate().is_none());
                 } else {
                     assert_eq!(
@@ -381,7 +383,7 @@ mod tests {
         }
         writer.join().unwrap();
         let snapshot = provider.snapshot().unwrap();
-        assert_eq!(snapshot.generation(), 1000);
+        assert_eq!(snapshot.generation(), initial_generation + 1000);
         assert_eq!(
             snapshot.predicate(),
             Some(&Reference::new("id").less_than_or_equal_to(Datum::long(1000)))
