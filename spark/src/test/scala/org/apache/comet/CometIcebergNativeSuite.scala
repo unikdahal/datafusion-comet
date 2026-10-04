@@ -1364,48 +1364,97 @@ class CometIcebergNativeSuite
           } finally {
             reader.close()
           }
-          spark.read
-            .format("iceberg")
-            .option("split-size", "134217728")
-            .load(table)
-            .createOrReplaceTempView("runtime_minmax_fact")
-          for (expression <- Seq("max(hi)", "min(lo)")) {
-            val query = s"SELECT $expression FROM runtime_minmax_fact"
-            var expected = Seq.empty[Row]
-            withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-              expected = spark.sql(query).collect().toSeq
+          val catalog = spark.sessionState.catalogManager
+            .catalog("test_cat")
+            .asInstanceOf[org.apache.iceberg.spark.SparkCatalog]
+          val icebergTable = catalog
+            .loadTable(org.apache.spark.sql.connector.catalog.Identifier
+              .of(Array("db"), "runtime_minmax_test"))
+            .asInstanceOf[org.apache.iceberg.spark.source.SparkTable]
+            .table()
+          val initialSnapshot = icebergTable.currentSnapshot().snapshotId()
+          val positions = Seq(1L, 2L).map { position =>
+            org.apache.iceberg.data.CometEqualityDeletes.writePosition(
+              icebergTable,
+              icebergTable
+                .io()
+                .newOutputFile(new File(warehouseDir, s"minmax-pos-$position.parquet").toString),
+              files.head.getString(0),
+              position)
+          }
+          for (mode <- Seq(
+              "no_deletes",
+              "position_deletes",
+              "equality_deletes",
+              "both_deletes")) {
+            icebergTable.refresh()
+            if (icebergTable.currentSnapshot().snapshotId() != initialSnapshot) {
+              icebergTable.manageSnapshots().rollbackTo(initialSnapshot).commit()
             }
-            def run(enabled: Boolean): Long = {
-              var bytes = 0L
-              withSQLConf(
-                CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key ->
-                  enabled.toString) {
-                val df = spark.sql(query)
-                assert(df.collect().toSeq == expected)
-                val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
-                assert(scans.length == 1)
-                val scan = scans.head
-                assert(scan.metrics("num_splits").value == 1)
-                bytes = scan.metrics("bytes_scanned").value
-                assert(bytes > 0)
-                // Initial predicate is TRUE. Every saved row group must come
-                // from a bound published while this file is being consumed.
-                assert(scan.metrics("iceberg_runtime_row_groups_pruned_initial").value == 0)
-                if (enabled) {
-                  assert(scan.metrics("iceberg_runtime_predicate_tasks").value > 0)
-                  assert(scan.metrics("iceberg_runtime_live_pruning_tasks").value > 0)
-                  assert(scan.metrics("iceberg_runtime_predicate_refreshes").value > 0)
-                  assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value > 0)
-                } else {
-                  assert(scan.metrics("iceberg_runtime_predicate_tasks").value == 0)
-                  assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value == 0)
-                }
+            if (mode == "position_deletes" || mode == "both_deletes") {
+              val delta = icebergTable.newRowDelta()
+              positions.foreach(delta.addDeletes)
+              delta.commit()
+            }
+            if (mode == "equality_deletes" || mode == "both_deletes") {
+              val deleteSchema = icebergTable.schema().select("hi")
+              val record = org.apache.iceberg.data.GenericRecord.create(deleteSchema)
+              val deleted = if (mode == "both_deletes") numRows / 2 - 2 else numRows / 2 - 1
+              record.setField("hi", Int.box(deleted.toInt))
+              val deletion = org.apache.iceberg.data.CometEqualityDeletes.write(
+                icebergTable,
+                icebergTable
+                  .io()
+                  .newOutputFile(new File(warehouseDir, s"minmax-eq-$mode.parquet").toString),
+                null,
+                java.util.Collections.singletonList[org.apache.iceberg.data.Record](record),
+                deleteSchema)
+              icebergTable.newRowDelta().addDeletes(deletion).commit()
+            }
+            spark.catalog.refreshTable(table)
+            spark.read
+              .format("iceberg")
+              .option("split-size", "134217728")
+              .load(table)
+              .createOrReplaceTempView("runtime_minmax_fact")
+            for (expression <- Seq("max(hi)", "min(lo)")) {
+              val query = s"SELECT $expression FROM runtime_minmax_fact"
+              var expected = Seq.empty[Row]
+              withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+                expected = spark.sql(query).collect().toSeq
               }
-              bytes
+              def run(enabled: Boolean): Long = {
+                var bytes = 0L
+                withSQLConf(
+                  CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key ->
+                    enabled.toString) {
+                  val df = spark.sql(query)
+                  assert(df.collect().toSeq == expected)
+                  val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
+                  assert(scans.length == 1)
+                  val scan = scans.head
+                  assert(scan.metrics("num_splits").value == 1)
+                  bytes = scan.metrics("bytes_scanned").value
+                  assert(bytes > 0)
+                  // Initial predicate is TRUE. Every saved row group must come
+                  // from a bound published while this file is being consumed.
+                  assert(scan.metrics("iceberg_runtime_row_groups_pruned_initial").value == 0)
+                  if (enabled) {
+                    assert(scan.metrics("iceberg_runtime_predicate_tasks").value > 0)
+                    assert(scan.metrics("iceberg_runtime_live_pruning_tasks").value > 0)
+                    assert(scan.metrics("iceberg_runtime_predicate_refreshes").value > 0)
+                    assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value > 0)
+                  } else {
+                    assert(scan.metrics("iceberg_runtime_predicate_tasks").value == 0)
+                    assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value == 0)
+                  }
+                }
+                bytes
+              }
+              val fullBytes = run(false)
+              val liveBytes = run(true)
+              assert(liveBytes < fullBytes, s"$expression: live=$liveBytes full=$fullBytes")
             }
-            val fullBytes = run(false)
-            val liveBytes = run(true)
-            assert(liveBytes < fullBytes, s"$expression: live=$liveBytes full=$fullBytes")
           }
           // No non-NULL bound exists in either of these cases.
           for (condition <- Seq("hi IS NULL", "hi < 0")) {
