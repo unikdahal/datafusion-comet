@@ -3,7 +3,7 @@
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
  * regarding copyright ownership.  The ASF licenses this file
- * to You under the Apache License, Version 2.0 (the
+ * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
@@ -65,7 +65,10 @@ class PatchedCelebornCompatibilitySuite extends AnyFunSuite {
 
   test("Comet accepts the loaded Celeborn binary for native push completion") {
     val client =
-      Class.forName("org.apache.celeborn.client.ShuffleClientImpl", false, getClass.getClassLoader)
+      Class.forName(
+        "org.apache.celeborn.client.ShuffleClientImpl",
+        false,
+        getClass.getClassLoader)
     val source = client.getProtectionDomain.getCodeSource.getLocation.toString
     assert(
       source.contains("celeborn-client-spark-3-shaded_2.12-0.7.0"),
