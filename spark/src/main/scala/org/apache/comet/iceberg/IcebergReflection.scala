@@ -2344,8 +2344,8 @@ object CometIcebergNativeScanMetadata extends Logging {
    *   [[IcebergReflection.getTasks]], which for a staged scan rebuilds a flattened list of every
    *   task on each call.
    * @param runtimeStatistics
-   *   Whether a runtime filter producer in the same stage can consume this scan, so that
-   *   per-file column statistics are worth collecting for pruning before files are opened.
+   *   Whether a runtime filter producer in the same stage can consume this scan, so that per-file
+   *   column statistics are worth collecting for pruning before files are opened.
    * @return
    *   Some(metadata) if all reflection succeeds, None to trigger fallback
    */
@@ -2388,13 +2388,12 @@ object CometIcebergNativeScanMetadata extends Logging {
         catalogProperties = catalogProperties,
         catalogName = IcebergReflection.deriveCatalogName(table),
         fileFormat = FileFormats.PARQUET,
-        runtimeFileStatistics =
-          if (runtimeStatistics) {
-            IcebergReflection.runtimeFileStatistics(
-              scan,
-              tasks,
-              IcebergReflection.runtimeKeyColumns(scanSchema))
-          } else { Map.empty },
+        runtimeFileStatistics = if (runtimeStatistics) {
+          IcebergReflection.runtimeFileStatistics(
+            scan,
+            tasks,
+            IcebergReflection.runtimeKeyColumns(scanSchema))
+        } else { Map.empty },
         runtimeStatisticsRequested = runtimeStatistics)
     }
   }
