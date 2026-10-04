@@ -38,7 +38,6 @@ use datafusion_comet_common::{cast_and_stamp_schema, SparkError};
 use futures::{Stream, StreamExt};
 use roaring::RoaringTreemap;
 use std::{
-    collections::{HashMap, HashSet},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -352,21 +351,26 @@ fn estimate_seen_batch_headroom(
     seen: &RoaringTreemap,
     ids: &[u64],
 ) -> Result<usize, DataFusionError> {
-    let mut containers: HashMap<u64, u64> = HashMap::new();
-    let mut partitions: HashSet<u32> = HashSet::new();
+    debug_assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
 
-    for &id in ids {
-        let container_key = id >> 16;
-        *containers.entry(container_key).or_default() += 1;
-        partitions.insert((id >> 32) as u32);
-    }
+    let mut headroom = 0usize;
+    let mut last_partition = None;
+    let mut index = 0usize;
 
-    let mut headroom = partitions
-        .len()
-        .checked_mul(SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES)
-        .ok_or_else(seen_memory_overflow)?;
+    while index < ids.len() {
+        let container_key = ids[index] >> 16;
+        let partition = (ids[index] >> 32) as u32;
+        if last_partition != Some(partition) {
+            headroom = checked_seen_add(headroom, SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES)?;
+            last_partition = Some(partition);
+        }
 
-    for (container_key, incoming) in containers {
+        let mut end_index = index + 1;
+        while end_index < ids.len() && (ids[end_index] >> 16) == container_key {
+            end_index += 1;
+        }
+
+        let incoming = u64::try_from(end_index - index).map_err(|_| seen_memory_overflow())?;
         let start = container_key << 16;
         let end = start | u16::MAX as u64;
         let existing = seen.range_cardinality(start..=end);
@@ -379,6 +383,7 @@ fn estimate_seen_batch_headroom(
             headroom,
             projected_container_payload_upper_bound(projected)?,
         )?;
+        index = end_index;
     }
 
     Ok(headroom)
@@ -556,9 +561,9 @@ fn check_cardinality(
     }
 
     // Validate all duplicates before asking the memory pool for more space. This preserves Spark's
-    // cardinality-error precedence both across batches and within the current batch.
+    // cardinality-error precedence across batches. Sorting the batch-local ids then catches
+    // duplicates within the current batch without allocating another hash table.
     let mut ids = Vec::with_capacity(matched_count);
-    let mut batch_seen = HashSet::with_capacity(matched_count);
     for i in matched_mask.values().set_indices() {
         // Spark's row-id read treats a null long slot as zero.
         let id = if row_ids.is_null(i) {
@@ -569,15 +574,19 @@ fn check_cardinality(
 
         // Casting is a bijection over i64 bit patterns, so negative row ids remain distinct.
         let id = id as u64;
-        if seen.contains(id) || !batch_seen.insert(id) {
+        if seen.contains(id) {
             return Err(cardinality_violation());
         }
         ids.push(id);
     }
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(cardinality_violation());
+    }
 
     // Reserve conservative growth headroom before roaring is allowed to allocate. Once insertion
     // completes, shrink the reservation back to the backing-capacity estimate.
-    reserve_seen_batch(seen, &ids, reservation)?;
+    reserve_seen_batch(seen, &ids, reservation)?
     for id in ids {
         debug_assert!(
             seen.insert(id),
