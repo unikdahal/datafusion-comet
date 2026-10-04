@@ -63,17 +63,19 @@ jobs:
             sha="$(git rev-parse HEAD)"
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "$sha" > comet-commit.txt
       - uses: ./.github/actions/setup-builder
         with:
           rust-version: stable
           jdk-version: '17'
       - name: Build the release library and Spark 3.5 jar
+        env:
+          COMET_COMMIT: ${{ steps.commit.outputs.sha }}
         run: |
           cd native && cargo build --release --locked && cd ..
           ./mvnw -B install -Prelease -DskipTests -Pspark-3.5
+          # Written after the Maven build so the license check never sees it.
           mkdir -p dist
-          cp comet-commit.txt dist/
+          echo "$COMET_COMMIT" > dist/comet-commit.txt
           for jar in spark/target/comet-spark-spark3.5_2.12-*.jar; do
             case "$jar" in
               *-sources.jar|*-tests.jar|*/original-*) ;;
