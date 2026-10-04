@@ -358,6 +358,75 @@ fn projected_container_payload_headroom(
     usize::try_from(bytes).map_err(|_| seen_memory_overflow())
 }
 
+fn estimate_batch_roaring_peak(ids: &[u64]) -> Result<usize, DataFusionError> {
+    debug_assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let mut total = SEEN_FIXED_BYTES;
+    let mut last_partition = None;
+    let mut index = 0usize;
+
+    while index < ids.len() {
+        let container_key = ids[index] >> 16;
+        let partition = (ids[index] >> 32) as u32;
+        if last_partition != Some(partition) {
+            total = checked_seen_add(total, SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES)?;
+            last_partition = Some(partition);
+        }
+
+        let mut end_index = index + 1;
+        while end_index < ids.len() && (ids[end_index] >> 16) == container_key {
+            end_index += 1;
+        }
+
+        let cardinality = u64::try_from(end_index - index).map_err(|_| seen_memory_overflow())?;
+        total = checked_seen_add(total, SEEN_CONTAINER_OVERHEAD_BYTES)?;
+        total = checked_seen_add(
+            total,
+            projected_container_payload_headroom(0, cardinality)?,
+        )?;
+        index = end_index;
+    }
+
+    Ok(total)
+}
+
+fn seen_contains_any_sorted(seen: &RoaringTreemap, ids: &[u64]) -> bool {
+    debug_assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let mut bitmaps = seen.bitmaps();
+    let mut current = bitmaps.next();
+    let mut index = 0usize;
+
+    while index < ids.len() {
+        let partition = (ids[index] >> 32) as u32;
+        let mut end_index = index + 1;
+        while end_index < ids.len() && (ids[end_index] >> 32) as u32 == partition {
+            end_index += 1;
+        }
+
+        while current
+            .as_ref()
+            .is_some_and(|(existing_partition, _)| *existing_partition < partition)
+        {
+            current = bitmaps.next();
+        }
+
+        if let Some((existing_partition, bitmap)) = current.as_ref() {
+            if *existing_partition == partition
+                && ids[index..end_index]
+                    .iter()
+                    .any(|id| bitmap.contains(*id as u32))
+            {
+                return true;
+            }
+        }
+
+        index = end_index;
+    }
+
+    false
+}
+
 fn estimate_seen_batch_headroom(
     seen: &RoaringTreemap,
     ids: &[u64],
@@ -512,6 +581,7 @@ fn cardinality_violation() -> DataFusionError {
 fn reserve_seen_batch(
     seen: &RoaringTreemap,
     ids: &[u64],
+    ids_capacity: usize,
     reservation: &mut MemoryReservation,
 ) -> Result<(), DataFusionError> {
     if ids.is_empty() {
@@ -519,9 +589,15 @@ fn reserve_seen_batch(
     }
 
     let current_bytes = estimate_seen_memory_size(seen)?;
-    let headroom = estimate_seen_batch_headroom(seen, ids)?;
+    let growth_headroom = estimate_seen_batch_headroom(seen, ids)?;
+    let batch_roaring_peak = estimate_batch_roaring_peak(ids)?;
+    let ids_bytes = ids_capacity
+        .checked_mul(std::mem::size_of::<u64>())
+        .ok_or_else(seen_memory_overflow)?;
     let target = current_bytes
-        .checked_add(headroom)
+        .checked_add(growth_headroom)
+        .and_then(|bytes| bytes.checked_add(batch_roaring_peak))
+        .and_then(|bytes| bytes.checked_add(ids_bytes))
         .ok_or_else(seen_memory_overflow)?;
     if target > reservation.size() {
         reservation.try_grow(target - reservation.size())?;
@@ -572,8 +648,8 @@ fn check_cardinality(
     }
 
     // Validate all duplicates before asking the memory pool for more space. This preserves Spark's
-    // cardinality-error precedence across batches. Sorting the batch-local ids then catches
-    // duplicates within the current batch without allocating another hash table.
+    // cardinality-error precedence. Sorting lets us detect batch-local duplicates and probe the
+    // existing treemap partition-by-partition instead of doing one BTree lookup per row.
     let mut ids = Vec::with_capacity(matched_count);
     for i in matched_mask.values().set_indices() {
         // Spark's row-id read treats a null long slot as zero.
@@ -584,26 +660,24 @@ fn check_cardinality(
         };
 
         // Casting is a bijection over i64 bit patterns, so negative row ids remain distinct.
-        let id = id as u64;
-        if seen.contains(id) {
-            return Err(cardinality_violation());
-        }
-        ids.push(id);
+        ids.push(id as u64);
     }
     ids.sort_unstable();
-    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) || seen_contains_any_sorted(seen, &ids) {
         return Err(cardinality_violation());
     }
 
-    // Reserve conservative growth headroom before roaring is allowed to allocate. Once insertion
-    // completes, shrink the reservation back to the backing-capacity estimate.
-    reserve_seen_batch(seen, &ids, reservation)?;
-    for id in ids {
-        debug_assert!(
-            seen.insert(id),
-            "duplicates were validated before admission"
-        );
-    }
+    // Reserve the retained-set growth plus the temporary sorted-id buffer and batch-local roaring
+    // state before constructing that state. The owned union then moves whole bitmap partitions
+    // where possible instead of repeating a treemap lookup for every row.
+    let ids_capacity = ids.capacity();
+    reserve_seen_batch(seen, &ids, ids_capacity, reservation)?;
+    let batch_seen = RoaringTreemap::from_sorted_iter(ids.into_iter()).map_err(|_| {
+        DataFusionError::Internal(
+            "MergeRows: sorted cardinality ids unexpectedly failed roaring construction".to_string(),
+        )
+    })?;
+    *seen |= batch_seen;
     sync_seen_reservation(seen, reservation)
 }
 

@@ -106,6 +106,68 @@ fn projected_container_payload_headroom(
     usize::try_from(bytes).unwrap()
 }
 
+fn batch_roaring_peak(ids: &[u64]) -> usize {
+    let mut total = ROARING_FIXED_BYTES;
+    let mut last_partition = None;
+    let mut index = 0usize;
+
+    while index < ids.len() {
+        let container_key = ids[index] >> 16;
+        let partition = (ids[index] >> 32) as u32;
+        if last_partition != Some(partition) {
+            total += ROARING_PARTITION_OVERHEAD_BYTES;
+            last_partition = Some(partition);
+        }
+
+        let mut end_index = index + 1;
+        while end_index < ids.len() && (ids[end_index] >> 16) == container_key {
+            end_index += 1;
+        }
+
+        let cardinality = (end_index - index) as u64;
+        total += ROARING_CONTAINER_OVERHEAD_BYTES
+            + projected_container_payload_headroom(0, cardinality);
+        index = end_index;
+    }
+
+    total
+}
+
+fn seen_contains_any_sorted(seen: &RoaringTreemap, ids: &[u64]) -> bool {
+    let mut bitmaps = seen.bitmaps();
+    let mut current = bitmaps.next();
+    let mut index = 0usize;
+
+    while index < ids.len() {
+        let partition = (ids[index] >> 32) as u32;
+        let mut end_index = index + 1;
+        while end_index < ids.len() && (ids[end_index] >> 32) as u32 == partition {
+            end_index += 1;
+        }
+
+        while current
+            .as_ref()
+            .is_some_and(|(existing_partition, _)| *existing_partition < partition)
+        {
+            current = bitmaps.next();
+        }
+
+        if let Some((existing_partition, bitmap)) = current.as_ref() {
+            if *existing_partition == partition
+                && ids[index..end_index]
+                    .iter()
+                    .any(|id| bitmap.contains(*id as u32))
+            {
+                return true;
+            }
+        }
+
+        index = end_index;
+    }
+
+    false
+}
+
 fn roaring_batch_headroom(seen: &RoaringTreemap, ids: &[u64]) -> usize {
     let mut headroom = 0usize;
     let mut last_partition = None;
@@ -166,20 +228,21 @@ fn roaring_run(layout: Layout) -> (Duration, usize, usize) {
         let mut ids = Vec::with_capacity(batch_end - batch_start);
 
         for index in batch_start..batch_end {
-            let id = row_id(layout, index);
-            assert!(!seen.contains(id));
-            ids.push(id);
+            ids.push(row_id(layout, index));
         }
         ids.sort_unstable();
         assert!(ids.windows(2).all(|pair| pair[0] != pair[1]));
+        assert!(!seen_contains_any_sorted(&seen, &ids));
 
         let current = roaring_reserved_bytes(&seen);
-        let admitted = current + roaring_batch_headroom(&seen, &ids);
+        let admitted = current
+            + roaring_batch_headroom(&seen, &ids)
+            + batch_roaring_peak(&ids)
+            + ids.capacity() * std::mem::size_of::<u64>();
         peak_admitted = peak_admitted.max(admitted);
 
-        for id in ids {
-            assert!(seen.insert(id));
-        }
+        let batch_seen = RoaringTreemap::from_sorted_iter(ids.into_iter()).unwrap();
+        seen |= batch_seen;
 
         retained = roaring_reserved_bytes(&seen);
         assert!(
