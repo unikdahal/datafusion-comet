@@ -77,8 +77,9 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
         .invoke(dataFile)
         .asInstanceOf[java.util.Map[Integer, java.nio.ByteBuffer]]
       if (values != null) values.asScala.foreach { case (id, value) =>
-        if (fieldIds.contains(id.intValue()))
+        if (fieldIds.contains(id.intValue())) {
           put(id, com.google.protobuf.ByteString.copyFrom(value.duplicate()))
+        }
       }
     }
     counts("valueCounts", (id, value) => { metrics.putValueCounts(id, value); () })
