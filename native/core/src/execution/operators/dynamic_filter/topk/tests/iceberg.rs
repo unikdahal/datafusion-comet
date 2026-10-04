@@ -17,8 +17,10 @@
 
 use super::*;
 use crate::execution::operators::IcebergScanExec;
+use datafusion::common::ScalarValue;
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::expressions::BinaryExpr;
+use datafusion::physical_expr::expressions::Literal;
 use iceberg::scan::FileScanTask;
 use iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
 
@@ -98,7 +100,15 @@ fn iceberg_topk_attaches_with_fresh_execution_local_thresholds() {
                 assert!(second.reader_filter_attached);
                 let second = produced_filter(&second.sort);
                 assert!(!Arc::ptr_eq(&first, &second));
-                assert_eq!(second.current().unwrap(), lit(true));
+                assert_eq!(
+                    second
+                        .current()
+                        .unwrap()
+                        .downcast_ref::<Literal>()
+                        .unwrap()
+                        .value(),
+                    &ScalarValue::Boolean(Some(true))
+                );
             }
         }
     }
