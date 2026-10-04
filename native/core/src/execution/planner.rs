@@ -4319,14 +4319,14 @@ fn parse_iceberg_file_metrics(
             })
             .collect()
     };
-    iceberg::scan::FileScanTaskMetrics {
-        record_count: metrics.record_count,
-        value_counts: metrics.value_counts.clone(),
-        null_value_counts: metrics.null_value_counts.clone(),
-        nan_value_counts: metrics.nan_value_counts.clone(),
-        lower_bounds: bounds(&metrics.lower_bounds),
-        upper_bounds: bounds(&metrics.upper_bounds),
-    }
+    iceberg::scan::FileScanTaskMetrics::new(
+        metrics.record_count,
+        metrics.value_counts.clone(),
+        metrics.null_value_counts.clone(),
+        metrics.nan_value_counts.clone(),
+        bounds(&metrics.lower_bounds),
+        bounds(&metrics.upper_bounds),
+    )
 }
 
 /// Converts protobuf FileScanTasks from Scala into iceberg-rust FileScanTask objects.
@@ -5093,16 +5093,16 @@ mod tests {
             ..Default::default()
         };
         let metrics = super::parse_iceberg_file_metrics(&proto, &schema);
-        assert_eq!(metrics.record_count, Some(20));
+        assert_eq!(metrics.record_count(), Some(20));
         assert_eq!(
-            metrics.lower_bounds,
-            std::collections::HashMap::from([(1, Datum::int(-10)), (2, Datum::long(10))])
+            metrics.lower_bounds(),
+            &std::collections::HashMap::from([(1, Datum::int(-10)), (2, Datum::long(10))])
         );
         assert_eq!(
-            metrics.upper_bounds,
-            std::collections::HashMap::from([(1, Datum::int(30))])
+            metrics.upper_bounds(),
+            &std::collections::HashMap::from([(1, Datum::int(30))])
         );
-        assert_eq!(metrics.null_value_counts.get(&1), Some(&2));
+        assert_eq!(metrics.null_value_counts().get(&1), Some(&2));
         let common = spark_operator::IcebergScanCommon {
             schema_pool: vec![serde_json::to_string(&schema).unwrap()],
             project_field_ids_pool: vec![spark_operator::ProjectFieldIdList { field_ids: vec![1] }],
@@ -5117,11 +5117,12 @@ mod tests {
         };
         let tasks =
             super::parse_file_scan_tasks_from_common(&common, &[task.clone(), task]).unwrap();
-        assert!(Arc::ptr_eq(
+        // Splits of one file share a single decoded statistics object.
+        assert!(std::ptr::eq(
             tasks[0].file_metrics().unwrap(),
             tasks[1].file_metrics().unwrap()
         ));
-        assert_eq!(tasks[0].file_metrics().unwrap().record_count, Some(20));
+        assert_eq!(tasks[0].file_metrics().unwrap().record_count(), Some(20));
     }
 
     mod empty_native_scan;
