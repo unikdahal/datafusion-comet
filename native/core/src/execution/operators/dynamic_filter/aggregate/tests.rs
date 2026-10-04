@@ -19,9 +19,11 @@ use super::*;
 
 use crate::execution::operators::IcebergScanExec;
 use arrow::datatypes::{Field, Schema};
+use datafusion::common::ScalarValue;
 use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::aggregate::AggregateExprBuilder;
+use datafusion::physical_expr::expressions::Literal;
 use datafusion::physical_expr::expressions::{BinaryExpr, CastExpr};
 use datafusion::physical_plan::aggregates::PhysicalGroupBy;
 use datafusion::physical_plan::empty::EmptyExec;
@@ -132,7 +134,15 @@ fn integer_minmax_attaches_and_recreates_producer_state() {
             let fresh = fresh[0]
                 .downcast_ref::<DynamicFilterPhysicalExpr>()
                 .unwrap();
-            assert_eq!(fresh.current().unwrap(), lit(true));
+            assert_eq!(
+                fresh
+                    .current()
+                    .unwrap()
+                    .downcast_ref::<Literal>()
+                    .unwrap()
+                    .value(),
+                &ScalarValue::Boolean(Some(true))
+            );
             assert!(producer.snapshot_generation() > fresh.snapshot_generation());
             assert_eq!(first.input().name(), "IcebergScanExec");
             let reset = Arc::new(wrapper).reset_state().unwrap();
@@ -143,8 +153,11 @@ fn integer_minmax_attaches_and_recreates_producer_state() {
                     .downcast_ref::<DynamicFilterPhysicalExpr>()
                     .unwrap()
                     .current()
-                    .unwrap(),
-                lit(true)
+                    .unwrap()
+                    .downcast_ref::<Literal>()
+                    .unwrap()
+                    .value(),
+                &ScalarValue::Boolean(Some(true))
             );
         }
     }
