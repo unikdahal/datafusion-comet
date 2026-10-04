@@ -126,8 +126,8 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ./mvnw -B spotless:apply -Pspark-$SPARK_PROFILE
+          # Keep the formatted sources so the suite still runs; fail at the end.
           git diff -- spark common > scala-format.patch
-          git checkout -- spark common
       - name: Native Iceberg suite, runtime producers and deletes
         env:
           SPARK_PROFILE: ${{ matrix.spark }}
