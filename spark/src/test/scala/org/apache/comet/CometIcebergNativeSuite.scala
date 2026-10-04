@@ -1140,6 +1140,18 @@ class CometIcebergNativeSuite
             val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
             assert(scans.length == 1, s"expected one native Iceberg scan, got ${scans.length}")
             val scan = scans.head
+            // Completed hash-join bounds should prune at task startup. This
+            // fixture must not attribute those savings to live refreshes.
+            assert(
+              scan.metrics("iceberg_runtime_row_groups_pruned_initial").value ==
+                scan.metrics("iceberg_runtime_row_groups_pruned").value)
+            assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value == 0)
+            assert(scan.metrics("iceberg_runtime_predicate_refreshes").value == 0)
+            if (dynamicFilterEnabled) {
+              assert(scan.metrics("iceberg_runtime_row_groups_considered").value > 0)
+            } else {
+              assert(scan.metrics("iceberg_runtime_row_groups_considered").value == 0)
+            }
             result = Some(
               RunResult(
                 rows.head.getLong(0),

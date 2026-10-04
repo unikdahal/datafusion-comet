@@ -55,17 +55,36 @@ impl IcebergRuntimePredicateProvider {
 }
 
 impl RuntimePredicateProvider for IcebergRuntimePredicateProvider {
+    fn generation(&self) -> u64 {
+        self.predicate.snapshot_generation()
+    }
+
     fn snapshot(&self) -> IcebergResult<RuntimePredicateSnapshot> {
-        let generation = self.predicate.snapshot_generation();
-        let current = self.predicate.current().map_err(|error| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("Failed to snapshot runtime predicate: {error}"),
-            )
-        })?;
-        Ok(RuntimePredicateSnapshot::new(
-            extract_iceberg_predicate(&current, self.probe_column_index, &self.iceberg_field_name),
-            generation,
+        // DataFusion exposes the expression and generation through separate
+        // reads. Only publish a snapshot bracketed by a stable generation.
+        // Bound retries let a busy producer fail open without blocking a scan.
+        for _ in 0..3 {
+            let generation = self.generation();
+            let current = self.predicate.current().map_err(|error| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Failed to snapshot runtime predicate: {error}"),
+                )
+            })?;
+            if self.generation() == generation {
+                return Ok(RuntimePredicateSnapshot::new(
+                    extract_iceberg_predicate(
+                        &current,
+                        self.probe_column_index,
+                        &self.iceberg_field_name,
+                    ),
+                    generation,
+                ));
+            }
+        }
+        Err(Error::new(
+            ErrorKind::Unexpected,
+            "Runtime predicate changed while taking its snapshot",
         ))
     }
 }
@@ -309,16 +328,64 @@ mod tests {
             lit(true),
         ));
         let provider = IcebergRuntimePredicateProvider::new(Arc::clone(&dynamic), 0, "id".into());
+        assert_eq!(provider.generation(), 0);
         assert!(provider.snapshot().unwrap().predicate().is_none());
         dynamic
             .update(Arc::new(BinaryExpr::new(key, Operator::LtEq, lit(42_i64))))
             .unwrap();
+        assert_eq!(provider.generation(), 1);
         let snapshot = provider.snapshot().unwrap();
         assert_eq!(
             snapshot.predicate(),
             Some(&Reference::new("id").less_than_or_equal_to(Datum::long(42)))
         );
         assert_eq!(snapshot.generation(), dynamic.snapshot_generation());
+    }
+
+    #[test]
+    fn provider_pairs_bounds_with_their_publication_generation() {
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::clone(&key)],
+            lit(true),
+        ));
+        let provider = IcebergRuntimePredicateProvider::new(Arc::clone(&dynamic), 0, "id".into());
+        let producer = Arc::clone(&dynamic);
+        let writer = std::thread::spawn(move || {
+            for value in 1..=1000_i64 {
+                producer
+                    .update(Arc::new(BinaryExpr::new(
+                        Arc::clone(&key),
+                        Operator::LtEq,
+                        lit(value),
+                    )))
+                    .unwrap();
+            }
+        });
+        for _ in 0..1000 {
+            // A continuously changing publication may fail open. Every
+            // successful snapshot must carry its expression's generation.
+            if let Ok(snapshot) = provider.snapshot() {
+                if snapshot.generation() == 0 {
+                    assert!(snapshot.predicate().is_none());
+                } else {
+                    assert_eq!(
+                        snapshot.predicate(),
+                        Some(
+                            &Reference::new("id")
+                                .less_than_or_equal_to(Datum::long(snapshot.generation() as i64,))
+                        )
+                    );
+                }
+            }
+        }
+        writer.join().unwrap();
+        let snapshot = provider.snapshot().unwrap();
+        assert_eq!(snapshot.generation(), 1000);
+        assert_eq!(
+            snapshot.predicate(),
+            Some(&Reference::new("id").less_than_or_equal_to(Datum::long(1000)))
+        );
     }
 
     #[tokio::test]

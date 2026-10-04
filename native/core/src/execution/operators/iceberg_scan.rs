@@ -323,9 +323,20 @@ impl IcebergScanExec {
             bytes_scanned: metrics.bytes_scanned,
             runtime_predicate_tasks: metrics.runtime_predicate_tasks,
             runtime_row_groups_pruned: metrics.runtime_row_groups_pruned,
+            runtime_live_pruning_tasks: metrics.runtime_live_pruning_tasks,
+            runtime_predicate_refreshes: metrics.runtime_predicate_refreshes,
+            runtime_row_groups_considered: metrics.runtime_row_groups_considered,
+            runtime_row_groups_pruned_initial: metrics.runtime_row_groups_pruned_initial,
+            runtime_row_groups_pruned_live: metrics.runtime_row_groups_pruned_live,
+
             last_reported_bytes: 0,
             last_reported_runtime_predicate_tasks: 0,
             last_reported_runtime_row_groups_pruned: 0,
+            last_reported_runtime_live_pruning_tasks: 0,
+            last_reported_runtime_predicate_refreshes: 0,
+            last_reported_runtime_row_groups_considered: 0,
+            last_reported_runtime_row_groups_pruned_initial: 0,
+            last_reported_runtime_row_groups_pruned_live: 0,
         };
 
         Ok(Box::pin(wrapped_stream))
@@ -474,6 +485,11 @@ struct IcebergScanMetrics {
     runtime_predicate_tasks: Count,
     /// Number of row groups skipped by runtime predicate statistics
     runtime_row_groups_pruned: Count,
+    runtime_live_pruning_tasks: Count,
+    runtime_predicate_refreshes: Count,
+    runtime_row_groups_considered: Count,
+    runtime_row_groups_pruned_initial: Count,
+    runtime_row_groups_pruned_live: Count,
 }
 
 impl IcebergScanMetrics {
@@ -486,6 +502,16 @@ impl IcebergScanMetrics {
                 .counter("iceberg_runtime_predicate_tasks", 0),
             runtime_row_groups_pruned: MetricBuilder::new(metrics)
                 .counter("iceberg_runtime_row_groups_pruned", 0),
+            runtime_live_pruning_tasks: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_live_pruning_tasks", 0),
+            runtime_predicate_refreshes: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_predicate_refreshes", 0),
+            runtime_row_groups_considered: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_considered", 0),
+            runtime_row_groups_pruned_initial: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_pruned_initial", 0),
+            runtime_row_groups_pruned_live: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_pruned_live", 0),
         }
     }
 }
@@ -511,8 +537,19 @@ struct IcebergStreamWrapper<S> {
     last_reported_bytes: u64,
     runtime_predicate_tasks: Count,
     runtime_row_groups_pruned: Count,
+    runtime_live_pruning_tasks: Count,
+    runtime_predicate_refreshes: Count,
+    runtime_row_groups_considered: Count,
+    runtime_row_groups_pruned_initial: Count,
+    runtime_row_groups_pruned_live: Count,
+
     last_reported_runtime_predicate_tasks: u64,
     last_reported_runtime_row_groups_pruned: u64,
+    last_reported_runtime_live_pruning_tasks: u64,
+    last_reported_runtime_predicate_refreshes: u64,
+    last_reported_runtime_row_groups_considered: u64,
+    last_reported_runtime_row_groups_pruned_initial: u64,
+    last_reported_runtime_row_groups_pruned_live: u64,
 }
 
 /// Cached projection state: file schema, adapter, and pre-built projection expressions.
@@ -598,6 +635,41 @@ where
         if pruned_delta > 0 {
             self.runtime_row_groups_pruned.add(pruned_delta as usize);
             self.last_reported_runtime_row_groups_pruned = current_pruned;
+        }
+
+        let current = self.scan_metrics.runtime_live_pruning_tasks();
+        let delta = current.saturating_sub(self.last_reported_runtime_live_pruning_tasks);
+        if delta > 0 {
+            self.runtime_live_pruning_tasks.add(delta as usize);
+            self.last_reported_runtime_live_pruning_tasks = current;
+        }
+
+        let current = self.scan_metrics.runtime_predicate_refreshes();
+        let delta = current.saturating_sub(self.last_reported_runtime_predicate_refreshes);
+        if delta > 0 {
+            self.runtime_predicate_refreshes.add(delta as usize);
+            self.last_reported_runtime_predicate_refreshes = current;
+        }
+
+        let current = self.scan_metrics.runtime_row_groups_considered();
+        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_considered);
+        if delta > 0 {
+            self.runtime_row_groups_considered.add(delta as usize);
+            self.last_reported_runtime_row_groups_considered = current;
+        }
+
+        let current = self.scan_metrics.runtime_row_groups_pruned_initial();
+        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_pruned_initial);
+        if delta > 0 {
+            self.runtime_row_groups_pruned_initial.add(delta as usize);
+            self.last_reported_runtime_row_groups_pruned_initial = current;
+        }
+
+        let current = self.scan_metrics.runtime_row_groups_pruned_live();
+        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_pruned_live);
+        if delta > 0 {
+            self.runtime_row_groups_pruned_live.add(delta as usize);
+            self.last_reported_runtime_row_groups_pruned_live = current;
         }
 
         self.baseline_metrics.record_poll(result)
