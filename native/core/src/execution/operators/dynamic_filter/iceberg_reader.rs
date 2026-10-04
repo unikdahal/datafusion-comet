@@ -373,10 +373,9 @@ mod tests {
                 } else {
                     assert_eq!(
                         snapshot.predicate(),
-                        Some(
-                            &Reference::new("id")
-                                .less_than_or_equal_to(Datum::long(snapshot.generation() as i64,))
-                        )
+                        Some(&Reference::new("id").less_than_or_equal_to(Datum::long(
+                            (snapshot.generation() - initial_generation) as i64
+                        )))
                     );
                 }
             }
