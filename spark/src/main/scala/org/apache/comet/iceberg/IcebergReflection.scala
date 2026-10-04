@@ -477,7 +477,7 @@ object IcebergReflection extends Logging {
         while (iterator.hasNext) {
           val file = fileMethod.invoke(iterator.next())
           extractFileLocation(file).filter(selected.contains).foreach { path =>
-            result += path -> file
+            val _ = result += path -> file
           }
         }
         result.result()
