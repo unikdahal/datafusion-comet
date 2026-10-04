@@ -32,9 +32,14 @@ def tree(ref, path):
     return subprocess.check_output(["git", "rev-parse", f"{ref}:{path}"], text=True).strip()
 
 
-# This one external fixture is explicitly gated by #[cfg(test)] in join.rs.
-# Its parent module and every other native input still must be identical.
-TEST_FIXTURE = "native/core/src/execution/operators/dynamic_filter/join/tests.rs"
+# These external fixtures are behind cfg(test) in their enclosing modules.
+# Every other native input and the enclosing modules must remain identical.
+TEST_FIXTURES = {
+    "native/core/src/execution/operators/dynamic_filter/join/tests.rs":
+        "native/core/src/execution/operators/dynamic_filter/join.rs",
+    "native/core/src/execution/operators/dynamic_filter/topk/tests/iceberg.rs":
+        "native/core/src/execution/operators/dynamic_filter/topk.rs",
+}
 
 
 def native_matches(ref):
@@ -43,12 +48,15 @@ def native_matches(ref):
     changed = subprocess.check_output([
         "git", "diff", "--name-only", ref, "HEAD", "--", "native"
     ], text=True).splitlines()
-    if changed != [TEST_FIXTURE]:
+    if not changed or not set(changed).issubset(TEST_FIXTURES):
         return False
-    parent = subprocess.check_output([
-        "git", "show", "HEAD:native/core/src/execution/operators/dynamic_filter/join.rs"
-    ], text=True)
-    return bool(re.search(r"#\[cfg\(test\)\]\s+mod tests;", parent))
+    for fixture in changed:
+        parent = subprocess.check_output([
+            "git", "show", f"HEAD:{TEST_FIXTURES[fixture]}"
+        ], text=True)
+        if not re.search(r"#\[cfg\(test\)\]\s+mod tests;", parent):
+            return False
+    return True
 
 
 paths = ("rust-toolchain.toml", ".github/actions/setup-builder/action.yaml")
@@ -74,7 +82,11 @@ with urllib.request.urlopen(request, timeout=30) as response:
     artifacts = json.load(response)["artifacts"]
 for artifact in artifacts:
     run = artifact["workflow_run"]
-    if artifact["expired"] or run["head_branch"] != "feat/iceberg-runtime-pruning":
+    if artifact["expired"] or run["head_branch"] not in (
+        "feat/iceberg-runtime-pruning", "feat/iceberg-live-runtime-pruning",
+        "feat/iceberg-minmax-runtime-filter", "feat/iceberg-topk-runtime-filter",
+        "feat/iceberg-adaptive-benchmark",
+    ):
         continue
     try:
         previous = tuple(tree(run["head_sha"], path) for path in paths)
@@ -84,7 +96,7 @@ for artifact in artifacts:
         continue
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write(f"artifact_id={artifact['id']}\nrun_id={run['id']}\n")
-    print(f"Reusing release artifact {artifact['id']} from {run['head_sha']}; release inputs are identical (only the cfg(test) join fixture may differ).")
+    print(f"Reusing release artifact {artifact['id']} from {run['head_sha']}; release inputs are identical (only explicitly cfg(test) fixtures may differ).")
     break
 else:
     print("No release artifact matches the release inputs; building from source.")

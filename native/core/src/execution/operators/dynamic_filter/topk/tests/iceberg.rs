@@ -17,12 +17,12 @@
 
 use super::*;
 use crate::execution::operators::IcebergScanExec;
+use ::iceberg::scan::FileScanTask;
+use ::iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::expressions::BinaryExpr;
 use datafusion::physical_expr::expressions::Literal;
-use iceberg::scan::FileScanTask;
-use iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
 
 fn scan(data_type: DataType) -> Arc<dyn ExecutionPlan> {
     let iceberg_type = match data_type {
