@@ -380,9 +380,7 @@ case class CometScanRule(session: SparkSession)
     Some(CometScanExec(scanExec, session))
   }
 
-  private def transformV2Scan(
-      scanExec: BatchScanExec,
-      runtimeFilterInput: Boolean = false): SparkPlan = {
+  private def transformV2Scan(scanExec: BatchScanExec, runtimeFilterInput: Boolean): SparkPlan = {
 
     // Give any optional, out-of-tree scan contrib (e.g. Lance) first crack at this V2 scan. On a
     // default build no contrib is registered, so this returns None and we proceed with Comet's
