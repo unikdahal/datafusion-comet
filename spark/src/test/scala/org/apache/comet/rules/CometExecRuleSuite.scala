@@ -364,6 +364,31 @@ class CometExecRuleSuite extends CometTestBase {
     }
   }
 
+  test("CometExecRule carries stale shuffle refresh suppression through conversion") {
+    withAdaptiveAggregateConf {
+      val plan = createSparkPlan(
+        spark,
+        "SELECT id % 3 AS k, SUM(id) AS total FROM range(0, 100, 1, 2) GROUP BY id % 3")
+      plan.setTagValue(CometExecRule.SKIP_STALE_SHUFFLE_REFRESH_TAG, ())
+
+      val aggregate = applyCometExecRule(plan).asInstanceOf[CometHashAggregateExec]
+      assert(
+        aggregate.getTagValue(CometExecRule.SKIP_STALE_SHUFFLE_REFRESH_TAG).isDefined,
+        aggregate)
+      assert(nativeLeaves(aggregate.nativeOp).map(_.getOpStructCase.name) == Seq("SCAN"))
+
+      val shuffle = aggregate.child.asInstanceOf[CometShuffleExchangeExec]
+      val reused = aggregate
+        .withNewChildren(Seq(ShuffleQueryStageExec(0, shuffle, shuffle.canonicalized)))
+        .asInstanceOf[CometHashAggregateExec]
+      val result = applyCometExecRule(reused).asInstanceOf[CometHashAggregateExec]
+
+      assert(result.nativeOp eq reused.nativeOp)
+      assert(serializedLeafKinds(result) == Seq("SCAN"))
+      assert(result.child.isInstanceOf[ShuffleQueryStageExec])
+    }
+  }
+
   test("CometExecRule keeps an AQE-reused aggregate's Scan with shuffle direct read off") {
     withAdaptiveAggregateConf {
       withSQLConf(CometConf.COMET_SHUFFLE_DIRECT_READ_ENABLED.key -> "false") {
