@@ -4365,6 +4365,10 @@ fn parse_file_scan_tasks_from_common(
 
     let unified_partition_type_arc = Arc::new(unified_partition_type);
 
+    let mut file_metrics_cache: std::collections::HashMap<
+        (u32, u32),
+        Arc<iceberg::scan::FileScanTaskMetrics>,
+    > = std::collections::HashMap::new();
     let results: Result<Vec<_>, _> = proto_tasks
         .iter()
         .map(|proto_task| {
@@ -4477,6 +4481,24 @@ fn parse_file_scan_tasks_from_common(
                 None
             };
 
+            let file_metrics = if let Some(idx) = proto_task.file_metrics_idx {
+                let metrics = proto_common
+                    .file_metrics_pool
+                    .get(idx as usize)
+                    .ok_or_else(|| {
+                        ExecutionError::GeneralError(format!("Invalid file_metrics_idx: {idx}"))
+                    })?;
+                Some(Arc::clone(
+                    file_metrics_cache
+                        .entry((idx, proto_task.schema_idx))
+                        .or_insert_with(|| {
+                            Arc::new(parse_iceberg_file_metrics(metrics, &schema_ref))
+                        }),
+                ))
+            } else {
+                None
+            };
+
             // `FileScanTask`'s fields are private as of iceberg-rust 665c64e, so the task is
             // constructed through its builder. `build()` runs the task's validation (partition
             // vs. partition-spec consistency), surfaced here as a GeneralError.
@@ -4485,12 +4507,7 @@ fn parse_file_scan_tasks_from_common(
                 .with_start(proto_task.start)
                 .with_length(proto_task.length)
                 .with_record_count(proto_task.record_count)
-                .with_file_metrics(
-                    proto_task
-                        .file_metrics
-                        .as_ref()
-                        .map(|metrics| Arc::new(parse_iceberg_file_metrics(metrics, &schema_ref))),
-                )
+                .with_file_metrics(file_metrics)
                 // RAW data-file path -- do NOT rewrite the alias to s3://. iceberg-rust matches
                 // positional deletes by comparing this against the path recorded inside the delete
                 // file, so changing the scheme drops deletes. The S3 backend opens a raw alias path
@@ -4899,6 +4916,25 @@ mod tests {
             std::collections::HashMap::from([(1, Datum::int(30))])
         );
         assert_eq!(metrics.null_value_counts.get(&1), Some(&2));
+        let common = spark_operator::IcebergScanCommon {
+            schema_pool: vec![serde_json::to_string(&schema).unwrap()],
+            project_field_ids_pool: vec![spark_operator::ProjectFieldIdList { field_ids: vec![1] }],
+            file_metrics_pool: vec![proto],
+            ..Default::default()
+        };
+        let task = spark_operator::IcebergFileScanTask {
+            data_file_path: "file:///tmp/pooled.parquet".to_string(),
+            file_size_in_bytes: 100,
+            file_metrics_idx: Some(0),
+            ..Default::default()
+        };
+        let tasks =
+            super::parse_file_scan_tasks_from_common(&common, &[task.clone(), task]).unwrap();
+        assert!(Arc::ptr_eq(
+            tasks[0].file_metrics().unwrap(),
+            tasks[1].file_metrics().unwrap()
+        ));
+        assert_eq!(tasks[0].file_metrics().unwrap().record_count, 20);
     }
 
     mod empty_native_scan;

@@ -357,6 +357,9 @@ message IcebergScanCommon {
   // projections or filters, so PlanDataInjector keys planning data by metadata_location,
   // scan_hash_code and the operator's plan_id rather than metadata_location alone.
   int32 scan_hash_code = 15;
+
+  // Whole-file statistics shared by every split referencing that physical file.
+  repeated IcebergFileMetrics file_metrics_pool = 17;
 }
 
 message IcebergScan {
@@ -425,7 +428,7 @@ message IcebergFileScanTask {
   optional bytes key_metadata = 6;
 
   // Whole-file manifest statistics, including when this task is a byte-range split.
-  optional IcebergFileMetrics file_metrics = 7;
+  optional uint32 file_metrics_idx = 7;
 
   // Indices into IcebergScan deduplication pools
   uint32 schema_idx = 15;

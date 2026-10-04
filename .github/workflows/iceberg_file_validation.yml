@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Fork-only TopK live-pruning correctness and reader I/O checks.
+# Fork-only file pruning, delete correctness, and controlled native benchmarks.
 
 name: Fork Iceberg File Pruning Validation
 
