@@ -149,6 +149,31 @@ file, the dynamic counter can stay zero despite substantial TopK pruning. The st
 includes other predicates, so compare with filtering disabled to assess TopK savings.
 See [TopK metrics](../metrics.md#local-topk).
 
+### Native Iceberg Readers
+
+Join, TopK and MIN/MAX runtime bounds also reach native Iceberg scans
+(`spark.comet.scan.icebergNative.enabled=true`). The reader samples the current bound when each
+data-file task starts and refreshes it at row-group boundaries. With column statistics it can
+reject a whole data file before reading its footer or delete files, prune unread row groups,
+refresh the next row group's page selection and row filter, and avoid reading payload columns of
+rejected rows. Positional and equality deletes keep their original semantics. A bound that cannot
+be applied to a file, for example after schema evolution, is ignored for that file.
+
+To prune files before opening them, Comet re-plans each eligible Iceberg scan on the driver with
+column statistics retained for its top-level `INT` and `BIGINT` columns, because Spark drops those
+statistics from its tasks. This happens only when one of the runtime filter options is enabled.
+
+### MIN/MAX Reader Pruning
+
+Set `spark.comet.exec.aggregate.dynamicFilter.enabled=true` to pass the improving bound of a
+partial `MIN` or `MAX` aggregate to its native Iceberg reader. This option is experimental and
+disabled by default. It supports one direct `INT` or `BIGINT` argument, no `GROUP BY`, no
+aggregate filter, and one native input partition. Each execution creates a fresh bound. Rows that
+cannot improve the current minimum or maximum are skipped by the reader; the aggregate still
+computes the result. Disable Iceberg aggregate pushdown
+(`spark.sql.iceberg.aggregate-push-down.enabled=false`) when comparing, because Iceberg can answer
+these aggregates from metadata without a scan.
+
 ## Optimizing Sorting on Floating-Point Values
 
 Comet normalizes NaN payloads and signed zeros in `FLOAT` and `DOUBLE` ordering keys, including floating-point values

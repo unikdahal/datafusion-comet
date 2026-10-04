@@ -451,33 +451,65 @@ object IcebergReflection extends Logging {
     if (isStagedScan(scan)) tasksFromTaskGroups(scan) else tasksFromTasksAccessor(scan)
 
   /**
-   * Spark strips column statistics from its FileScanTasks. Read the same Iceberg scan's manifest
-   * metadata with statistics retained, without replacing Spark's tasks or splits. Match only the
-   * already selected immutable data-file paths; absent metadata fails open. Staged and older
-   * scans without this API keep row-group pruning.
+   * Top-level INT and BIGINT columns of `schema`: the only key types the runtime predicate
+   * producers support, and so the only columns whose statistics can prune a file.
    */
-  def runtimeFileStatistics(scan: Any, tasks: java.util.List[_]): Map[String, AnyRef] = {
-    if (isStagedScan(scan)) return Map.empty
+  def runtimeKeyColumns(schema: Any): Seq[String] = {
+    import scala.jdk.CollectionConverters._
     try {
+      getMethod(schema.getClass, "columns")
+        .invoke(schema)
+        .asInstanceOf[java.util.List[_]]
+        .asScala
+        .toSeq
+        .flatMap { column =>
+          val typeStr = getMethod(column.getClass, "type").invoke(column).toString
+          if (typeStr == "int" || typeStr == "long") {
+            Some(getMethod(column.getClass, "name").invoke(column).asInstanceOf[String])
+          } else {
+            None
+          }
+        }
+    } catch {
+      case NonFatal(e) =>
+        logWarning(s"Runtime key columns unavailable: ${e.getMessage}")
+        Seq.empty
+    }
+  }
+
+  /**
+   * Spark strips column statistics from its FileScanTasks. Re-plan the same Iceberg scan with
+   * statistics retained for `columns` only, without replacing Spark's tasks or splits, and keep
+   * the data files Spark already selected. Absent metadata fails open. Staged scans, and scans
+   * without candidate key columns, keep row-group pruning only.
+   */
+  def runtimeFileStatistics(
+      scan: Any,
+      tasks: java.util.List[_],
+      columns: Seq[String]): Map[String, AnyRef] = {
+    if (columns.isEmpty || isStagedScan(scan)) return Map.empty
+    try {
+      val fileMethod = getMethod(loadClass(ClassNames.CONTENT_SCAN_TASK), "file")
       val selected = tasks.toArray.toSeq.flatMap { task =>
-        val file = getMethod(loadClass(ClassNames.CONTENT_SCAN_TASK), "file").invoke(task)
-        extractFileLocation(file)
+        extractFileLocation(fileMethod.invoke(task))
       }.toSet
       val icebergScan = findMethodInHierarchy(scan.getClass, "scan")
         .map(_.invoke(scan))
         .orNull
       if (icebergScan == null) return Map.empty
       val scanClass = loadClass("org.apache.iceberg.Scan")
-      val withStats = getMethod(scanClass, "includeColumnStats").invoke(icebergScan)
+      // Restrict statistics to the candidate key columns where Iceberg supports it.
+      val withStats = findMethod(scanClass, "includeColumnStats", classOf[java.util.Collection[_]])
+        .map(_.invoke(icebergScan, java.util.Arrays.asList(columns: _*)))
+        .getOrElse(getMethod(scanClass, "includeColumnStats").invoke(icebergScan))
       val planned = getMethod(scanClass, "planFiles").invoke(withStats)
       try {
         val result = Map.newBuilder[String, AnyRef]
         val iterator = planned.asInstanceOf[java.lang.Iterable[_]].iterator()
-        val fileMethod = getMethod(loadClass(ClassNames.CONTENT_SCAN_TASK), "file")
         while (iterator.hasNext) {
           val file = fileMethod.invoke(iterator.next())
           extractFileLocation(file).filter(selected.contains).foreach { path =>
-            val _ = result += path -> file
+            result += path -> file
           }
         }
         result.result()
@@ -2355,7 +2387,10 @@ object CometIcebergNativeScanMetadata extends Logging {
           if (CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get() ||
             CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get() ||
             CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get()) {
-            IcebergReflection.runtimeFileStatistics(scan, tasks)
+            IcebergReflection.runtimeFileStatistics(
+              scan,
+              tasks,
+              IcebergReflection.runtimeKeyColumns(scanSchema))
           } else { Map.empty })
     }
   }

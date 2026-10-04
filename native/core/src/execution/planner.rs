@@ -1459,7 +1459,7 @@ impl PhysicalPlanner {
                     && group_by.is_empty()
                     && agg.agg_exprs.len() == 1
                     && agg.agg_exprs.iter().all(|expr| expr.filter.is_none())
-                    && child.native_plan.is::<IcebergScanExec>()
+                    && IcebergMinMaxFilterExec::accepts_input(&child.native_plan)
                     && child.native_plan.output_partitioning().partition_count() == 1;
                 let agg_exprs: PhyAggResult = agg
                     .agg_exprs
@@ -4311,8 +4311,8 @@ fn parse_iceberg_file_metrics(
             .filter_map(|(id, bytes)| {
                 let field = schema.field_by_id(*id)?;
                 let data_type = field.field_type.as_primitive_type()?;
-                // Invalid or historical encodings fail open for this column. In
-                // particular, an old INT bound need not decode as a promoted BIGINT.
+                // Invalid encodings fail open for this column. A 4-byte bound of a
+                // field promoted from INT to BIGINT decodes as that BIGINT value.
                 iceberg::spec::Datum::try_from_bytes(bytes, data_type.clone())
                     .ok()
                     .map(|datum| (*id, datum))
@@ -4437,7 +4437,7 @@ fn parse_file_scan_tasks_from_common(
                 file_path,
                 file_type,
                 file_format,
-                // Not serialized; filled in by IcebergScanExec::fill_delete_file_sizes.
+                // Not serialized; 0 means unknown and iceberg-rust sizes the file lazily.
                 file_size_in_bytes: 0,
                 partition_spec_id: del.partition_spec_id,
                 equality_ids: if del.equality_ids.is_empty() {
@@ -5096,7 +5096,7 @@ mod tests {
         assert_eq!(metrics.record_count, Some(20));
         assert_eq!(
             metrics.lower_bounds,
-            std::collections::HashMap::from([(1, Datum::int(-10))])
+            std::collections::HashMap::from([(1, Datum::int(-10)), (2, Datum::long(10))])
         );
         assert_eq!(
             metrics.upper_bounds,

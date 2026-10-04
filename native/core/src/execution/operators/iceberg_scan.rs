@@ -39,9 +39,8 @@ use datafusion::physical_plan::{
 };
 use futures::{Stream, StreamExt, TryStreamExt};
 use iceberg::arrow::{RuntimePredicateProvider, ScanMetrics};
-use iceberg::io::FileIO;
+use iceberg::Error;
 use iceberg::Runtime as IcebergRuntime;
-use iceberg::{Error, ErrorKind};
 
 use crate::cloud::s3::credential_bridge::AccessMode;
 use crate::execution::jni_api::get_runtime;
@@ -51,16 +50,7 @@ use crate::parquet::parquet_support::SparkParquetOptions;
 use crate::parquet::schema_adapter::SparkPhysicalExprAdapterFactory;
 use datafusion_comet_spark_expr::EvalMode;
 use datafusion_physical_expr_adapter::{PhysicalExprAdapter, PhysicalExprAdapterFactory};
-use iceberg::scan::{FileScanTask, FileScanTaskDeleteFile};
-use iceberg::spec::DataFileFormat;
-
-/// A valid Parquet file ends with at least an 8-byte footer (4-byte metadata length + "PAR1").
-/// A delete file that stats below this cannot be read, so we reject it in the fill step. opendal
-/// returns size 0 from a successful HEAD whose response carries no Content-Length header (some
-/// S3-compatible endpoints/proxies, or a path-style mismatch), and for a genuinely empty object;
-/// neither errors at the stat layer, so without this floor the 0 would flow into the Parquet
-/// reader and surface as an opaque "file size of 0 is less than footer".
-const MIN_PARQUET_FILE_SIZE: u64 = 8;
+use iceberg::scan::FileScanTask;
 
 /// Iceberg table scan operator that uses iceberg-rust to read Iceberg tables.
 ///
@@ -263,24 +253,10 @@ impl IcebergScanExec {
         let metrics = IcebergScanMetrics::new(&self.metrics);
         metrics.num_splits.add(tasks.len());
 
-        // Fill delete-file sizes as the first step of the task stream so the stats run on the
-        // iceberg runtime alongside the reads, not on the calling executor thread (see
-        // fill_delete_file_sizes).
-        let fill_io = file_io.clone();
-        let concurrency_limit = self.data_file_concurrency_limit;
-        let task_stream = if self.runtime_predicate_provider.is_some() {
-            // Unknown delete sizes are resolved by iceberg-rust's cached loader
-            // only for retained tasks, after the pre-open runtime file decision.
-            futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)).boxed()
-        } else {
-            futures::stream::once(async move {
-                let mut tasks = tasks;
-                Self::fill_delete_file_sizes(&mut tasks, &fill_io, concurrency_limit).await?;
-                Ok::<_, Error>(futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)))
-            })
-            .try_flatten()
-            .boxed()
-        };
+        // Delete-file sizes are not serialized and arrive as 0 (unknown).
+        // iceberg-rust sizes each Parquet delete file once per reader, when a
+        // task that is actually read first loads it.
+        let task_stream = futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)).boxed();
 
         // iceberg-rust's ArrowReader spawns IO/CPU work onto an iceberg::Runtime, which only needs
         // a tokio handle. execute() runs on the JVM-called thread outside any tokio context, so we
@@ -327,162 +303,20 @@ impl IcebergScanExec {
             baseline_metrics: metrics.baseline,
             scan_metrics,
             bytes_scanned: metrics.bytes_scanned,
-            runtime_file_tasks_considered: metrics.runtime_file_tasks_considered,
             runtime_file_tasks_pruned: metrics.runtime_file_tasks_pruned,
             runtime_predicate_tasks: metrics.runtime_predicate_tasks,
             runtime_row_groups_pruned: metrics.runtime_row_groups_pruned,
-            runtime_live_pruning_tasks: metrics.runtime_live_pruning_tasks,
             runtime_predicate_refreshes: metrics.runtime_predicate_refreshes,
-            runtime_row_groups_considered: metrics.runtime_row_groups_considered,
-            runtime_row_groups_pruned_initial: metrics.runtime_row_groups_pruned_initial,
             runtime_row_groups_pruned_live: metrics.runtime_row_groups_pruned_live,
-
             last_reported_bytes: 0,
-            last_reported_runtime_file_tasks_considered: 0,
             last_reported_runtime_file_tasks_pruned: 0,
             last_reported_runtime_predicate_tasks: 0,
             last_reported_runtime_row_groups_pruned: 0,
-            last_reported_runtime_live_pruning_tasks: 0,
             last_reported_runtime_predicate_refreshes: 0,
-            last_reported_runtime_row_groups_considered: 0,
-            last_reported_runtime_row_groups_pruned_initial: 0,
             last_reported_runtime_row_groups_pruned_live: 0,
         };
 
         Ok(Box::pin(wrapped_stream))
-    }
-
-    /// Stats each unique delete file to fill its `file_size_in_bytes` (0 on arrival, since it is
-    /// not serialized).
-    ///
-    /// iceberg-rust seeks the Parquet footer from this size, so it must be correct. A stat failure
-    /// is fatal: reading with missing deletes would silently leak deleted rows.
-    async fn fill_delete_file_sizes(
-        tasks: &mut [FileScanTask],
-        file_io: &FileIO,
-        concurrency_limit: usize,
-    ) -> Result<(), Error> {
-        use datafusion::common::{HashMap, HashSet};
-        use futures::TryStreamExt;
-
-        // Dedup: the JVM pools delete-file lists, not individual files, so the same delete file
-        // recurs across the tasks that share it. Owning the paths also avoids holding a borrow of
-        // `tasks` into the mutable write-back below.
-        let mut needed: HashSet<String> = HashSet::new();
-        for task in tasks.iter() {
-            for delete in task.deletes() {
-                // Delete-file sizes are never serialized, so they always arrive as 0. If we ever
-                // trust manifest sizes (pending the unreleased apache/iceberg#12554 fix), skip
-                // already-sized files here instead of asserting.
-                debug_assert_eq!(delete.file_size_in_bytes, 0);
-                // A deletion vector is range-read from content_offset, and iceberg-rust consults
-                // file_size_in_bytes only on the Parquet delete path. Statting the Puffin file
-                // would be one HEAD per file per Spark partition for a value nothing reads.
-                if delete.file_format == DataFileFormat::Puffin {
-                    continue;
-                }
-                needed.insert(delete.file_path.clone());
-            }
-        }
-        if needed.is_empty() {
-            return Ok(());
-        }
-
-        // Bound the in-flight stats to match the downstream read concurrency (iceberg-rust uses
-        // try_buffer_unordered at the same limit for delete-file loads). An unbounded fan-out
-        // would burst N HEAD requests at once for no gain, since the reads are throttled anyway.
-        // Guaranteed > 0 by COMET_ICEBERG_DATA_FILE_CONCURRENCY_LIMIT; buffer_unordered(0) would
-        // never poll.
-        debug_assert!(concurrency_limit > 0);
-        let sizes: Vec<(String, u64)> = futures::stream::iter(needed.into_iter().map(|path| {
-            let file_io = file_io.clone();
-            async move {
-                let size = file_io
-                    .new_input(&path)?
-                    .metadata()
-                    .await
-                    .map_err(|e| {
-                        Error::new(
-                            ErrorKind::Unexpected,
-                            format!("Failed to stat delete file '{path}'"),
-                        )
-                        .with_source(e)
-                    })?
-                    .size;
-                if size < MIN_PARQUET_FILE_SIZE {
-                    return Err(Error::new(
-                        ErrorKind::Unexpected,
-                        format!(
-                            "Delete file '{path}' statted to {size} bytes, below the \
-                             {MIN_PARQUET_FILE_SIZE}-byte Parquet minimum. The object is empty or \
-                             truncated, or the stat returned no Content-Length (check the object \
-                             store endpoint, TLS, and path-style config)."
-                        ),
-                    ));
-                }
-                Ok::<(String, u64), Error>((path, size))
-            }
-        }))
-        .buffer_unordered(concurrency_limit)
-        .try_collect()
-        .await?;
-
-        let size_map: HashMap<String, u64> = sizes.into_iter().collect();
-        // iceberg-rust 665c64e made `FileScanTask::deletes` a private field exposed only through
-        // a read-only accessor, so a task's delete files can no longer be sized in place. Rebuild
-        // each task that carries deletes with sized copies; tasks without deletes are untouched.
-        for task in tasks.iter_mut() {
-            if task.deletes().is_empty() {
-                continue;
-            }
-            let deletes = task
-                .deletes()
-                .iter()
-                .map(|delete| {
-                    let mut delete = delete.clone();
-                    if let Some(&size) = size_map.get(&delete.file_path) {
-                        delete.file_size_in_bytes = size;
-                    }
-                    delete
-                })
-                .collect::<Vec<_>>();
-            *task = Self::rebuild_task_with_deletes(task, deletes)?;
-        }
-        Ok(())
-    }
-
-    /// Rebuilds a [`FileScanTask`] carrying a new set of delete files.
-    ///
-    /// `FileScanTask::deletes` is private with no mutator, so the only way to change a task's
-    /// delete files is to construct a fresh task via the builder, forwarding every other field
-    /// through its public accessors. The builder runs `FileScanTask`'s validation on `build()`.
-    fn rebuild_task_with_deletes(
-        task: &FileScanTask,
-        deletes: Vec<FileScanTaskDeleteFile>,
-    ) -> Result<FileScanTask, Error> {
-        FileScanTask::builder()
-            .with_file_size_in_bytes(task.file_size_in_bytes())
-            .with_start(task.start())
-            .with_length(task.length())
-            .with_record_count(task.record_count())
-            .with_file_metrics(task.file_metrics().cloned())
-            .with_first_row_id(task.first_row_id())
-            .with_data_sequence_number(task.data_sequence_number())
-            .with_data_file_path(task.data_file_path().to_string())
-            .with_data_file_format(task.data_file_format())
-            .with_schema(task.schema_ref())
-            .with_project_field_ids(task.project_field_ids().to_vec())
-            .with_predicate(task.predicate().cloned())
-            .with_deletes(deletes)
-            .with_partition(task.partition().cloned())
-            .with_partition_spec(task.partition_spec().cloned())
-            .with_name_mapping(task.name_mapping().cloned())
-            .with_unified_partition_type(task.unified_partition_type().cloned())
-            .with_sort_order_id(task.sort_order_id())
-            .with_sort_order(task.sort_order().cloned())
-            .with_case_sensitive(task.case_sensitive())
-            .with_key_metadata(task.key_metadata().map(Box::from))
-            .build()
     }
 }
 
@@ -494,16 +328,15 @@ struct IcebergScanMetrics {
     num_splits: Count,
     /// Total bytes read from storage
     bytes_scanned: Count,
-    /// Number of file tasks that received a runtime predicate
-    runtime_file_tasks_considered: Count,
+    /// File tasks rejected by runtime predicates before opening the file
     runtime_file_tasks_pruned: Count,
+    /// File tasks that used a runtime predicate
     runtime_predicate_tasks: Count,
-    /// Number of row groups skipped by runtime predicate statistics
+    /// Row groups skipped by runtime predicate statistics, at task open or live
     runtime_row_groups_pruned: Count,
-    runtime_live_pruning_tasks: Count,
+    /// Runtime predicate publications picked up while a file was being read
     runtime_predicate_refreshes: Count,
-    runtime_row_groups_considered: Count,
-    runtime_row_groups_pruned_initial: Count,
+    /// Row groups skipped at row-group boundaries after a refresh
     runtime_row_groups_pruned_live: Count,
 }
 
@@ -513,22 +346,14 @@ impl IcebergScanMetrics {
             baseline: BaselineMetrics::new(metrics, 0),
             num_splits: MetricBuilder::new(metrics).counter("num_splits", 0),
             bytes_scanned: MetricBuilder::new(metrics).counter("bytes_scanned", 0),
-            runtime_file_tasks_considered: MetricBuilder::new(metrics)
-                .counter("iceberg_runtime_file_tasks_considered", 0),
             runtime_file_tasks_pruned: MetricBuilder::new(metrics)
                 .counter("iceberg_runtime_file_tasks_pruned", 0),
             runtime_predicate_tasks: MetricBuilder::new(metrics)
                 .counter("iceberg_runtime_predicate_tasks", 0),
             runtime_row_groups_pruned: MetricBuilder::new(metrics)
                 .counter("iceberg_runtime_row_groups_pruned", 0),
-            runtime_live_pruning_tasks: MetricBuilder::new(metrics)
-                .counter("iceberg_runtime_live_pruning_tasks", 0),
             runtime_predicate_refreshes: MetricBuilder::new(metrics)
                 .counter("iceberg_runtime_predicate_refreshes", 0),
-            runtime_row_groups_considered: MetricBuilder::new(metrics)
-                .counter("iceberg_runtime_row_groups_considered", 0),
-            runtime_row_groups_pruned_initial: MetricBuilder::new(metrics)
-                .counter("iceberg_runtime_row_groups_pruned_initial", 0),
             runtime_row_groups_pruned_live: MetricBuilder::new(metrics)
                 .counter("iceberg_runtime_row_groups_pruned_live", 0),
         }
@@ -554,24 +379,15 @@ struct IcebergStreamWrapper<S> {
     bytes_scanned: Count,
     /// Last reported bytes_read value for delta computation
     last_reported_bytes: u64,
-    runtime_file_tasks_considered: Count,
     runtime_file_tasks_pruned: Count,
     runtime_predicate_tasks: Count,
     runtime_row_groups_pruned: Count,
-    runtime_live_pruning_tasks: Count,
     runtime_predicate_refreshes: Count,
-    runtime_row_groups_considered: Count,
-    runtime_row_groups_pruned_initial: Count,
     runtime_row_groups_pruned_live: Count,
-
-    last_reported_runtime_file_tasks_considered: u64,
     last_reported_runtime_file_tasks_pruned: u64,
     last_reported_runtime_predicate_tasks: u64,
     last_reported_runtime_row_groups_pruned: u64,
-    last_reported_runtime_live_pruning_tasks: u64,
     last_reported_runtime_predicate_refreshes: u64,
-    last_reported_runtime_row_groups_considered: u64,
-    last_reported_runtime_row_groups_pruned_initial: u64,
     last_reported_runtime_row_groups_pruned_live: u64,
 }
 
@@ -645,13 +461,6 @@ where
             self.last_reported_bytes = current;
         }
 
-        let current = self.scan_metrics.runtime_file_tasks_considered();
-        let delta = current.saturating_sub(self.last_reported_runtime_file_tasks_considered);
-        if delta > 0 {
-            self.runtime_file_tasks_considered.add(delta as usize);
-            self.last_reported_runtime_file_tasks_considered = current;
-        }
-
         let current = self.scan_metrics.runtime_file_tasks_pruned();
         let delta = current.saturating_sub(self.last_reported_runtime_file_tasks_pruned);
         if delta > 0 {
@@ -674,32 +483,11 @@ where
             self.last_reported_runtime_row_groups_pruned = current_pruned;
         }
 
-        let current = self.scan_metrics.runtime_live_pruning_tasks();
-        let delta = current.saturating_sub(self.last_reported_runtime_live_pruning_tasks);
-        if delta > 0 {
-            self.runtime_live_pruning_tasks.add(delta as usize);
-            self.last_reported_runtime_live_pruning_tasks = current;
-        }
-
         let current = self.scan_metrics.runtime_predicate_refreshes();
         let delta = current.saturating_sub(self.last_reported_runtime_predicate_refreshes);
         if delta > 0 {
             self.runtime_predicate_refreshes.add(delta as usize);
             self.last_reported_runtime_predicate_refreshes = current;
-        }
-
-        let current = self.scan_metrics.runtime_row_groups_considered();
-        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_considered);
-        if delta > 0 {
-            self.runtime_row_groups_considered.add(delta as usize);
-            self.last_reported_runtime_row_groups_considered = current;
-        }
-
-        let current = self.scan_metrics.runtime_row_groups_pruned_initial();
-        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_pruned_initial);
-        if delta > 0 {
-            self.runtime_row_groups_pruned_initial.add(delta as usize);
-            self.last_reported_runtime_row_groups_pruned_initial = current;
         }
 
         let current = self.scan_metrics.runtime_row_groups_pruned_live();
@@ -825,16 +613,59 @@ fn adapt_batch_with_expressions(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::sync::Arc;
 
     use iceberg::encryption::StandardKeyMetadata;
-    use iceberg::io::{FileIO, FileIOBuilder};
-    use iceberg::scan::{FileScanTask, FileScanTaskDeleteFile};
-    use iceberg::spec::{DataContentType, DataFileFormat, Schema};
-    use iceberg_storage_opendal::OpenDalStorageFactory;
+    use iceberg::scan::FileScanTask;
+    use iceberg::spec::{DataFileFormat, Schema};
 
     use super::IcebergScanExec;
+
+    #[test]
+    fn runtime_field_mapping_aligns_outputs_after_metadata_columns() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use iceberg::metadata_columns::RESERVED_FIELD_ID_FILE;
+        use iceberg::spec::{NestedField, PrimitiveType, Type};
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![NestedField::optional(
+                    2,
+                    "value",
+                    Type::Primitive(PrimitiveType::Long),
+                )
+                .into()])
+                .build()
+                .unwrap(),
+        );
+        let task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("/tmp/metadata-first.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(schema)
+            .with_project_field_ids(vec![RESERVED_FIELD_ID_FILE, 2])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+        let scan = IcebergScanExec::new(
+            "/tmp/metadata.json".into(),
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("_file", DataType::Utf8, false),
+                Field::new("value", DataType::Int64, true),
+            ])),
+            Default::default(),
+            String::new(),
+            vec![task],
+            1,
+        )
+        .unwrap();
+        // A projected metadata column keeps its output position, so the data
+        // column after it still maps to its own field id.
+        assert_eq!(scan.runtime_predicate_field_name(0), None);
+        assert_eq!(scan.runtime_predicate_field_name(1), Some("value".into()));
+    }
 
     #[test]
     fn runtime_field_mapping_respects_projection_identity_and_type() {
@@ -966,10 +797,6 @@ mod tests {
         );
     }
 
-    fn fs_file_io() -> FileIO {
-        FileIOBuilder::new(Arc::new(OpenDalStorageFactory::Fs)).build()
-    }
-
     #[test]
     fn issue_5783_projection_rejects_selected_duplicate_root() {
         use arrow::array::Int64Array;
@@ -1023,155 +850,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    fn task_with_deletes(deletes: Vec<FileScanTaskDeleteFile>) -> FileScanTask {
-        FileScanTask::builder()
-            .with_file_size_in_bytes(0)
-            .with_start(0)
-            .with_length(0)
-            .with_data_file_path("data.parquet".to_string())
-            .with_data_file_format(DataFileFormat::Parquet)
-            .with_schema(Arc::new(Schema::builder().build().unwrap()))
-            .with_project_field_ids(vec![])
-            .with_deletes(deletes)
-            .with_case_sensitive(false)
-            .build()
-            .unwrap()
-    }
-
-    fn delete_file(path: &str) -> FileScanTaskDeleteFile {
-        FileScanTaskDeleteFile {
-            file_path: path.to_string(),
-            file_type: DataContentType::PositionDeletes,
-            file_format: DataFileFormat::Parquet,
-            file_size_in_bytes: 0,
-            partition_spec_id: 0,
-            equality_ids: None,
-            referenced_data_file: None,
-            content_offset: None,
-            content_size_in_bytes: None,
-            record_count: None,
-            key_metadata: None,
-        }
-    }
-
-    #[test]
-    fn rebuild_task_with_deletes_preserves_sort_metadata() {
-        use iceberg::spec::{
-            NestedField, NullOrder, PrimitiveType, SortDirection, SortField, SortOrder, Transform,
-            Type,
-        };
-
-        let schema = Arc::new(
-            Schema::builder()
-                .with_fields(vec![NestedField::optional(
-                    1,
-                    "id",
-                    Type::Primitive(PrimitiveType::Int),
-                )
-                .into()])
-                .build()
-                .unwrap(),
-        );
-        let order = Arc::new(
-            SortOrder::builder()
-                .with_order_id(7)
-                .with_sort_field(
-                    SortField::builder()
-                        .source_id(1)
-                        .transform(Transform::Identity)
-                        .direction(SortDirection::Ascending)
-                        .null_order(NullOrder::First)
-                        .build(),
-                )
-                .build(&schema)
-                .unwrap(),
-        );
-        let task = FileScanTask::builder()
-            .with_file_size_in_bytes(1024)
-            .with_start(0)
-            .with_length(0)
-            .with_data_file_path("data.parquet".into())
-            .with_data_file_format(DataFileFormat::Parquet)
-            .with_schema(schema)
-            .with_project_field_ids(vec![1])
-            .with_sort_order_id(Some(7))
-            .with_sort_order(Some(Arc::clone(&order)))
-            .with_case_sensitive(false)
-            .build()
-            .unwrap();
-
-        let rebuilt =
-            IcebergScanExec::rebuild_task_with_deletes(&task, vec![delete_file("delete.parquet")])
-                .unwrap();
-        assert_eq!(rebuilt.sort_order_id(), Some(7));
-        assert_eq!(rebuilt.sort_order(), Some(&order));
-        assert_eq!(rebuilt.deletes().len(), 1);
-    }
-
-    // A delete file we cannot stat must fail the scan, not be silently read with a missing/0 size.
-    #[tokio::test]
-    async fn fill_delete_file_sizes_errors_on_unreadable_delete_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing-delete.parquet");
-        let mut tasks = vec![task_with_deletes(vec![delete_file(
-            missing.to_str().unwrap(),
-        )])];
-
-        let result = IcebergScanExec::fill_delete_file_sizes(&mut tasks, &fs_file_io(), 4).await;
-
-        assert!(
-            result.is_err(),
-            "expected an error when a delete file cannot be statted"
-        );
-        assert_eq!(tasks[0].deletes()[0].file_size_in_bytes, 0);
-    }
-
-    // The real on-disk size is filled in from the FileIO, replacing the 0 placeholder.
-    #[tokio::test]
-    async fn fill_delete_file_sizes_populates_real_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("delete.parquet");
-        let bytes = b"these bytes stand in for a delete file";
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(bytes).unwrap();
-        f.flush().unwrap();
-
-        let mut tasks = vec![task_with_deletes(vec![delete_file(path.to_str().unwrap())])];
-        IcebergScanExec::fill_delete_file_sizes(&mut tasks, &fs_file_io(), 4)
-            .await
-            .unwrap();
-
-        assert_eq!(tasks[0].deletes()[0].file_size_in_bytes, bytes.len() as u64);
-    }
-
-    // A present-but-undersized delete file (0-byte object, truncated write, or a HEAD with no
-    // Content-Length that opendal reports as size 0) must fail loudly rather than passing a
-    // sub-footer size into the Parquet reader.
-    #[tokio::test]
-    async fn fill_delete_file_sizes_errors_on_subfooter_delete_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty-delete.parquet");
-        std::fs::File::create(&path).unwrap(); // 0 bytes on disk
-
-        let mut tasks = vec![task_with_deletes(vec![delete_file(path.to_str().unwrap())])];
-        let result = IcebergScanExec::fill_delete_file_sizes(&mut tasks, &fs_file_io(), 4).await;
-
-        assert!(
-            result.is_err(),
-            "expected an error when a delete file is below the Parquet footer minimum"
-        );
-        assert_eq!(tasks[0].deletes()[0].file_size_in_bytes, 0);
-    }
-
-    // No deletes means no stats and no error.
-    #[tokio::test]
-    async fn fill_delete_file_sizes_noop_without_deletes() {
-        let mut tasks = vec![task_with_deletes(vec![])];
-        IcebergScanExec::fill_delete_file_sizes(&mut tasks, &fs_file_io(), 4)
-            .await
-            .unwrap();
     }
 
     fn from_hex(s: &str) -> Vec<u8> {

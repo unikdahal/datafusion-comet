@@ -89,6 +89,20 @@ impl RuntimePredicateProvider for IcebergRuntimePredicateProvider {
     }
 }
 
+/// Whether `input` is a native Iceberg scan, possibly below projection-free
+/// direct-column null checks, that [`try_attach_iceberg_reader_filter`] can reach.
+pub(super) fn reaches_iceberg_reader(input: &Arc<dyn ExecutionPlan>) -> bool {
+    if input.fetch().is_some() {
+        return false;
+    }
+    if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
+        return !filter.has_projection()
+            && is_direct_column_null_checks(filter.predicate())
+            && reaches_iceberg_reader(filter.input());
+    }
+    input.is::<IcebergScanExec>()
+}
+
 pub(super) fn try_attach_iceberg_reader_filter(
     input: &Arc<dyn ExecutionPlan>,
     predicate: Arc<DynamicFilterPhysicalExpr>,
