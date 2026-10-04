@@ -213,22 +213,14 @@ case class CometIcebergNativeScanExec(
     val baseMetrics = Map(
       "output_rows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
       "bytes_scanned" -> SQLMetrics.createSizeMetric(sparkContext, "number of bytes scanned"),
-      "iceberg_runtime_file_tasks_considered" ->
-        SQLMetrics.createMetric(sparkContext, "runtime file tasks considered"),
       "iceberg_runtime_file_tasks_pruned" ->
         SQLMetrics.createMetric(sparkContext, "runtime file tasks pruned before opening"),
       "iceberg_runtime_predicate_tasks" ->
         SQLMetrics.createMetric(sparkContext, "runtime predicate file tasks"),
       "iceberg_runtime_row_groups_pruned" ->
         SQLMetrics.createMetric(sparkContext, "row groups pruned by runtime predicates"),
-      "iceberg_runtime_live_pruning_tasks" ->
-        SQLMetrics.createMetric(sparkContext, "file tasks using live runtime pruning"),
       "iceberg_runtime_predicate_refreshes" ->
         SQLMetrics.createMetric(sparkContext, "runtime predicate refreshes during scanning"),
-      "iceberg_runtime_row_groups_considered" ->
-        SQLMetrics.createMetric(sparkContext, "row groups considered by runtime predicates"),
-      "iceberg_runtime_row_groups_pruned_initial" ->
-        SQLMetrics.createMetric(sparkContext, "row groups pruned by initial runtime predicates"),
       "iceberg_runtime_row_groups_pruned_live" ->
         SQLMetrics.createMetric(sparkContext, "row groups pruned by live runtime predicates"),
       // Native read/decode time, aggregated across tasks. Fed by iceberg-rust's BaselineMetrics

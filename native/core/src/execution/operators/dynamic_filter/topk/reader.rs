@@ -45,6 +45,8 @@ pub(super) fn try_attach_topk_reader_filter(
     predicate: Arc<DynamicFilterPhysicalExpr>,
     config: &ConfigOptions,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    // Iceberg scans and Parquet DataSourceExec inputs are disjoint plan types,
+    // so trying Iceberg first never hides a Parquet attachment.
     if let Some(scan) = super::super::iceberg_reader::try_attach_iceberg_reader_filter(
         input,
         Arc::clone(&predicate),

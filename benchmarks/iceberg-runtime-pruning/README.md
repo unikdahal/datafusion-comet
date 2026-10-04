@@ -17,51 +17,50 @@ specific language governing permissions and limitations
 under the License.
 -->
 
+
 # Native Iceberg runtime pruning benchmark
 
-The fork-only `iceberg_adaptive_pruning.yml` workflow builds the native release library and
-runs the full `CometIcebergNativeSuite` on Spark 3.5 and 4.1, covering joins, MIN/MAX,
-TopK, page selections, and all delete modes. Test logs are uploaded for each Spark version.
-The historical three-version benchmark is available by manual dispatch with `benchmark=true`;
-its original and intermediate native libraries remain pinned to their measured revisions.
-Those historical comparisons include dependency differences after rebasing onto current main
-and must not be presented as a matched-dependency optimization-only comparison. A new matched
-current-main baseline is required before publishing refreshed performance claims.
+`.github/workflows/iceberg_adaptive_benchmark.yml` compares three variants on one runner:
 
-The fixture is one sorted Iceberg v2 Parquet file containing 120,000 integer keys and
-64-character SHA-256 payloads, written without compression with a 128 KiB row-group target.
-The four primary scenarios set an explicit 128 MiB split-size read option and assert that
-the file is executed as exactly one data-file task. Adaptive split sizing is disabled and
-open-file cost is set to 1 byte: Iceberg first splits at Parquet offsets, then packs those
-pieces using a per-piece open-file weight. The default 4 MiB weight fragments this small
-file into more tasks as delete files are added.
-The test inspects the actual footer and records its row-group count. The build table contains
-32 even keys from 50,000 through 50,062, so min/max pruning must retain gaps for the exact
-membership consumer to remove.
+| variant | Comet build | runtime filter settings |
+|---|---|---|
+| main | the main commit this branch is based on | enabled (they apply only to Parquet there) |
+| off | this branch | disabled |
+| on | this branch | enabled |
 
-Both variants use native Iceberg scans and native execution. OFF sets
-`spark.comet.exec.join.dynamicFilter.enabled=false`; ON enables it. Both answers must match
-plain Spark. Every ON measurement must show an accepted Iceberg runtime predicate, additional
-row groups pruned, and less than one quarter of OFF's reader bytes. The test repeats this for
-no deletes, positional deletes, equality deletes on the payload column, and both delete types.
-A fifth scenario restores the default 4 MiB open-file cost, enables adaptive split sizing,
-and requires at least 20% fewer reader bytes. Each resulting task independently prefetches 512 KiB of metadata; this case
-records how repeated metadata reads limit savings for a small file.
+Main versus off isolates dependency changes (iceberg-rust revision and the Parquet backport);
+off versus on isolates the runtime pruning itself. Both sides are built with the same commands
+(`cargo build --release` and `mvnw install -Prelease -Pspark-3.5`) and no CPU-specific flags.
 
-Each scenario warms both paths, then executes five pairs in alternating order. The summary
-reports median reader bytes and median elapsed milliseconds. Timings cover `collect()`,
-including Spark scheduling, with warm OS caches on local disk. `bytes_scanned` counts ranged
-reader I/O requests, including metadata; it is neither a decoded-row count nor an S3 wire-byte
-measurement. These results establish reader pruning on this fixture; remote object-store
-latency and wider or unsorted build domains need separate workloads.
+## Data
 
-For local reproduction after a release native build:
+`generate_data.py` runs once with plain Spark 3.5.9 and Iceberg 1.8.1, so every variant reads
+byte-identical files. Each fact table has 16 million rows `(id INT, value BIGINT, payload
+STRING)` in 16 data files with an 8 MiB row-group target:
 
-```sh
-export SPARK_HOME="$PWD"
-export COMET_ICEBERG_BENCHMARK_REPEATS=5
-export COMET_ICEBERG_BENCHMARK_OUTPUT="$PWD/runtime-benchmark.jsonl"
-./mvnw -B -Prelease -Pspark-4.1 test -Dtest=none \
-  '-Dsuites=org.apache.comet.CometIcebergNativeSuite join runtime filter prunes native Iceberg row groups and bytes'
-python3 dev/ci/summarize-iceberg-runtime-benchmark.py runtime-benchmark.jsonl
-```
+- `fact_sorted`: range-partitioned and sorted by `id`, so files and row groups cover key ranges.
+- `fact_pos_deletes`: the same layout after a merge-on-read `DELETE` of every 101st key, which
+  writes position delete files.
+- `fact_unsorted`: the same rows in random order. Statistics cannot prune it, so it measures
+  overhead.
+- `dim`: 128 even keys in a narrow range at 60% of the key space.
+
+## Queries
+
+- `join_*`: broadcast inner join of a fact table with `dim` (completed build-side bounds).
+- `topk_*`: `ORDER BY id LIMIT 10` (a threshold that tightens while scanning).
+- `min_*`: ungrouped `min(id)` (a bound that tightens while scanning).
+- `scan_control`: a filtered aggregate with no runtime producer.
+
+## Method
+
+Each round runs the three variants as separate `spark-submit` JVMs in rotated order. Inside a
+JVM every query runs once untimed, then three times in a rotated query order, giving 18 timed
+runs per query and variant. Planning (`executedPlan`) and execution (`collect`) are timed
+separately; planning includes the driver-side statistics re-plan. Every result is
+checksummed and the summary fails if variants disagree.
+
+Timings are warm-cache local-disk timings on a shared CI runner. The summary reports medians,
+interquartile ranges, coefficients of variation and bootstrap 95% intervals for speedups.
+`bytes_scanned` is the total of ranged reads issued by the native reader, including footers and
+page indexes. It does not depend on cache state and is the best proxy for object-store cost.
