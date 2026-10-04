@@ -1085,9 +1085,15 @@ class CometIcebergNativeSuite
         spark.read
           .parquet(new File(warehouseDir, "file_pruning_dim").getAbsolutePath)
           .createOrReplaceTempView("file_pruning_dim")
-        val icebergTable =
-          new org.apache.iceberg.hadoop.HadoopTables(spark.sessionState.newHadoopConf())
-            .load(new File(warehouseDir, "db/runtime_file_pruning").getAbsolutePath)
+        // Load through the catalog: the Hadoop catalog owns the table location.
+        val icebergTable = spark.sessionState.catalogManager
+          .catalog("test_cat")
+          .asInstanceOf[org.apache.iceberg.spark.SparkCatalog]
+          .loadTable(
+            org.apache.spark.sql.connector.catalog.Identifier
+              .of(Array("db"), "runtime_file_pruning"))
+          .asInstanceOf[org.apache.iceberg.spark.source.SparkTable]
+          .table()
         val initialSnapshot = icebergTable.currentSnapshot().snapshotId()
         val query = """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
           FROM file_pruning_fact f JOIN file_pruning_dim d ON f.id = d.id"""
