@@ -1513,7 +1513,9 @@ mod tests {
         let output = storage.new_output("s3://b/t/new/f.parquet").unwrap();
         let mut writer = output.writer().await.unwrap();
         writer.write(Bytes::from("data")).await.unwrap();
-        let err = writer.close().await.unwrap_err();
+        let Err(err) = writer.close().await else {
+            panic!("writer should fail");
+        };
         assert!(may_mean_stale_locations(&err), "{err}");
         assert_eq!(fixture.fetches(), 1);
         let mut writer = output.writer().await.unwrap();

@@ -7148,12 +7148,15 @@ mod tests {
         // Spec 0 (older): field 1000 named "region_old".
         let spec0 = PartitionSpec::builder(Arc::clone(&schema_arc))
             .with_spec_id(0)
-            .add_unbound_field(iceberg::spec::UnboundPartitionField {
-                source_id: 2,
-                field_id: Some(1000),
-                name: "region_old".to_string(),
-                transform: iceberg::spec::Transform::Identity,
-            })
+            .add_unbound_field(
+                iceberg::spec::UnboundPartitionField::builder()
+                    .source_ids(vec![2])
+                    .field_id(1000)
+                    .name("region_old")
+                    .transform(iceberg::spec::Transform::Identity)
+                    .build()
+                    .expect("partition field"),
+            )
             .expect("add field")
             .build()
             .expect("build spec0");
@@ -7161,19 +7164,25 @@ mod tests {
         // Spec 1 (newer): same field id 1000 renamed to "region_new", plus a new field 2000.
         let spec1 = PartitionSpec::builder(Arc::clone(&schema_arc))
             .with_spec_id(1)
-            .add_unbound_field(iceberg::spec::UnboundPartitionField {
-                source_id: 2,
-                field_id: Some(1000),
-                name: "region_new".to_string(),
-                transform: iceberg::spec::Transform::Identity,
-            })
+            .add_unbound_field(
+                iceberg::spec::UnboundPartitionField::builder()
+                    .source_ids(vec![2])
+                    .field_id(1000)
+                    .name("region_new")
+                    .transform(iceberg::spec::Transform::Identity)
+                    .build()
+                    .expect("partition field"),
+            )
             .expect("add field")
-            .add_unbound_field(iceberg::spec::UnboundPartitionField {
-                source_id: 3,
-                field_id: Some(2000),
-                name: "category".to_string(),
-                transform: iceberg::spec::Transform::Identity,
-            })
+            .add_unbound_field(
+                iceberg::spec::UnboundPartitionField::builder()
+                    .source_ids(vec![3])
+                    .field_id(2000)
+                    .name("category")
+                    .transform(iceberg::spec::Transform::Identity)
+                    .build()
+                    .expect("partition field"),
+            )
             .expect("add field")
             .build()
             .expect("build spec1");
