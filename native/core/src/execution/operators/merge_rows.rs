@@ -20,8 +20,8 @@ use arrow::compute::kernels::boolean::{and, and_not, not};
 use arrow::compute::{filter_record_batch, prep_null_mask_filter};
 use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::common::utils::memory::estimate_memory_size;
-use datafusion::common::{DataFusionError, HashSet, ScalarValue};
+use datafusion::common::{DataFusionError, ScalarValue};
+use roaring::RoaringTreemap;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
@@ -254,7 +254,7 @@ impl ExecutionPlan for MergeRowsExec {
             config: Arc::clone(&self.config),
             child_stream,
             schema: Arc::clone(&self.schema),
-            seen: HashSet::new(),
+            seen: RoaringTreemap::new(),
             reservation,
             baseline: BaselineMetrics::new(&self.metrics, partition),
         }))
@@ -278,23 +278,57 @@ pub struct MergeRowsStream {
     child_stream: SendableRecordBatchStream,
     schema: SchemaRef,
     // Partition-scoped so duplicate matches across Arrow batches are still detected.
-    seen: HashSet<i64>,
+    seen: RoaringTreemap,
     reservation: Option<MemoryReservation>,
     baseline: BaselineMetrics,
 }
 
-const SEEN_FIXED_BYTES: usize = std::mem::size_of::<HashSet<i64>>();
-// Covers hashbrown's mirrored control group and minimum small-table allocation.
-const SEEN_HASH_TABLE_SLACK_BYTES: usize = 64;
+const SEEN_FIXED_BYTES: usize = std::mem::size_of::<RoaringTreemap>();
+// RoaringBitmap::statistics reports backing-store capacities, but not container metadata or the
+// BTreeMap nodes used by RoaringTreemap. Keep conservative per-partition/container overheads so the
+// memory-pool reservation remains an upper bound rather than just payload bytes.
+const SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES: usize = 256;
+const SEEN_CONTAINER_OVERHEAD_BYTES: usize = 64;
 
-fn estimate_seen_memory_size(num_elements: usize) -> Result<usize, DataFusionError> {
-    estimate_memory_size::<i64>(num_elements, SEEN_FIXED_BYTES)?
-        .checked_add(SEEN_HASH_TABLE_SLACK_BYTES)
-        .ok_or_else(|| {
+fn checked_seen_add(total: usize, additional: usize) -> Result<usize, DataFusionError> {
+    total.checked_add(additional).ok_or_else(|| {
+        DataFusionError::ResourcesExhausted(
+            "MergeRows: cardinality memory estimate overflow".to_string(),
+        )
+    })
+}
+
+fn estimate_seen_memory_size(seen: &RoaringTreemap) -> Result<usize, DataFusionError> {
+    let mut total = SEEN_FIXED_BYTES;
+    for (_, bitmap) in seen.bitmaps() {
+        let statistics = bitmap.statistics();
+        let payload_bytes = statistics
+            .n_bytes_array_containers
+            .checked_add(statistics.n_bytes_run_containers)
+            .and_then(|bytes| bytes.checked_add(statistics.n_bytes_bitset_containers))
+            .ok_or_else(|| {
+                DataFusionError::ResourcesExhausted(
+                    "MergeRows: cardinality memory estimate overflow".to_string(),
+                )
+            })?;
+        let payload_bytes = usize::try_from(payload_bytes).map_err(|_| {
             DataFusionError::ResourcesExhausted(
                 "MergeRows: cardinality memory estimate overflow".to_string(),
             )
-        })
+        })?;
+        let container_overhead = (statistics.n_containers as usize)
+            .checked_mul(SEEN_CONTAINER_OVERHEAD_BYTES)
+            .ok_or_else(|| {
+                DataFusionError::ResourcesExhausted(
+                    "MergeRows: cardinality memory estimate overflow".to_string(),
+                )
+            })?;
+
+        total = checked_seen_add(total, SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES)?;
+        total = checked_seen_add(total, container_overhead)?;
+        total = checked_seen_add(total, payload_bytes)?;
+    }
+    Ok(total)
 }
 
 /// Spark predicates treat NULL as false; Arrow boolean kernels preserve NULL.
@@ -406,26 +440,15 @@ fn cardinality_violation() -> DataFusionError {
     DataFusionError::External(Box::new(SparkError::MergeCardinalityViolation))
 }
 
-fn reserve_seen_growth(
-    seen: &mut HashSet<i64>,
+fn sync_seen_reservation(
+    seen: &RoaringTreemap,
     reservation: &mut MemoryReservation,
 ) -> Result<(), DataFusionError> {
-    let next_len = seen.len().checked_add(1).ok_or_else(|| {
-        DataFusionError::ResourcesExhausted(
-            "MergeRows: cardinality set length overflow".to_string(),
-        )
-    })?;
-    let projected_bytes = estimate_seen_memory_size(next_len)?;
-    let additional = projected_bytes.saturating_sub(reservation.size());
-    reservation.try_grow(additional)?;
-
-    if let Err(e) = seen.try_reserve(1) {
-        if additional != 0 {
-            reservation.shrink(additional);
-        }
-        return Err(DataFusionError::ResourcesExhausted(format!(
-            "MergeRows: failed to allocate cardinality set: {e}"
-        )));
+    let projected_bytes = estimate_seen_memory_size(seen)?;
+    if projected_bytes > reservation.size() {
+        reservation.try_grow(projected_bytes - reservation.size())?;
+    } else if projected_bytes < reservation.size() {
+        reservation.shrink(reservation.size() - projected_bytes);
     }
     Ok(())
 }
@@ -435,7 +458,7 @@ fn check_cardinality(
     batch: &RecordBatch,
     matched_mask: &BooleanArray,
     row_id_ordinal: usize,
-    seen: &mut HashSet<i64>,
+    seen: &mut RoaringTreemap,
     reservation: &mut MemoryReservation,
 ) -> Result<(), DataFusionError> {
     let row_ids = batch
@@ -446,6 +469,7 @@ fn check_cardinality(
             DataFusionError::Internal("MergeRows: row id column must be Int64".to_string())
         })?;
 
+    let mut inserted = false;
     for i in matched_mask.values().set_indices() {
         // Spark's row-id read treats a null long slot as zero.
         let id = if row_ids.is_null(i) {
@@ -454,18 +478,17 @@ fn check_cardinality(
             row_ids.value(i)
         };
 
-        if seen.len() < seen.capacity() {
-            if !seen.insert(id) {
-                return Err(cardinality_violation());
-            }
-        } else {
-            // Preserve Spark's error precedence: detect duplicates before memory admission.
-            if seen.contains(&id) {
-                return Err(cardinality_violation());
-            }
-            reserve_seen_growth(seen, reservation)?;
-            seen.insert(id);
+        // Casting is a bijection over i64 bit patterns, so negative row ids remain distinct.
+        if !seen.insert(id as u64) {
+            return Err(cardinality_violation());
         }
+        inserted = true;
+    }
+
+    // Reconcile against roaring's actual backing capacities once per input batch. Any temporary
+    // unreserved growth is therefore bounded by the current Arrow batch.
+    if inserted {
+        sync_seen_reservation(seen, reservation)?;
     }
     Ok(())
 }
@@ -473,7 +496,7 @@ fn check_cardinality(
 fn process_batch(
     batch: RecordBatch,
     config: &MergeConfig,
-    seen: &mut HashSet<i64>,
+    seen: &mut RoaringTreemap,
     reservation: Option<&mut MemoryReservation>,
     schema: &SchemaRef,
 ) -> Result<RecordBatch, DataFusionError> {
@@ -717,7 +740,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut RoaringTreemap::new(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -749,7 +772,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut RoaringTreemap::new(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -791,7 +814,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut RoaringTreemap::new(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -832,7 +855,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut RoaringTreemap::new(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -879,7 +902,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut RoaringTreemap::new(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -916,7 +939,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut RoaringTreemap::new(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -936,8 +959,8 @@ mod tests {
         n: usize,
         batch_rows: usize,
         reservation: &mut MemoryReservation,
-    ) -> Result<HashSet<i64>, DataFusionError> {
-        let mut seen = HashSet::new();
+    ) -> Result<RoaringTreemap, DataFusionError> {
+        let mut seen = RoaringTreemap::new();
         let mut next = 0i64;
         while (next as usize) < n {
             let end = ((next as usize) + batch_rows).min(n) as i64;
@@ -951,15 +974,12 @@ mod tests {
         Ok(seen)
     }
 
-    fn assert_seen_fully_reserved(seen: &HashSet<i64>, reservation: &MemoryReservation) {
-        let actual = seen.allocation_size().saturating_add(SEEN_FIXED_BYTES);
-        assert!(
-            reservation.size() >= actual,
-            "reserved {} bytes < actual HashSet footprint {} bytes (len={}, capacity={})",
+    fn assert_seen_fully_reserved(seen: &RoaringTreemap, reservation: &MemoryReservation) {
+        let expected = estimate_seen_memory_size(seen).unwrap();
+        assert_eq!(
             reservation.size(),
-            actual,
-            seen.len(),
-            seen.capacity()
+            expected,
+            "reservation must track the roaring backing-capacity estimate"
         );
     }
 
@@ -1035,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_reservation_covers_actual_hashbrown_allocations() {
+    fn cardinality_reservation_tracks_roaring_backing_capacity() {
         for &(n, batch_rows) in &[
             (1usize, 1usize),
             (2, 1),
@@ -1054,41 +1074,42 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_state_cannot_exceed_a_bounded_pool() {
+    fn cardinality_state_respects_a_bounded_pool() {
         let n = 917_505;
-        let mut reservation = bounded_reservation(16 * 1024 * 1024);
-        let err = run_cardinality(n, 4096, &mut reservation).unwrap_err();
+        let mut tiny_reservation = bounded_reservation(1);
+        let err = run_cardinality(n, 4096, &mut tiny_reservation).unwrap_err();
         assert!(
             matches!(err, DataFusionError::ResourcesExhausted(_)),
-            "expected the pool to reject the oversized cardinality table, got {err}"
+            "expected the pool to reject cardinality state that exceeds its budget, got {err}"
         );
 
-        let needed = estimate_seen_memory_size(n).unwrap();
-        let mut ok_reservation = bounded_reservation(needed + 8 * 1024 * 1024);
+        let mut probe_reservation = test_reservation();
+        let probe = run_cardinality(n, 4096, &mut probe_reservation).unwrap();
+        let needed = estimate_seen_memory_size(&probe).unwrap();
+        assert!(
+            needed < 16 * 1024 * 1024,
+            "dense roaring cardinality state unexpectedly needs {needed} bytes"
+        );
+
+        let mut ok_reservation = bounded_reservation(needed + 64 * 1024);
         let seen = run_cardinality(n, 4096, &mut ok_reservation).unwrap();
-        assert_eq!(seen.len(), n);
+        assert_eq!(seen.len(), n as u64);
         assert_seen_fully_reserved(&seen, &ok_reservation);
     }
 
     #[test]
     fn cardinality_violation_wins_over_memory_exhaustion() {
-        let mut seen = HashSet::new();
+        let mut seen = RoaringTreemap::new();
         let mut warmup_reservation = test_reservation();
-        let mut next_id = 1i64;
-
-        while seen.len() < seen.capacity().max(1) {
-            let batch = test_batch(vec![next_id], vec![0], vec![true], vec![true]);
-            check_cardinality(
-                &batch,
-                &BooleanArray::from(vec![true]),
-                0,
-                &mut seen,
-                &mut warmup_reservation,
-            )
-            .unwrap();
-            next_id += 1;
-        }
-        assert_eq!(seen.len(), seen.capacity(), "table must be full");
+        let first = test_batch(vec![1], vec![0], vec![true], vec![true]);
+        check_cardinality(
+            &first,
+            &BooleanArray::from(vec![true]),
+            0,
+            &mut seen,
+            &mut warmup_reservation,
+        )
+        .unwrap();
 
         let duplicate = test_batch(vec![1], vec![0], vec![true], vec![true]);
         let mut zero_budget = bounded_reservation(0);
@@ -1107,7 +1128,7 @@ mod tests {
             "expected cardinality violation before pool admission, got {duplicate_err}"
         );
 
-        let new_id = test_batch(vec![next_id], vec![0], vec![true], vec![true]);
+        let new_id = test_batch(vec![2], vec![0], vec![true], vec![true]);
         let memory_err = check_cardinality(
             &new_id,
             &BooleanArray::from(vec![true]),
@@ -1118,7 +1139,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(memory_err, DataFusionError::ResourcesExhausted(_)),
-            "expected memory exhaustion for a new id at capacity, got {memory_err}"
+            "expected memory exhaustion for a new id, got {memory_err}"
         );
     }
 
@@ -1126,7 +1147,7 @@ mod tests {
     fn cardinality_violation_detected() {
         let batch = test_batch(vec![1, 1], vec![10, 20], vec![true, true], vec![true, true]);
         let matched_mask = BooleanArray::from(vec![true, true]);
-        let mut seen = HashSet::new();
+        let mut seen = RoaringTreemap::new();
         let result =
             check_cardinality(&batch, &matched_mask, 0, &mut seen, &mut test_reservation());
         assert!(result.is_err());
@@ -1147,7 +1168,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut RoaringTreemap::new(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -1155,6 +1176,20 @@ mod tests {
         let vals = out.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
         let got: Vec<i32> = vals.iter().flatten().collect();
         assert_eq!(got, vec![1, 2]);
+    }
+
+    #[test]
+    fn signed_row_ids_remain_distinct_in_cardinality_state() {
+        let batch = test_batch(
+            vec![i64::MIN, -1, 0, 1, i64::MAX],
+            vec![0; 5],
+            vec![true; 5],
+            vec![true; 5],
+        );
+        let mask = BooleanArray::from(vec![true; 5]);
+        let mut seen = RoaringTreemap::new();
+        check_cardinality(&batch, &mask, 0, &mut seen, &mut test_reservation()).unwrap();
+        assert_eq!(seen.len(), 5);
     }
 
     #[test]
@@ -1174,7 +1209,7 @@ mod tests {
             &batch,
             &matched_mask,
             0,
-            &mut HashSet::new(),
+            &mut RoaringTreemap::new(),
             &mut test_reservation(),
         );
         assert!(result.is_err());
@@ -1421,7 +1456,7 @@ mod tests {
 
     #[test]
     fn cardinality_violation_detected_across_batches() {
-        let mut seen = HashSet::new();
+        let mut seen = RoaringTreemap::new();
         let batch1 = test_batch(vec![1], vec![10], vec![true], vec![true]);
         let batch2 = test_batch(vec![1], vec![20], vec![true], vec![true]);
         let config = test_config(vec![keep_all()], vec![], vec![], Some(0));
