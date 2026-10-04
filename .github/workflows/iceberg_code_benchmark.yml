@@ -54,6 +54,8 @@ jobs:
         with:
           rust-version: stable
           jdk-version: '17'
+      - name: Mark checkout safe for build helpers
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/cache/restore@v6
         with:
           path: |
@@ -61,6 +63,29 @@ jobs:
             ~/.cargo/git
           key: fork-runtime-registry-${{ hashFiles('native/Cargo.lock') }}
           restore-keys: Linux-cargo-ci-
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          path: benchmark-harness
+      - name: Find the exact original baseline release library
+        id: baseline
+        working-directory: benchmark-harness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/benchmark-harness"
+          python3 dev/ci/reuse-iceberg-baseline-library.py
+      - uses: actions/download-artifact@v8
+        if: steps.baseline.outputs.artifact_id != ''
+        with:
+          artifact-ids: ${{ steps.baseline.outputs.artifact_id }}
+          run-id: ${{ steps.baseline.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: .
+      - name: Verify the reused baseline revision
+        if: steps.baseline.outputs.artifact_id != ''
+        run: test "$(cat code-revision.txt)" = '569eaa59d032f758669777964aee2d24eb55ebae'
       - name: Find an identical patched release library
         if: matrix.variant == 'after'
         id: reuse
@@ -79,7 +104,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git rev-parse HEAD > code-revision.txt
       - name: Build the exact code revision
-        if: steps.reuse.outputs.artifact_id == ''
+        if: steps.reuse.outputs.artifact_id == '' && steps.baseline.outputs.artifact_id == ''
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd native && cargo build --release --locked
@@ -109,6 +134,8 @@ jobs:
         with:
           rust-version: stable
           jdk-version: '17'
+      - name: Mark checkout safe for build helpers
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/cache/restore@v6
         with:
           path: |
@@ -153,6 +180,9 @@ jobs:
     env:
       SPARK_LOCAL_HOSTNAME: localhost
       SPARK_LOCAL_IP: 127.0.0.1
+      COMET_CODE_BENCHMARK_ROWS: '4000000'
+      COMET_CODE_BENCHMARK_PAYLOAD_REPEATS: '4'
+      COMET_CODE_BENCHMARK_ROW_GROUP_BYTES: '8388608'
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-builder
@@ -163,6 +193,8 @@ jobs:
         with:
           pattern: code-benchmark-native-*
           path: code-libraries
+      - name: Mark checkout safe for build helpers
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/cache/restore@v6
         with:
           path: |

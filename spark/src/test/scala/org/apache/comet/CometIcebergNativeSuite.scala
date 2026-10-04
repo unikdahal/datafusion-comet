@@ -1051,6 +1051,14 @@ class CometIcebergNativeSuite
     val variant = sys.env("COMET_CODE_BENCHMARK_VARIANT")
     require(Set("before", "after").contains(variant))
     val table = "test_cat.db.code_before_after"
+    val numRows = sys.env.get("COMET_CODE_BENCHMARK_ROWS").map(_.toLong).getOrElse(120000L)
+    val payloadRepeats = sys.env
+      .get("COMET_CODE_BENCHMARK_PAYLOAD_REPEATS")
+      .map(_.toInt)
+      .getOrElse(1)
+    val rowGroupBytes = sys.env.getOrElse("COMET_CODE_BENCHMARK_ROW_GROUP_BYTES", "131072")
+    require(numRows > 50064 && numRows <= Int.MaxValue && payloadRepeats > 0)
+    val expectedValue = 32L * 64L * payloadRepeats
     withSQLConf(
       "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
       "spark.sql.catalog.test_cat.type" -> "hadoop",
@@ -1059,7 +1067,11 @@ class CometIcebergNativeSuite
       "spark.sql.shuffle.partitions" -> "1",
       CometConf.COMET_ENABLED.key -> "true",
       CometConf.COMET_EXEC_ENABLED.key -> "true",
+      "spark.sql.iceberg.aggregate-push-down.enabled" -> "false",
       CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_TOPK_FUSION_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key -> "true",
       CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
       // Persist across separate JVMs: both native libraries read the very same file.
       if (!spark.catalog.tableExists(table)) {
@@ -1070,14 +1082,16 @@ class CometIcebergNativeSuite
               'format-version' = '2',
               'read.split.adaptive-size.enabled' = 'false',
               'read.split.open-file-cost' = '1',
-              'write.parquet.row-group-size-bytes' = '131072',
+              'write.parquet.row-group-size-bytes' = '$rowGroupBytes',
               'write.parquet.compression-codec' = 'uncompressed')
           """)
           spark
-            .range(120000L)
+            .range(numRows)
             .repartition(1)
             .sortWithinPartitions("id")
-            .selectExpr("CAST(id AS INT) AS id", "sha2(cast(id AS STRING), 256) AS payload")
+            .selectExpr(
+              "CAST(id AS INT) AS id",
+              s"repeat(sha2(cast(id AS STRING), 256), $payloadRepeats) AS payload")
             .write
             .format("iceberg")
             .mode("append")
@@ -1094,6 +1108,15 @@ class CometIcebergNativeSuite
       val files = spark.sql(s"SELECT file_path FROM $table.files").collect()
       assert(files.length == 1)
       val dataFile = new File(new URI(files.head.getString(0)))
+      val fileBytes = dataFile.length()
+      val parquet = org.apache.parquet.hadoop.ParquetFileReader.open(
+        org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
+          new org.apache.hadoop.fs.Path(files.head.getString(0)),
+          spark.sessionState.newHadoopConf()))
+      val rowGroups =
+        try { parquet.getRowGroups.size }
+        finally { parquet.close() }
+      if (numRows >= 4000000L) { assert(rowGroups >= 64) }
       val digest = java.security.MessageDigest.getInstance("SHA-256")
       val input = new java.io.FileInputStream(dataFile)
       try {
@@ -1113,38 +1136,58 @@ class CometIcebergNativeSuite
       spark.read
         .parquet(new File(warehouse, "code_before_after_dim").getAbsolutePath)
         .createOrReplaceTempView("code_benchmark_dim")
-      val query = """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
-        FROM code_benchmark_fact f JOIN code_benchmark_dim d ON f.id = d.id"""
-      withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-        assert(spark.sql(query).collect().head.getLong(0) == 2048L)
+      val queries = Seq(
+        "join" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
+          FROM code_benchmark_fact f JOIN code_benchmark_dim d ON f.id = d.id""",
+        "min" -> "SELECT min(id) FROM code_benchmark_fact",
+        "topk" -> "SELECT id FROM code_benchmark_fact ORDER BY id ASC LIMIT 10")
+      for ((queryName, query) <- queries) {
+        var expected = Seq.empty[Row]
+        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+          expected = spark.sql(query).collect().toSeq
+        }
+        val expectedNumbers = expected.map(_.get(0).asInstanceOf[Number].longValue())
+        val values = queryName match {
+          case "join" => Seq(expectedValue)
+          case "min" => Seq(0L)
+          case "topk" => (0L until 10L)
+        }
+        assert(expectedNumbers == values)
+        // Both versions enable the same producer flags. JVM startup, fixture
+        // creation and these warmups are excluded from query elapsed time.
+        (0 until 2).foreach { _ => assert(spark.sql(query).collect().toSeq == expected) }
+        val df = spark.sql(query)
+        val started = System.nanoTime()
+        val rows = df.collect()
+        val millis = (System.nanoTime() - started) / 1000000.0
+        assert(rows.toSeq == expected)
+        val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
+        assert(scans.length == 1)
+        val scan = scans.head
+        val bytes = scan.metrics("bytes_scanned").value
+        val tasks = scan.metrics("iceberg_runtime_predicate_tasks").value
+        val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value
+        val initial = scan.metrics("iceberg_runtime_row_groups_pruned_initial").value
+        val live = scan.metrics("iceberg_runtime_row_groups_pruned_live").value
+        val refreshes = scan.metrics("iceberg_runtime_predicate_refreshes").value
+        assert(bytes > 0)
+        if (variant == "after") {
+          assert(tasks > 0 && pruned > 0)
+          if (queryName == "join") { assert(initial > 0 && live == 0) }
+          else { assert(initial == 0 && live > 0 && refreshes > 0) }
+        } else { assert(tasks == 0 && pruned == 0) }
+        val iteration = sys.env("COMET_CODE_BENCHMARK_ITERATION").toInt
+        val revision = sys.env("COMET_CODE_BENCHMARK_REVISION")
+        val valuesJson = values.mkString("[", ",", "]")
+        val json =
+          s"""{"variant":"$variant","revision":"$revision","iteration":$iteration,"query":"$queryName","file_sha256":"$sha256","values":$valuesJson,"rows":$numRows,"file_bytes":$fileBytes,"row_groups":$rowGroups,"bytes_scanned":$bytes,"runtime_predicate_tasks":$tasks,"runtime_row_groups_pruned":$pruned,"initial_pruned":$initial,"live_pruned":$live,"refreshes":$refreshes,"wall_ms":$millis}"""
+        println(s"ICEBERG_CODE_BENCHMARK $json")
+        val _ = java.nio.file.Files.write(
+          java.nio.file.Paths.get(sys.env("COMET_CODE_BENCHMARK_OUTPUT")),
+          (json + "\n").getBytes(UTF_8),
+          java.nio.file.StandardOpenOption.CREATE,
+          java.nio.file.StandardOpenOption.APPEND)
       }
-      // Both versions run with exact join dynamic filtering enabled. JVM startup,
-      // fixture creation and these two warmups are excluded from query elapsed time.
-      (0 until 2).foreach { _ => assert(spark.sql(query).collect().head.getLong(0) == 2048L) }
-      val df = spark.sql(query)
-      val started = System.nanoTime()
-      val rows = df.collect()
-      val millis = (System.nanoTime() - started) / 1000000.0
-      assert(rows.head.getLong(0) == 2048L)
-      val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
-      assert(scans.length == 1)
-      val scan = scans.head
-      val bytes = scan.metrics("bytes_scanned").value
-      val tasks = scan.metrics("iceberg_runtime_predicate_tasks").value
-      val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value
-      assert(bytes > 0)
-      if (variant == "after") { assert(tasks > 0 && pruned > 0) }
-      else { assert(tasks == 0 && pruned == 0) }
-      val iteration = sys.env("COMET_CODE_BENCHMARK_ITERATION").toInt
-      val revision = sys.env("COMET_CODE_BENCHMARK_REVISION")
-      val json =
-        s"""{"variant":"$variant","revision":"$revision","iteration":$iteration,"file_sha256":"$sha256","value":2048,"bytes_scanned":$bytes,"runtime_predicate_tasks":$tasks,"runtime_row_groups_pruned":$pruned,"wall_ms":$millis}"""
-      println(s"ICEBERG_CODE_BENCHMARK $json")
-      val _ = java.nio.file.Files.write(
-        java.nio.file.Paths.get(sys.env("COMET_CODE_BENCHMARK_OUTPUT")),
-        (json + "\n").getBytes(UTF_8),
-        java.nio.file.StandardOpenOption.CREATE,
-        java.nio.file.StandardOpenOption.APPEND)
     }
   }
 
