@@ -38,7 +38,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use futures::{Stream, StreamExt, TryStreamExt};
-use iceberg::arrow::ScanMetrics;
+use iceberg::arrow::{RuntimePredicateProvider, ScanMetrics};
 use iceberg::io::FileIO;
 use iceberg::Runtime as IcebergRuntime;
 use iceberg::{Error, ErrorKind};
@@ -83,6 +83,8 @@ pub struct IcebergScanExec {
     tasks: Vec<FileScanTask>,
     /// Number of data files to read concurrently
     data_file_concurrency_limit: usize,
+    /// Execution-time predicate source attached to this scan.
+    runtime_predicate_provider: Option<Arc<dyn RuntimePredicateProvider>>,
     /// Metrics
     metrics: ExecutionPlanMetricsSet,
 }
@@ -109,8 +111,80 @@ impl IcebergScanExec {
             catalog_name,
             tasks,
             data_file_concurrency_limit,
+            runtime_predicate_provider: None,
             metrics,
         })
+    }
+
+    pub(crate) fn runtime_predicate_field_name(&self, output_index: usize) -> Option<String> {
+        use arrow::datatypes::DataType;
+        use iceberg::spec::{PrimitiveType, Type};
+
+        let output = self.output_schema.fields().get(output_index)?;
+        let mut field_id = None;
+        let mut field_name: Option<String> = None;
+
+        for task in &self.tasks {
+            let current_id = *task.project_field_ids().get(output_index)?;
+            if field_id.is_some_and(|expected| expected != current_id) {
+                return None;
+            }
+            // Only top-level signed integer fields have a direct output-column mapping.
+            // Looking up a nested leaf by id and then binding its short name could prune
+            // an unrelated top-level field with that name.
+            let field = task
+                .schema()
+                .as_struct()
+                .fields()
+                .iter()
+                .find(|f| f.id == current_id)?;
+            // Runtime references are bound by name using the task's case policy.
+            // In particular, case-insensitive binding can resolve `key` and `KEY`
+            // to the same id. Never let it change the projected field's identity.
+            let bound_field = if task.case_sensitive() {
+                task.schema().field_by_name(&field.name)
+            } else {
+                task.schema().field_by_name_case_insensitive(&field.name)
+            }?;
+            if bound_field.id != current_id {
+                return None;
+            }
+            if !matches!(
+                (output.data_type(), field.field_type.as_ref()),
+                (DataType::Int32, Type::Primitive(PrimitiveType::Int))
+                    | (DataType::Int64, Type::Primitive(PrimitiveType::Long))
+            ) {
+                return None;
+            }
+            let current_name = field.name.clone();
+            if field_name
+                .as_ref()
+                .is_some_and(|expected| expected != &current_name)
+            {
+                return None;
+            }
+            field_id = Some(current_id);
+            field_name = Some(current_name);
+        }
+
+        field_name
+    }
+
+    pub(crate) fn with_runtime_predicate_provider(
+        &self,
+        runtime_predicate_provider: Arc<dyn RuntimePredicateProvider>,
+    ) -> Self {
+        Self {
+            metadata_location: self.metadata_location.clone(),
+            output_schema: Arc::clone(&self.output_schema),
+            plan_properties: Arc::clone(&self.plan_properties),
+            catalog_properties: self.catalog_properties.clone(),
+            catalog_name: self.catalog_name.clone(),
+            tasks: self.tasks.clone(),
+            data_file_concurrency_limit: self.data_file_concurrency_limit,
+            runtime_predicate_provider: Some(runtime_predicate_provider),
+            metrics: self.metrics.clone(),
+        }
     }
 
     fn compute_properties(schema: SchemaRef, num_partitions: usize) -> Arc<PlanProperties> {
@@ -194,13 +268,19 @@ impl IcebergScanExec {
         // fill_delete_file_sizes).
         let fill_io = file_io.clone();
         let concurrency_limit = self.data_file_concurrency_limit;
-        let task_stream = futures::stream::once(async move {
-            let mut tasks = tasks;
-            Self::fill_delete_file_sizes(&mut tasks, &fill_io, concurrency_limit).await?;
-            Ok::<_, Error>(futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)))
-        })
-        .try_flatten()
-        .boxed();
+        let task_stream = if self.runtime_predicate_provider.is_some() {
+            // Unknown delete sizes are resolved by iceberg-rust's cached loader
+            // only for retained tasks, after the pre-open runtime file decision.
+            futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)).boxed()
+        } else {
+            futures::stream::once(async move {
+                let mut tasks = tasks;
+                Self::fill_delete_file_sizes(&mut tasks, &fill_io, concurrency_limit).await?;
+                Ok::<_, Error>(futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)))
+            })
+            .try_flatten()
+            .boxed()
+        };
 
         // iceberg-rust's ArrowReader spawns IO/CPU work onto an iceberg::Runtime, which only needs
         // a tokio handle. execute() runs on the JVM-called thread outside any tokio context, so we
@@ -214,12 +294,15 @@ impl IcebergScanExec {
                 DataFusionError::Execution(format!("Failed to build Iceberg runtime: {e}"))
             })?
         };
-        let reader = iceberg::arrow::ArrowReaderBuilder::new(file_io, iceberg_runtime)
+        let mut reader_builder = iceberg::arrow::ArrowReaderBuilder::new(file_io, iceberg_runtime)
             .with_batch_size(batch_size)
             .with_data_file_concurrency_limit(self.data_file_concurrency_limit)
             .with_row_selection_enabled(true)
-            .with_metadata_size_hint(512 * 1024) // Same as DataFusion's default
-            .build();
+            .with_metadata_size_hint(512 * 1024); // Same as DataFusion's default
+        if let Some(provider) = &self.runtime_predicate_provider {
+            reader_builder = reader_builder.with_runtime_predicate_provider(Arc::clone(provider));
+        }
+        let reader = reader_builder.build();
 
         // Pass all tasks to iceberg-rust at once to utilize its flatten_unordered
         // parallelization, avoiding overhead of single-task streams
@@ -244,7 +327,26 @@ impl IcebergScanExec {
             baseline_metrics: metrics.baseline,
             scan_metrics,
             bytes_scanned: metrics.bytes_scanned,
+            runtime_file_tasks_considered: metrics.runtime_file_tasks_considered,
+            runtime_file_tasks_pruned: metrics.runtime_file_tasks_pruned,
+            runtime_predicate_tasks: metrics.runtime_predicate_tasks,
+            runtime_row_groups_pruned: metrics.runtime_row_groups_pruned,
+            runtime_live_pruning_tasks: metrics.runtime_live_pruning_tasks,
+            runtime_predicate_refreshes: metrics.runtime_predicate_refreshes,
+            runtime_row_groups_considered: metrics.runtime_row_groups_considered,
+            runtime_row_groups_pruned_initial: metrics.runtime_row_groups_pruned_initial,
+            runtime_row_groups_pruned_live: metrics.runtime_row_groups_pruned_live,
+
             last_reported_bytes: 0,
+            last_reported_runtime_file_tasks_considered: 0,
+            last_reported_runtime_file_tasks_pruned: 0,
+            last_reported_runtime_predicate_tasks: 0,
+            last_reported_runtime_row_groups_pruned: 0,
+            last_reported_runtime_live_pruning_tasks: 0,
+            last_reported_runtime_predicate_refreshes: 0,
+            last_reported_runtime_row_groups_considered: 0,
+            last_reported_runtime_row_groups_pruned_initial: 0,
+            last_reported_runtime_row_groups_pruned_live: 0,
         };
 
         Ok(Box::pin(wrapped_stream))
@@ -363,6 +465,7 @@ impl IcebergScanExec {
             .with_start(task.start())
             .with_length(task.length())
             .with_record_count(task.record_count())
+            .with_file_metrics(task.file_metrics().cloned())
             .with_first_row_id(task.first_row_id())
             .with_data_sequence_number(task.data_sequence_number())
             .with_data_file_path(task.data_file_path().to_string())
@@ -389,6 +492,17 @@ struct IcebergScanMetrics {
     num_splits: Count,
     /// Total bytes read from storage
     bytes_scanned: Count,
+    /// Number of file tasks that received a runtime predicate
+    runtime_file_tasks_considered: Count,
+    runtime_file_tasks_pruned: Count,
+    runtime_predicate_tasks: Count,
+    /// Number of row groups skipped by runtime predicate statistics
+    runtime_row_groups_pruned: Count,
+    runtime_live_pruning_tasks: Count,
+    runtime_predicate_refreshes: Count,
+    runtime_row_groups_considered: Count,
+    runtime_row_groups_pruned_initial: Count,
+    runtime_row_groups_pruned_live: Count,
 }
 
 impl IcebergScanMetrics {
@@ -397,6 +511,24 @@ impl IcebergScanMetrics {
             baseline: BaselineMetrics::new(metrics, 0),
             num_splits: MetricBuilder::new(metrics).counter("num_splits", 0),
             bytes_scanned: MetricBuilder::new(metrics).counter("bytes_scanned", 0),
+            runtime_file_tasks_considered: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_file_tasks_considered", 0),
+            runtime_file_tasks_pruned: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_file_tasks_pruned", 0),
+            runtime_predicate_tasks: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_predicate_tasks", 0),
+            runtime_row_groups_pruned: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_pruned", 0),
+            runtime_live_pruning_tasks: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_live_pruning_tasks", 0),
+            runtime_predicate_refreshes: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_predicate_refreshes", 0),
+            runtime_row_groups_considered: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_considered", 0),
+            runtime_row_groups_pruned_initial: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_pruned_initial", 0),
+            runtime_row_groups_pruned_live: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_pruned_live", 0),
         }
     }
 }
@@ -420,6 +552,25 @@ struct IcebergStreamWrapper<S> {
     bytes_scanned: Count,
     /// Last reported bytes_read value for delta computation
     last_reported_bytes: u64,
+    runtime_file_tasks_considered: Count,
+    runtime_file_tasks_pruned: Count,
+    runtime_predicate_tasks: Count,
+    runtime_row_groups_pruned: Count,
+    runtime_live_pruning_tasks: Count,
+    runtime_predicate_refreshes: Count,
+    runtime_row_groups_considered: Count,
+    runtime_row_groups_pruned_initial: Count,
+    runtime_row_groups_pruned_live: Count,
+
+    last_reported_runtime_file_tasks_considered: u64,
+    last_reported_runtime_file_tasks_pruned: u64,
+    last_reported_runtime_predicate_tasks: u64,
+    last_reported_runtime_row_groups_pruned: u64,
+    last_reported_runtime_live_pruning_tasks: u64,
+    last_reported_runtime_predicate_refreshes: u64,
+    last_reported_runtime_row_groups_considered: u64,
+    last_reported_runtime_row_groups_pruned_initial: u64,
+    last_reported_runtime_row_groups_pruned_live: u64,
 }
 
 /// Cached projection state: file schema, adapter, and pre-built projection expressions.
@@ -492,6 +643,70 @@ where
             self.last_reported_bytes = current;
         }
 
+        let current = self.scan_metrics.runtime_file_tasks_considered();
+        let delta = current.saturating_sub(self.last_reported_runtime_file_tasks_considered);
+        if delta > 0 {
+            self.runtime_file_tasks_considered.add(delta as usize);
+            self.last_reported_runtime_file_tasks_considered = current;
+        }
+
+        let current = self.scan_metrics.runtime_file_tasks_pruned();
+        let delta = current.saturating_sub(self.last_reported_runtime_file_tasks_pruned);
+        if delta > 0 {
+            self.runtime_file_tasks_pruned.add(delta as usize);
+            self.last_reported_runtime_file_tasks_pruned = current;
+        }
+
+        let current_tasks = self.scan_metrics.runtime_predicate_tasks();
+        let task_delta = current_tasks.saturating_sub(self.last_reported_runtime_predicate_tasks);
+        if task_delta > 0 {
+            self.runtime_predicate_tasks.add(task_delta as usize);
+            self.last_reported_runtime_predicate_tasks = current_tasks;
+        }
+
+        let current_pruned = self.scan_metrics.runtime_row_groups_pruned();
+        let pruned_delta =
+            current_pruned.saturating_sub(self.last_reported_runtime_row_groups_pruned);
+        if pruned_delta > 0 {
+            self.runtime_row_groups_pruned.add(pruned_delta as usize);
+            self.last_reported_runtime_row_groups_pruned = current_pruned;
+        }
+
+        let current = self.scan_metrics.runtime_live_pruning_tasks();
+        let delta = current.saturating_sub(self.last_reported_runtime_live_pruning_tasks);
+        if delta > 0 {
+            self.runtime_live_pruning_tasks.add(delta as usize);
+            self.last_reported_runtime_live_pruning_tasks = current;
+        }
+
+        let current = self.scan_metrics.runtime_predicate_refreshes();
+        let delta = current.saturating_sub(self.last_reported_runtime_predicate_refreshes);
+        if delta > 0 {
+            self.runtime_predicate_refreshes.add(delta as usize);
+            self.last_reported_runtime_predicate_refreshes = current;
+        }
+
+        let current = self.scan_metrics.runtime_row_groups_considered();
+        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_considered);
+        if delta > 0 {
+            self.runtime_row_groups_considered.add(delta as usize);
+            self.last_reported_runtime_row_groups_considered = current;
+        }
+
+        let current = self.scan_metrics.runtime_row_groups_pruned_initial();
+        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_pruned_initial);
+        if delta > 0 {
+            self.runtime_row_groups_pruned_initial.add(delta as usize);
+            self.last_reported_runtime_row_groups_pruned_initial = current;
+        }
+
+        let current = self.scan_metrics.runtime_row_groups_pruned_live();
+        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_pruned_live);
+        if delta > 0 {
+            self.runtime_row_groups_pruned_live.add(delta as usize);
+            self.last_reported_runtime_row_groups_pruned_live = current;
+        }
+
         self.baseline_metrics.record_poll(result)
     }
 }
@@ -526,6 +741,10 @@ impl fmt::Debug for IcebergScanExec {
                 &RedactedProperties(&self.catalog_properties),
             )
             .field("num_tasks", &self.tasks.len())
+            .field(
+                "runtime_predicate_attached",
+                &self.runtime_predicate_provider.is_some(),
+            )
             .field(
                 "data_file_concurrency_limit",
                 &self.data_file_concurrency_limit,
@@ -614,6 +833,136 @@ mod tests {
     use iceberg_storage_opendal::OpenDalStorageFactory;
 
     use super::IcebergScanExec;
+
+    #[test]
+    fn runtime_field_mapping_respects_projection_identity_and_type() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use iceberg::spec::{NestedField, PrimitiveType, Type};
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(2, "value", Type::Primitive(PrimitiveType::Long)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let task = |ids| {
+            FileScanTask::builder()
+                .with_file_size_in_bytes(1024)
+                .with_start(0)
+                .with_length(0)
+                .with_data_file_path("/tmp/schema-only.parquet".into())
+                .with_data_file_format(DataFileFormat::Parquet)
+                .with_schema(Arc::clone(&schema))
+                .with_project_field_ids(ids)
+                .with_case_sensitive(false)
+                .build()
+                .unwrap()
+        };
+        let scan = |data_type, tasks| {
+            IcebergScanExec::new(
+                "/tmp/metadata.json".into(),
+                Arc::new(ArrowSchema::new(vec![Field::new("value", data_type, true)])),
+                Default::default(),
+                String::new(),
+                tasks,
+                1,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            scan(DataType::Int64, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            Some("value".into())
+        );
+        assert_eq!(
+            scan(DataType::Int32, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            None
+        );
+        assert_eq!(
+            scan(DataType::UInt64, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            None
+        );
+        assert_eq!(
+            scan(DataType::Int64, vec![task(vec![2]), task(vec![1])])
+                .runtime_predicate_field_name(0),
+            None
+        );
+        assert_eq!(
+            scan(DataType::Int64, vec![task(vec![2])]).runtime_predicate_field_name(1),
+            None
+        );
+        assert_eq!(
+            scan(DataType::Int64, vec![]).runtime_predicate_field_name(0),
+            None
+        );
+
+        let nested_schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(
+                        3,
+                        "nested",
+                        Type::Struct(iceberg::spec::StructType::new(vec![NestedField::optional(
+                            1,
+                            "value",
+                            Type::Primitive(PrimitiveType::Long),
+                        )
+                        .into()])),
+                    )
+                    .into(),
+                    NestedField::optional(2, "value", Type::Primitive(PrimitiveType::Long)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let nested_task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("/tmp/nested.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(nested_schema)
+            .with_project_field_ids(vec![1])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+        assert_eq!(
+            scan(DataType::Int64, vec![nested_task]).runtime_predicate_field_name(0),
+            None
+        );
+
+        let case_schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(2, "KEY", Type::Primitive(PrimitiveType::Int)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let resolved_id = case_schema
+            .field_by_name_case_insensitive("key")
+            .unwrap()
+            .id;
+        let other_id = if resolved_id == 1 { 2 } else { 1 };
+        let case_task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("/tmp/case.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(case_schema)
+            .with_project_field_ids(vec![other_id])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+        assert_eq!(
+            scan(DataType::Int32, vec![case_task]).runtime_predicate_field_name(0),
+            None
+        );
+    }
 
     fn fs_file_io() -> FileIO {
         FileIOBuilder::new(Arc::new(OpenDalStorageFactory::Fs)).build()
