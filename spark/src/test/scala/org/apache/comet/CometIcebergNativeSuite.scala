@@ -1082,6 +1082,7 @@ class CometIcebergNativeSuite
               'format-version' = '2',
               'read.split.adaptive-size.enabled' = 'false',
               'read.split.open-file-cost' = '1',
+              'write.target-file-size-bytes' = '2147483647',
               'write.parquet.row-group-size-bytes' = '$rowGroupBytes',
               'write.parquet.compression-codec' = 'uncompressed')
           """)
@@ -1130,7 +1131,7 @@ class CometIcebergNativeSuite
       val sha256 = digest.digest().map(b => f"${b & 0xff}%02x").mkString
       spark.read
         .format("iceberg")
-        .option("split-size", "134217728")
+        .option("split-size", "2147483647")
         .load(table)
         .createOrReplaceTempView("code_benchmark_fact")
       spark.read
