@@ -1,0 +1,554 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: MergeRows Selection Benchmark
+
+on:
+  push:
+    branches:
+      - perf/mergerows-selection-vectors
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: stable
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Repeated same-runner A/B
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: amd64/rust
+    env:
+      CARGO_TARGET_DIR: /tmp/mergerows-bench-target
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust and Java
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: ${{ env.RUST_VERSION }}
+          jdk-version: 17
+
+      - name: Build parent and optimized benchmark binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          git fetch --no-tags origin mergerows-operator-generic
+
+          HEAD_SHA="${GITHUB_SHA}"
+          BASE_SHA="$(git rev-parse origin/mergerows-operator-generic)"
+          cp native/core/benches/merge_rows.rs /tmp/merge_rows.rs
+
+          build_bench() {
+            local variant="$1"
+            cd native
+            cargo bench -p datafusion-comet --bench merge_rows --no-default-features --no-run
+            cd ..
+            local bench_bin
+            bench_bin="$(
+              find "${CARGO_TARGET_DIR}/release/deps" -maxdepth 1 -type f -perm -111 -name 'merge_rows-*'                 -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-
+            )"
+            if [[ -z "${bench_bin}" ]]; then
+              echo "MergeRows benchmark executable not found"
+              exit 1
+            fi
+            cp "${bench_bin}" "/tmp/merge_rows-${variant}"
+            chmod +x "/tmp/merge_rows-${variant}"
+            sha256sum "/tmp/merge_rows-${variant}"
+          }
+
+          git checkout --detach "${BASE_SHA}"
+          cp /tmp/merge_rows.rs native/core/benches/merge_rows.rs
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("native/core/Cargo.toml")
+          text = path.read_text()
+          stanza = '\n[[bench]]\nname = "merge_rows"\nharness = false\n'
+          if 'name = "merge_rows"' not in text:
+              path.write_text(text + stanza)
+          PY
+          build_bench base
+
+          git reset --hard
+          git clean -fd
+          git checkout --detach "${HEAD_SHA}"
+          build_bench head
+
+      - name: Run repeated alternating benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mergerows-results
+          cd native
+
+          capture_results() {
+            local variant="$1"
+            local round="$2"
+            python3 - "${variant}" "${round}" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          variant = sys.argv[1]
+          round_number = sys.argv[2]
+          root = Path(os.environ["CARGO_TARGET_DIR"]) / "criterion"
+          results = {}
+          for path in root.glob("**/new/estimates.json"):
+              if "mergerows_clause_dispatch" not in path.as_posix():
+                  continue
+              key = path.parent.parent.relative_to(root).as_posix()
+              data = json.loads(path.read_text())
+              median = data["median"]
+              results[key] = {
+                  "median_ns": median["point_estimate"],
+                  "median_ci_lower_ns": median["confidence_interval"]["lower_bound"],
+                  "median_ci_upper_ns": median["confidence_interval"]["upper_bound"],
+                  "mean_ns": data["mean"]["point_estimate"],
+              }
+          if not results:
+              raise SystemExit(f"no MergeRows Criterion estimates found for {variant} round {round_number}")
+          output = Path("/tmp/mergerows-results") / f"{variant}-{round_number}.json"
+          output.write_text(json.dumps(results, indent=2, sort_keys=True))
+          print(f"{variant} round {round_number}:")
+          print(json.dumps(results, indent=2, sort_keys=True))
+          PY
+          }
+
+          run_variant() {
+            local variant="$1"
+            local round="$2"
+            rm -rf "${CARGO_TARGET_DIR}/criterion/mergerows_clause_dispatch"
+            "/tmp/merge_rows-${variant}" --bench \
+              --warm-up-time 2 \
+              --measurement-time 4 \
+              --sample-size 40
+            capture_results "${variant}" "${round}"
+          }
+
+          for round in 1 2 3 4; do
+            if (( round % 2 == 1 )); then
+              run_variant base "${round}"
+              run_variant head "${round}"
+            else
+              run_variant head "${round}"
+              run_variant base "${round}"
+            fi
+          done
+
+      - name: Summarize benchmark stability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          import statistics
+          from pathlib import Path
+
+          root = Path("/tmp/mergerows-results")
+          rounds = range(1, 5)
+          base = {r: json.loads((root / f"base-{r}.json").read_text()) for r in rounds}
+          head = {r: json.loads((root / f"head-{r}.json").read_text()) for r in rounds}
+
+          keys = sorted(set.intersection(*(set(base[r]) & set(head[r]) for r in rounds)))
+          if not keys:
+              raise SystemExit("parent/head Criterion result sets do not overlap")
+
+          def cv(values):
+              if len(values) < 2:
+                  return 0.0
+              return statistics.stdev(values) / statistics.mean(values) * 100.0
+
+          aggregate = {}
+          suspicious = []
+          lines = [
+              "## MergeRows selection-vector benchmark",
+              "",
+              "Four base/head rounds ran on the same GitHub-hosted runner. Execution order alternated "
+              "base→head / head→base to reduce warm-cache and thermal-order bias. Each Criterion run "
+              "uses 2 s warm-up, 4 s measurement, and 40 samples.",
+              "",
+              "| Benchmark | Parent median | Optimized median | Speedup | Change | Paired speedup range | CV base/head | Stability |",
+              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+          ]
+
+          for key in keys:
+              base_values = [base[r][key]["median_ns"] for r in rounds]
+              head_values = [head[r][key]["median_ns"] for r in rounds]
+              paired = [base[r][key]["median_ns"] / head[r][key]["median_ns"] for r in rounds]
+
+              before = statistics.median(base_values)
+              after = statistics.median(head_values)
+              speedup = before / after
+              change = (1.0 - after / before) * 100.0
+              base_cv = cv(base_values)
+              head_cv = cv(head_values)
+
+              reasons = []
+              if min(paired) <= 1.0:
+                  reasons.append("direction reversal")
+              if base_cv > 8.0 or head_cv > 8.0:
+                  reasons.append("high round variance")
+              if max(paired) / min(paired) > 1.20:
+                  reasons.append("wide speedup spread")
+              status = "stable" if not reasons else "noisy: " + ", ".join(reasons)
+              if reasons:
+                  suspicious.append({"benchmark": key, "reasons": reasons})
+
+              aggregate[key] = {
+                  "base_round_medians_ns": base_values,
+                  "head_round_medians_ns": head_values,
+                  "base_median_ns": before,
+                  "head_median_ns": after,
+                  "speedup": speedup,
+                  "change_percent": change,
+                  "paired_speedups": paired,
+                  "base_cv_percent": base_cv,
+                  "head_cv_percent": head_cv,
+                  "stability": status,
+              }
+
+              lines.append(
+                  f"| `{key}` | {before / 1e6:.3f} ms | {after / 1e6:.3f} ms | "
+                  f"{speedup:.3f}x | {change:+.1f}% | {min(paired):.3f}–{max(paired):.3f}x | "
+                  f"{base_cv:.1f}% / {head_cv:.1f}% | {status} |"
+              )
+
+          lines += [
+              "",
+              "The reported parent/optimized values are medians of the four per-round Criterion medians. "
+              "A case is flagged when a paired round reverses direction, either side exceeds 8% CV across "
+              "round medians, or the paired speedup range spans more than 20%.",
+          ]
+          if suspicious:
+              lines += [
+                  "",
+                  "### Cases needing caution",
+                  "",
+                  *[
+                      f"- `{item['benchmark']}`: {', '.join(item['reasons'])}"
+                      for item in suspicious
+                  ],
+              ]
+          else:
+              lines += ["", "No benchmark case crossed the noise/suspicion thresholds."]
+
+          summary = "\n".join(lines) + "\n"
+          print(summary)
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(summary)
+          Path("/tmp/benchmark-summary.md").write_text(summary)
+          Path("/tmp/benchmark-aggregate.json").write_text(
+              json.dumps(
+                  {"benchmarks": aggregate, "suspicious": suspicious},
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+          PY
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v6
+        with:
+          name: mergerows-selection-benchmark
+          path: |
+            /tmp/mergerows-results/*.json
+            /tmp/benchmark-aggregate.json
+            /tmp/benchmark-summary.md
+          if-no-files-found: error
+
+
+  spark-comparison:
+    name: Spark vs Comet same-runner controls
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: amd64/rust
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust and Java
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: 17
+
+      - name: Record benchmark environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "== uname =="
+            uname -a
+            echo
+            echo "== CPU =="
+            lscpu
+            echo
+            echo "== memory =="
+            free -h
+            echo
+            echo "== processors =="
+            nproc
+            echo
+            echo "== Java =="
+            java -version
+            echo
+            echo "== Rust =="
+            rustc --version
+            cargo --version
+          } 2>&1 | tee /tmp/mergerows-spark-environment.txt
+
+      - name: Run parent and optimized Spark comparisons
+        shell: bash
+        env:
+          COMET_MERGEROWS_ROWS: "131072"
+          COMET_MERGEROWS_ROUNDS: "7"
+          COMET_MERGEROWS_WARMUPS: "2"
+          BENCH_HEAP: "7g"
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --no-tags origin mergerows-operator-generic
+
+          HEAD_SHA="$GITHUB_SHA"
+          BASE_SHA="$(git rev-parse origin/mergerows-operator-generic)"
+          cp spark/src/test/scala/org/apache/spark/sql/benchmark/CometMergeRowsBenchmark.scala             /tmp/CometMergeRowsBenchmark.scala
+
+          run_variant() {
+            variant="$1"
+            sha="$2"
+            echo "============================================================"
+            echo "Spark benchmark variant: $variant ($sha)"
+            echo "============================================================"
+
+            git reset --hard
+            git clean -fd
+            git checkout --detach "$sha"
+            mkdir -p spark/src/test/scala/org/apache/spark/sql/benchmark
+            cp /tmp/CometMergeRowsBenchmark.scala               spark/src/test/scala/org/apache/spark/sql/benchmark/CometMergeRowsBenchmark.scala
+
+            COMET_MERGEROWS_BENCH_JSON="/tmp/spark-$variant.json"               make PROFILES="-Pspark-3.5" BENCH_HEAP="$BENCH_HEAP"                 benchmark-org.apache.spark.sql.benchmark.CometMergeRowsBenchmark               2>&1 | tee "/tmp/spark-$variant.log"
+          }
+
+          run_variant parent "$BASE_SHA"
+          run_variant optimized "$HEAD_SHA"
+
+      - name: Summarize Spark and Comet comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          import statistics
+          from pathlib import Path
+
+          parent = json.loads(Path("/tmp/spark-parent.json").read_text())
+          optimized = json.loads(Path("/tmp/spark-optimized.json").read_text())
+
+          def workloads(doc):
+              return {w["name"]: w for w in doc["workloads"]}
+
+          pwork = workloads(parent)
+          owork = workloads(optimized)
+          keys = sorted(set(pwork) & set(owork))
+          if set(pwork) != set(owork):
+              raise SystemExit("parent/head Spark benchmark workload sets differ")
+
+          def median(values):
+              return statistics.median(values)
+
+          def mean(values):
+              return statistics.mean(values)
+
+          def cv(values):
+              m = mean(values)
+              if len(values) < 2 or m == 0:
+                  return 0.0
+              return statistics.stdev(values) / m * 100.0
+
+          def drift(a, b):
+              return abs(b / a - 1.0) * 100.0
+
+          def ratio_range(a, b):
+              ratios = [x / y for x, y in zip(a, b)]
+              return min(ratios), max(ratios), ratios
+
+          aggregate = {}
+          suspicious = []
+          lines = [
+              "## Spark vs Comet MergeRows benchmark",
+              "",
+              "The parent and optimized revisions were built and measured sequentially on the same "
+              "GitHub-hosted VM. Inside each revision, Spark-only, Comet with JVM MergeRows, and "
+              "Comet with native MergeRows share one SparkSession; seven measured rounds rotate "
+              "arm order after two equal warm-ups. Each arm is plan-verified and result-verified "
+              "before timing.",
+              "",
+              "| Workload | Spark only | Comet + JVM MR | Parent native | Optimized native | Spark → optimized | JVM MR → native | Parent → optimized | Spark/JVM control drift | Stability |",
+              "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+          ]
+
+          for key in keys:
+              pw = pwork[key]["measurements_ms"]
+              ow = owork[key]["measurements_ms"]
+
+              p_spark = median(pw["spark"])
+              p_jvm = median(pw["comet_jvm"])
+              p_native = median(pw["comet_native"])
+              o_spark = median(ow["spark"])
+              o_jvm = median(ow["comet_jvm"])
+              o_native = median(ow["comet_native"])
+
+              spark_native = o_spark / o_native
+              jvm_native = o_jvm / o_native
+              parent_optimized = p_native / o_native
+              spark_drift = drift(p_spark, o_spark)
+              jvm_drift = drift(p_jvm, o_jvm)
+
+              spark_pair_min, spark_pair_max, spark_pairs = ratio_range(
+                  ow["spark"], ow["comet_native"])
+              jvm_pair_min, jvm_pair_max, jvm_pairs = ratio_range(
+                  ow["comet_jvm"], ow["comet_native"])
+
+              cvs = {
+                  "parent_spark": cv(pw["spark"]),
+                  "parent_jvm": cv(pw["comet_jvm"]),
+                  "parent_native": cv(pw["comet_native"]),
+                  "optimized_spark": cv(ow["spark"]),
+                  "optimized_jvm": cv(ow["comet_jvm"]),
+                  "optimized_native": cv(ow["comet_native"]),
+              }
+
+              reasons = []
+              if max(cvs.values()) > 10.0:
+                  reasons.append("CV > 10%")
+              if spark_drift > 8.0:
+                  reasons.append("Spark control drift > 8%")
+              if jvm_drift > 8.0:
+                  reasons.append("JVM control drift > 8%")
+              if spark_pair_max / spark_pair_min > 1.25:
+                  reasons.append("Spark/native paired spread > 25%")
+              if jvm_pair_max / jvm_pair_min > 1.25:
+                  reasons.append("JVM/native paired spread > 25%")
+
+              status = "stable" if not reasons else "caution: " + ", ".join(reasons)
+              if reasons:
+                  suspicious.append({"workload": key, "reasons": reasons})
+
+              aggregate[key] = {
+                  "parent_median_ms": {
+                      "spark": p_spark,
+                      "comet_jvm": p_jvm,
+                      "comet_native": p_native,
+                  },
+                  "optimized_median_ms": {
+                      "spark": o_spark,
+                      "comet_jvm": o_jvm,
+                      "comet_native": o_native,
+                  },
+                  "speedups": {
+                      "spark_to_optimized_native": spark_native,
+                      "optimized_jvm_to_native": jvm_native,
+                      "parent_native_to_optimized_native": parent_optimized,
+                  },
+                  "control_drift_percent": {
+                      "spark": spark_drift,
+                      "comet_jvm": jvm_drift,
+                  },
+                  "cv_percent": cvs,
+                  "optimized_paired_speedups": {
+                      "spark_to_native": spark_pairs,
+                      "jvm_to_native": jvm_pairs,
+                  },
+                  "stability": status,
+              }
+
+              lines.append(
+                  f"| `{key}` | {o_spark:.2f} ms | {o_jvm:.2f} ms | "
+                  f"{p_native:.2f} ms | {o_native:.2f} ms | {spark_native:.3f}x | "
+                  f"{jvm_native:.3f}x | {parent_optimized:.3f}x | "
+                  f"{spark_drift:.1f}% / {jvm_drift:.1f}% | {status} |"
+              )
+
+          lines += [
+              "",
+              "### Trust checks",
+              "",
+              "- Spark-only and Comet+JVM MergeRows are control arms present in both the parent and "
+              "optimized revisions. Their drift detects VM/JIT/environment movement unrelated to "
+              "the native MergeRows change.",
+              "- Within each revision, arm order rotates every round instead of always timing one "
+              "engine first.",
+              "- All six workloads use the same deterministic 131,072-row target/source corpus.",
+              "- Workloads cover 2/4/8/16 matched clauses at 12 payload columns and 8 clauses at "
+              "4/12/32 payload columns.",
+              "- Every arm must execute the expected plan and produce the expected row count and "
+              "checksum before any measurements are accepted.",
+              "- Raw per-round timings and complete build logs are uploaded with the summary.",
+          ]
+
+          if suspicious:
+              lines += ["", "### Results requiring caution", ""]
+              lines.extend(
+                  f"- `{item['workload']}`: {', '.join(item['reasons'])}"
+                  for item in suspicious
+              )
+          else:
+              lines += ["", "No workload crossed the configured noise/control thresholds."]
+
+          summary = "\n".join(lines) + "\n"
+          print(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write("\n" + summary)
+          Path("/tmp/spark-comparison-summary.md").write_text(summary)
+          Path("/tmp/spark-comparison-aggregate.json").write_text(
+              json.dumps(
+                  {"benchmarks": aggregate, "suspicious": suspicious},
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+          PY
+
+      - name: Upload Spark comparison results
+        uses: actions/upload-artifact@v6
+        with:
+          name: mergerows-spark-comparison
+          path: |
+            /tmp/spark-parent.json
+            /tmp/spark-optimized.json
+            /tmp/spark-parent.log
+            /tmp/spark-optimized.log
+            /tmp/spark-comparison-summary.md
+            /tmp/spark-comparison-aggregate.json
+            /tmp/mergerows-spark-environment.txt
+          if-no-files-found: error
