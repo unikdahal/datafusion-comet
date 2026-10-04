@@ -290,14 +290,14 @@ const SEEN_FIXED_BYTES: usize = std::mem::size_of::<RoaringTreemap>();
 const SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES: usize = 256;
 const SEEN_CONTAINER_OVERHEAD_BYTES: usize = 64;
 
-// Admission happens before mutating the roaring state. For every container touched by the incoming
-// batch, reserve enough headroom for a second copy of the container payload plus metadata. This
-// covers Vec growth/reallocation while the old allocation is still live. The bounds are deliberately
-// looser than roaring 0.11.5's current array/bitmap backing stores.
+// Admission happens before mutating the roaring state. Array containers may reallocate while the
+// old allocation is still live, so use a deliberately loose per-slot bound. A bitmap container has
+// fixed backing storage after the array-to-bitmap transition, so only that transition needs payload
+// headroom on later batches.
 const SEEN_ARRAY_MIN_CAPACITY: u64 = 4;
 const SEEN_ARRAY_SLOT_UPPER_BYTES: u64 = 8;
 const SEEN_ARRAY_LIMIT: u64 = 4096;
-const SEEN_BITMAP_PAYLOAD_UPPER_BYTES: u64 = 16 * 1024;
+const SEEN_BITMAP_TRANSITION_HEADROOM_BYTES: u64 = 32 * 1024;
 
 fn seen_memory_overflow() -> DataFusionError {
     DataFusionError::ResourcesExhausted(
@@ -332,9 +332,16 @@ fn estimate_seen_memory_size(seen: &RoaringTreemap) -> Result<usize, DataFusionE
     Ok(total)
 }
 
-fn projected_container_payload_upper_bound(cardinality: u64) -> Result<usize, DataFusionError> {
-    let bytes = if cardinality <= SEEN_ARRAY_LIMIT {
-        let capacity = cardinality
+fn projected_container_payload_headroom(
+    existing_cardinality: u64,
+    projected_cardinality: u64,
+) -> Result<usize, DataFusionError> {
+    let bytes = if existing_cardinality > SEEN_ARRAY_LIMIT {
+        // BitmapStore has fixed backing storage. Inserting another value only flips a bit, so
+        // repeatedly reserving another bitmap payload would create false memory-pool failures.
+        0
+    } else if projected_cardinality <= SEEN_ARRAY_LIMIT {
+        let capacity = projected_cardinality
             .max(SEEN_ARRAY_MIN_CAPACITY)
             .checked_next_power_of_two()
             .ok_or_else(seen_memory_overflow)?;
@@ -342,7 +349,10 @@ fn projected_container_payload_upper_bound(cardinality: u64) -> Result<usize, Da
             .checked_mul(SEEN_ARRAY_SLOT_UPPER_BYTES)
             .ok_or_else(seen_memory_overflow)?
     } else {
-        SEEN_BITMAP_PAYLOAD_UPPER_BYTES
+        // Cover the one-time array growth plus array-to-bitmap conversion. In roaring 0.11.5 the
+        // array stores u32 values and the bitmap payload is 8 KiB, so 32 KiB remains conservative
+        // even while the old array allocation is still live.
+        SEEN_BITMAP_TRANSITION_HEADROOM_BYTES
     };
     usize::try_from(bytes).map_err(|_| seen_memory_overflow())
 }
@@ -381,7 +391,7 @@ fn estimate_seen_batch_headroom(
         headroom = checked_seen_add(headroom, SEEN_CONTAINER_OVERHEAD_BYTES)?;
         headroom = checked_seen_add(
             headroom,
-            projected_container_payload_upper_bound(projected)?,
+            projected_container_payload_headroom(existing, projected)?,
         )?;
         index = end_index;
     }
@@ -1233,6 +1243,22 @@ mod tests {
             assert_eq!(seen.len(), ids.len() as u64, "{name}");
             assert_seen_fully_reserved(&seen, &reservation);
         }
+    }
+
+    #[test]
+    fn bitmap_payload_headroom_is_only_charged_for_the_transition() {
+        assert_eq!(
+            projected_container_payload_headroom(0, SEEN_ARRAY_LIMIT + 1).unwrap(),
+            SEEN_BITMAP_TRANSITION_HEADROOM_BYTES as usize
+        );
+        assert_eq!(
+            projected_container_payload_headroom(
+                SEEN_ARRAY_LIMIT + 1,
+                SEEN_ARRAY_LIMIT + 2
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]

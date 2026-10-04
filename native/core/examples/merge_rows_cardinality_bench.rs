@@ -33,7 +33,7 @@ const ROARING_CONTAINER_OVERHEAD_BYTES: usize = 64;
 const ROARING_ARRAY_MIN_CAPACITY: u64 = 4;
 const ROARING_ARRAY_SLOT_UPPER_BYTES: u64 = 8;
 const ROARING_ARRAY_LIMIT: u64 = 4096;
-const ROARING_BITMAP_PAYLOAD_UPPER_BYTES: u64 = 16 * 1024;
+const ROARING_BITMAP_TRANSITION_HEADROOM_BYTES: u64 = 32 * 1024;
 
 #[derive(Clone, Copy)]
 enum Layout {
@@ -88,15 +88,20 @@ fn roaring_reserved_bytes(seen: &RoaringTreemap) -> usize {
     total
 }
 
-fn projected_container_payload_upper_bound(cardinality: u64) -> usize {
-    let bytes = if cardinality <= ROARING_ARRAY_LIMIT {
-        let capacity = cardinality
+fn projected_container_payload_headroom(
+    existing_cardinality: u64,
+    projected_cardinality: u64,
+) -> usize {
+    let bytes = if existing_cardinality > ROARING_ARRAY_LIMIT {
+        0
+    } else if projected_cardinality <= ROARING_ARRAY_LIMIT {
+        let capacity = projected_cardinality
             .max(ROARING_ARRAY_MIN_CAPACITY)
             .checked_next_power_of_two()
             .unwrap();
         capacity * ROARING_ARRAY_SLOT_UPPER_BYTES
     } else {
-        ROARING_BITMAP_PAYLOAD_UPPER_BYTES
+        ROARING_BITMAP_TRANSITION_HEADROOM_BYTES
     };
     usize::try_from(bytes).unwrap()
 }
@@ -123,7 +128,7 @@ fn roaring_batch_headroom(seen: &RoaringTreemap, ids: &[u64]) -> usize {
         let end = start | u16::MAX as u64;
         let projected = seen.range_cardinality(start..=end) + (end_index - index) as u64;
         headroom +=
-            ROARING_CONTAINER_OVERHEAD_BYTES + projected_container_payload_upper_bound(projected);
+            ROARING_CONTAINER_OVERHEAD_BYTES + projected_container_payload_headroom(existing, projected);
         index = end_index;
     }
     headroom
@@ -209,6 +214,14 @@ fn main() {
         Scenario {
             name: "one-in-200",
             layout: Layout::Stride(200),
+        },
+        Scenario {
+            name: "spark-8-partitions",
+            layout: Layout::SparkPartitions(8),
+        },
+        Scenario {
+            name: "spark-200-partitions",
+            layout: Layout::SparkPartitions(200),
         },
         Scenario {
             name: "spark-2k-partitions",
