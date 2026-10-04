@@ -1044,6 +1044,110 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("true code before after native Iceberg benchmark") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    assume(sys.env.contains("COMET_CODE_BENCHMARK_WAREHOUSE"), "fork Actions benchmark only")
+    val warehouse = new File(sys.env("COMET_CODE_BENCHMARK_WAREHOUSE"))
+    val variant = sys.env("COMET_CODE_BENCHMARK_VARIANT")
+    require(Set("before", "after").contains(variant))
+    val table = "test_cat.db.code_before_after"
+    withSQLConf(
+      "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+      "spark.sql.catalog.test_cat.type" -> "hadoop",
+      "spark.sql.catalog.test_cat.warehouse" -> warehouse.getAbsolutePath,
+      "spark.sql.adaptive.enabled" -> "false",
+      "spark.sql.shuffle.partitions" -> "1",
+      CometConf.COMET_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true",
+      CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+      // Persist across separate JVMs: both native libraries read the very same file.
+      if (!spark.catalog.tableExists(table)) {
+        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+          spark.sql(s"""
+            CREATE TABLE $table (id INT, payload STRING) USING iceberg
+            TBLPROPERTIES (
+              'format-version' = '2',
+              'read.split.adaptive-size.enabled' = 'false',
+              'read.split.open-file-cost' = '1',
+              'write.parquet.row-group-size-bytes' = '131072',
+              'write.parquet.compression-codec' = 'uncompressed')
+          """)
+          spark
+            .range(120000L)
+            .repartition(1)
+            .sortWithinPartitions("id")
+            .selectExpr("CAST(id AS INT) AS id", "sha2(cast(id AS STRING), 256) AS payload")
+            .write
+            .format("iceberg")
+            .mode("append")
+            .saveAsTable(table)
+          spark
+            .range(50000L, 50064L)
+            .filter("id % 2 = 0")
+            .coalesce(1)
+            .selectExpr("CAST(id AS INT) AS id")
+            .write
+            .parquet(new File(warehouse, "code_before_after_dim").getAbsolutePath)
+        }
+      }
+      val files = spark.sql(s"SELECT file_path FROM $table.files").collect()
+      assert(files.length == 1)
+      val dataFile = new File(new URI(files.head.getString(0)))
+      val digest = java.security.MessageDigest.getInstance("SHA-256")
+      val input = new java.io.FileInputStream(dataFile)
+      try {
+        val buffer = new Array[Byte](65536)
+        var count = input.read(buffer)
+        while (count >= 0) {
+          digest.update(buffer, 0, count)
+          count = input.read(buffer)
+        }
+      } finally { input.close() }
+      val sha256 = digest.digest().map(b => f"${b & 0xff}%02x").mkString
+      spark.read
+        .format("iceberg")
+        .option("split-size", "134217728")
+        .load(table)
+        .createOrReplaceTempView("code_benchmark_fact")
+      spark.read
+        .parquet(new File(warehouse, "code_before_after_dim").getAbsolutePath)
+        .createOrReplaceTempView("code_benchmark_dim")
+      val query = """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
+        FROM code_benchmark_fact f JOIN code_benchmark_dim d ON f.id = d.id"""
+      withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+        assert(spark.sql(query).collect().head.getLong(0) == 2048L)
+      }
+      // Both versions run with exact join dynamic filtering enabled. JVM startup,
+      // fixture creation and these two warmups are excluded from query elapsed time.
+      (0 until 2).foreach { _ => assert(spark.sql(query).collect().head.getLong(0) == 2048L) }
+      val df = spark.sql(query)
+      val started = System.nanoTime()
+      val rows = df.collect()
+      val millis = (System.nanoTime() - started) / 1000000.0
+      assert(rows.head.getLong(0) == 2048L)
+      val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
+      assert(scans.length == 1)
+      val scan = scans.head
+      val bytes = scan.metrics("bytes_scanned").value
+      val tasks = scan.metrics("iceberg_runtime_predicate_tasks").value
+      val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value
+      assert(bytes > 0)
+      if (variant == "after") { assert(tasks > 0 && pruned > 0) }
+      else { assert(tasks == 0 && pruned == 0) }
+      val iteration = sys.env("COMET_CODE_BENCHMARK_ITERATION").toInt
+      val revision = sys.env("COMET_CODE_BENCHMARK_REVISION")
+      val json =
+        s"""{"variant":"$variant","revision":"$revision","iteration":$iteration,"file_sha256":"$sha256","value":2048,"bytes_scanned":$bytes,"runtime_predicate_tasks":$tasks,"runtime_row_groups_pruned":$pruned,"wall_ms":$millis}"""
+      println(s"ICEBERG_CODE_BENCHMARK $json")
+      val _ = java.nio.file.Files.write(
+        java.nio.file.Paths.get(sys.env("COMET_CODE_BENCHMARK_OUTPUT")),
+        (json + "\n").getBytes(UTF_8),
+        java.nio.file.StandardOpenOption.CREATE,
+        java.nio.file.StandardOpenOption.APPEND)
+    }
+  }
+
   test("join runtime filter prunes native Iceberg row groups and bytes") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 
