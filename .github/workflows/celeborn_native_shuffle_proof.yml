@@ -67,7 +67,7 @@ jobs:
             -Dspark.version="${SPARK_VERSION}" \
             -Dceleborn.version="${CELEBORN_VERSION}" \
             -Dtest=none \
-            -Dsuites=org.apache.comet.shuffle.PatchedCelebornCompatibilitySuite \
+            -Dsuites=org.apache.comet.shuffle.PatchedCelebornCompatibilityProof \
             -DfailIfNoTests=false
 
   ownership-stress:
