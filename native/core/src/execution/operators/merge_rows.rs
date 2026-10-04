@@ -38,6 +38,7 @@ use datafusion_comet_common::{cast_and_stamp_schema, SparkError};
 use futures::{Stream, StreamExt};
 use roaring::RoaringTreemap;
 use std::{
+    collections::{HashMap, HashSet},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -285,17 +286,28 @@ pub struct MergeRowsStream {
 
 const SEEN_FIXED_BYTES: usize = std::mem::size_of::<RoaringTreemap>();
 // RoaringBitmap::statistics reports backing-store capacities, but not container metadata or the
-// BTreeMap nodes used by RoaringTreemap. Keep conservative per-partition/container overheads so the
-// memory-pool reservation remains an upper bound rather than just payload bytes.
+// BTreeMap nodes used by RoaringTreemap. These constants deliberately over-account that metadata.
+// They are accounting estimates, not allocator-exact measurements.
 const SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES: usize = 256;
 const SEEN_CONTAINER_OVERHEAD_BYTES: usize = 64;
 
+// Admission happens before mutating the roaring state. For every container touched by the incoming
+// batch, reserve enough headroom for a second copy of the container payload plus metadata. This
+// covers Vec growth/reallocation while the old allocation is still live. The bounds are deliberately
+// looser than roaring 0.11.5's current array/bitmap backing stores.
+const SEEN_ARRAY_MIN_CAPACITY: u64 = 4;
+const SEEN_ARRAY_SLOT_UPPER_BYTES: u64 = 8;
+const SEEN_ARRAY_LIMIT: u64 = 4096;
+const SEEN_BITMAP_PAYLOAD_UPPER_BYTES: u64 = 16 * 1024;
+
+fn seen_memory_overflow() -> DataFusionError {
+    DataFusionError::ResourcesExhausted(
+        "MergeRows: cardinality memory estimate overflow".to_string(),
+    )
+}
+
 fn checked_seen_add(total: usize, additional: usize) -> Result<usize, DataFusionError> {
-    total.checked_add(additional).ok_or_else(|| {
-        DataFusionError::ResourcesExhausted(
-            "MergeRows: cardinality memory estimate overflow".to_string(),
-        )
-    })
+    total.checked_add(additional).ok_or_else(seen_memory_overflow)
 }
 
 fn estimate_seen_memory_size(seen: &RoaringTreemap) -> Result<usize, DataFusionError> {
@@ -306,29 +318,69 @@ fn estimate_seen_memory_size(seen: &RoaringTreemap) -> Result<usize, DataFusionE
             .n_bytes_array_containers
             .checked_add(statistics.n_bytes_run_containers)
             .and_then(|bytes| bytes.checked_add(statistics.n_bytes_bitset_containers))
-            .ok_or_else(|| {
-                DataFusionError::ResourcesExhausted(
-                    "MergeRows: cardinality memory estimate overflow".to_string(),
-                )
-            })?;
-        let payload_bytes = usize::try_from(payload_bytes).map_err(|_| {
-            DataFusionError::ResourcesExhausted(
-                "MergeRows: cardinality memory estimate overflow".to_string(),
-            )
-        })?;
+            .ok_or_else(seen_memory_overflow)?;
+        let payload_bytes =
+            usize::try_from(payload_bytes).map_err(|_| seen_memory_overflow())?;
         let container_overhead = (statistics.n_containers as usize)
             .checked_mul(SEEN_CONTAINER_OVERHEAD_BYTES)
-            .ok_or_else(|| {
-                DataFusionError::ResourcesExhausted(
-                    "MergeRows: cardinality memory estimate overflow".to_string(),
-                )
-            })?;
+            .ok_or_else(seen_memory_overflow)?;
 
         total = checked_seen_add(total, SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES)?;
         total = checked_seen_add(total, container_overhead)?;
         total = checked_seen_add(total, payload_bytes)?;
     }
     Ok(total)
+}
+
+fn projected_container_payload_upper_bound(cardinality: u64) -> Result<usize, DataFusionError> {
+    let bytes = if cardinality <= SEEN_ARRAY_LIMIT {
+        let capacity = cardinality
+            .max(SEEN_ARRAY_MIN_CAPACITY)
+            .checked_next_power_of_two()
+            .ok_or_else(seen_memory_overflow)?;
+        capacity
+            .checked_mul(SEEN_ARRAY_SLOT_UPPER_BYTES)
+            .ok_or_else(seen_memory_overflow)?
+    } else {
+        SEEN_BITMAP_PAYLOAD_UPPER_BYTES
+    };
+    usize::try_from(bytes).map_err(|_| seen_memory_overflow())
+}
+
+fn estimate_seen_batch_headroom(
+    seen: &RoaringTreemap,
+    ids: &[u64],
+) -> Result<usize, DataFusionError> {
+    let mut containers: HashMap<u64, u64> = HashMap::new();
+    let mut partitions: HashSet<u32> = HashSet::new();
+
+    for &id in ids {
+        let container_key = id >> 16;
+        *containers.entry(container_key).or_default() += 1;
+        partitions.insert((id >> 32) as u32);
+    }
+
+    let mut headroom = partitions
+        .len()
+        .checked_mul(SEEN_TREEMAP_PARTITION_OVERHEAD_BYTES)
+        .ok_or_else(seen_memory_overflow)?;
+
+    for (container_key, incoming) in containers {
+        let start = container_key << 16;
+        let end = start | u16::MAX as u64;
+        let existing = seen.range_cardinality(start..=end);
+        let projected = existing
+            .checked_add(incoming)
+            .ok_or_else(seen_memory_overflow)?;
+
+        headroom = checked_seen_add(headroom, SEEN_CONTAINER_OVERHEAD_BYTES)?;
+        headroom = checked_seen_add(
+            headroom,
+            projected_container_payload_upper_bound(projected)?,
+        )?;
+    }
+
+    Ok(headroom)
 }
 
 /// Spark predicates treat NULL as false; Arrow boolean kernels preserve NULL.
@@ -440,14 +492,42 @@ fn cardinality_violation() -> DataFusionError {
     DataFusionError::External(Box::new(SparkError::MergeCardinalityViolation))
 }
 
+fn reserve_seen_batch(
+    seen: &RoaringTreemap,
+    ids: &[u64],
+    reservation: &mut MemoryReservation,
+) -> Result<(), DataFusionError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let current_bytes = estimate_seen_memory_size(seen)?;
+    let headroom = estimate_seen_batch_headroom(seen, ids)?;
+    let target = current_bytes
+        .checked_add(headroom)
+        .ok_or_else(seen_memory_overflow)?;
+    if target > reservation.size() {
+        reservation.try_grow(target - reservation.size())?;
+    }
+    Ok(())
+}
+
 fn sync_seen_reservation(
     seen: &RoaringTreemap,
     reservation: &mut MemoryReservation,
 ) -> Result<(), DataFusionError> {
     let projected_bytes = estimate_seen_memory_size(seen)?;
     if projected_bytes > reservation.size() {
-        reservation.try_grow(projected_bytes - reservation.size())?;
-    } else if projected_bytes < reservation.size() {
+        // This indicates that the pre-admission bound above was too small. The memory already
+        // exists, so account it infallibly before surfacing an internal error rather than issuing a
+        // post-allocation try_grow.
+        let missing = projected_bytes - reservation.size();
+        reservation.grow(missing);
+        return Err(DataFusionError::Internal(format!(
+            "MergeRows: cardinality admission underestimated roaring growth by {missing} bytes"
+        )));
+    }
+    if projected_bytes < reservation.size() {
         reservation.shrink(reservation.size() - projected_bytes);
     }
     Ok(())
@@ -469,7 +549,15 @@ fn check_cardinality(
             DataFusionError::Internal("MergeRows: row id column must be Int64".to_string())
         })?;
 
-    let mut inserted = false;
+    let matched_count = matched_mask.true_count();
+    if matched_count == 0 {
+        return Ok(());
+    }
+
+    // Validate all duplicates before asking the memory pool for more space. This preserves Spark's
+    // cardinality-error precedence both across batches and within the current batch.
+    let mut ids = Vec::with_capacity(matched_count);
+    let mut batch_seen = HashSet::with_capacity(matched_count);
     for i in matched_mask.values().set_indices() {
         // Spark's row-id read treats a null long slot as zero.
         let id = if row_ids.is_null(i) {
@@ -479,18 +567,21 @@ fn check_cardinality(
         };
 
         // Casting is a bijection over i64 bit patterns, so negative row ids remain distinct.
-        if !seen.insert(id as u64) {
+        let id = id as u64;
+        if seen.contains(id) || !batch_seen.insert(id) {
             return Err(cardinality_violation());
         }
-        inserted = true;
+        ids.push(id);
     }
 
-    // Reconcile against roaring's actual backing capacities once per input batch. Any temporary
-    // unreserved growth is therefore bounded by the current Arrow batch.
-    if inserted {
-        sync_seen_reservation(seen, reservation)?;
+    // Reserve conservative growth headroom before roaring is allowed to allocate. Once insertion
+    // completes, shrink the reservation back to the backing-capacity estimate.
+    reserve_seen_batch(seen, &ids, reservation)?;
+    for id in ids {
+        debug_assert!(seen.insert(id), "duplicates were validated before admission");
     }
-    Ok(())
+    sync_seen_reservation(seen, reservation)
+
 }
 
 fn process_batch(
@@ -1074,14 +1165,27 @@ mod tests {
     }
 
     #[test]
+    fn cardinality_state_is_not_mutated_when_pool_rejects_admission() {
+        let mut seen = RoaringTreemap::new();
+        let batch = test_batch(vec![1, 2, 3], vec![0; 3], vec![true; 3], vec![true; 3]);
+        let mut reservation = bounded_reservation(1);
+        let err = check_cardinality(
+            &batch,
+            &BooleanArray::from(vec![true; 3]),
+            0,
+            &mut seen,
+            &mut reservation,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, DataFusionError::ResourcesExhausted(_)));
+        assert!(seen.is_empty(), "pool admission must happen before roaring allocation");
+        assert_eq!(reservation.size(), 0);
+    }
+
+    #[test]
     fn cardinality_state_respects_a_bounded_pool() {
         let n = 917_505;
-        let mut tiny_reservation = bounded_reservation(1);
-        let err = run_cardinality(n, 4096, &mut tiny_reservation).unwrap_err();
-        assert!(
-            matches!(err, DataFusionError::ResourcesExhausted(_)),
-            "expected the pool to reject cardinality state that exceeds its budget, got {err}"
-        );
 
         let mut probe_reservation = test_reservation();
         let probe = run_cardinality(n, 4096, &mut probe_reservation).unwrap();
@@ -1091,7 +1195,8 @@ mod tests {
             "dense roaring cardinality state unexpectedly needs {needed} bytes"
         );
 
-        let mut ok_reservation = bounded_reservation(needed + 64 * 1024);
+        // Allow enough transient admission headroom for the final batch as well as retained state.
+        let mut ok_reservation = bounded_reservation(needed + 256 * 1024);
         let seen = run_cardinality(n, 4096, &mut ok_reservation).unwrap();
         assert_eq!(seen.len(), n as u64);
         assert_seen_fully_reserved(&seen, &ok_reservation);
@@ -1128,6 +1233,23 @@ mod tests {
             "expected cardinality violation before pool admission, got {duplicate_err}"
         );
 
+        let within_batch_duplicate =
+            test_batch(vec![2, 2], vec![0, 0], vec![true, true], vec![true, true]);
+        let duplicate_err = check_cardinality(
+            &within_batch_duplicate,
+            &BooleanArray::from(vec![true, true]),
+            0,
+            &mut seen,
+            &mut zero_budget,
+        )
+        .unwrap_err();
+        assert!(
+            duplicate_err
+                .to_string()
+                .contains("MERGE_CARDINALITY_VIOLATION"),
+            "expected within-batch cardinality violation before pool admission, got {duplicate_err}"
+        );
+
         let new_id = test_batch(vec![2], vec![0], vec![true], vec![true]);
         let memory_err = check_cardinality(
             &new_id,
@@ -1141,6 +1263,7 @@ mod tests {
             matches!(memory_err, DataFusionError::ResourcesExhausted(_)),
             "expected memory exhaustion for a new id, got {memory_err}"
         );
+        assert!(!seen.contains(2), "failed admission must not mutate roaring state");
     }
 
     #[test]
