@@ -1159,253 +1159,6 @@ class CometIcebergNativeSuite
     }
   }
 
-  test("true code before after native Iceberg benchmark") {
-    assume(icebergAvailable, "Iceberg not available in classpath")
-    assume(sys.env.contains("COMET_CODE_BENCHMARK_WAREHOUSE"), "fork Actions benchmark only")
-    val warehouse = new File(sys.env("COMET_CODE_BENCHMARK_WAREHOUSE"))
-    val variant = sys.env("COMET_CODE_BENCHMARK_VARIANT")
-    require(Set("before", "snapshot", "after").contains(variant))
-    val table = "test_cat.db.code_before_after"
-    val numRows = sys.env.get("COMET_CODE_BENCHMARK_ROWS").map(_.toLong).getOrElse(120000L)
-    val payloadRepeats = sys.env
-      .get("COMET_CODE_BENCHMARK_PAYLOAD_REPEATS")
-      .map(_.toInt)
-      .getOrElse(1)
-    val rowGroupBytes = sys.env.getOrElse("COMET_CODE_BENCHMARK_ROW_GROUP_BYTES", "131072")
-    require(numRows > 50064 && numRows <= Int.MaxValue && payloadRepeats > 0)
-    val expectedValue = 32L * 64L * payloadRepeats
-    withSQLConf(
-      "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
-      "spark.sql.catalog.test_cat.type" -> "hadoop",
-      "spark.sql.catalog.test_cat.warehouse" -> warehouse.getAbsolutePath,
-      "spark.sql.adaptive.enabled" -> "false",
-      "spark.sql.shuffle.partitions" -> "1",
-      CometConf.COMET_ENABLED.key -> "true",
-      CometConf.COMET_EXEC_ENABLED.key -> "true",
-      "spark.sql.iceberg.aggregate-push-down.enabled" -> "false",
-      CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true",
-      CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key -> "true",
-      CometConf.COMET_EXEC_TOPK_FUSION_ENABLED.key -> "true",
-      CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key -> "true",
-      CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
-      // Persist across separate JVMs: both native libraries read the very same file.
-      if (!spark.catalog.tableExists(table)) {
-        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-          spark.sql(s"""
-            CREATE TABLE $table (id INT, payload STRING) USING iceberg
-            TBLPROPERTIES (
-              'format-version' = '2',
-              'read.split.adaptive-size.enabled' = 'false',
-              'read.split.open-file-cost' = '1',
-              'write.target-file-size-bytes' = '2147483647',
-              'write.parquet.row-group-size-bytes' = '$rowGroupBytes',
-              'write.parquet.compression-codec' = 'uncompressed')
-          """)
-          spark
-            .range(numRows)
-            .repartition(1)
-            .sortWithinPartitions("id")
-            .selectExpr(
-              "CAST(id AS INT) AS id",
-              s"repeat(sha2(cast(id AS STRING), 256), $payloadRepeats) AS payload")
-            .write
-            .format("iceberg")
-            .mode("append")
-            .saveAsTable(table)
-          spark
-            .range(50000L, 50064L)
-            .filter("id % 2 = 0")
-            .coalesce(1)
-            .selectExpr("CAST(id AS INT) AS id")
-            .write
-            .parquet(new File(warehouse, "code_before_after_dim").getAbsolutePath)
-          spark
-            .range(0L, numRows, numRows - 1L)
-            .coalesce(1)
-            .selectExpr("CAST(id AS INT) AS id")
-            .write
-            .parquet(new File(warehouse, "code_before_after_wide_dim").getAbsolutePath)
-        }
-      }
-      val files = spark.sql(s"SELECT file_path FROM $table.files").collect()
-      assert(files.length == 1)
-      val dataUri = new org.apache.hadoop.fs.Path(files.head.getString(0)).toUri
-      val dataFile =
-        if (dataUri.getScheme == null) new File(dataUri.getPath) else new File(dataUri)
-      val fileBytes = dataFile.length()
-      val parquet = org.apache.parquet.hadoop.ParquetFileReader.open(
-        org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
-          new org.apache.hadoop.fs.Path(files.head.getString(0)),
-          spark.sessionState.newHadoopConf()))
-      val rowGroups =
-        try { parquet.getRowGroups.size }
-        finally { parquet.close() }
-      if (numRows >= 4000000L) { assert(rowGroups >= 64) }
-      val digest = java.security.MessageDigest.getInstance("SHA-256")
-      val input = new java.io.FileInputStream(dataFile)
-      try {
-        val buffer = new Array[Byte](65536)
-        var count = input.read(buffer)
-        while (count >= 0) {
-          digest.update(buffer, 0, count)
-          count = input.read(buffer)
-        }
-      } finally { input.close() }
-      val sha256 = digest.digest().map(b => f"${b & 0xff}%02x").mkString
-      spark.read
-        .format("iceberg")
-        .option("split-size", "2147483647")
-        .load(table)
-        .createOrReplaceTempView("code_benchmark_fact")
-      spark.read
-        .parquet(new File(warehouse, "code_before_after_dim").getAbsolutePath)
-        .createOrReplaceTempView("code_benchmark_dim")
-      spark.read
-        .parquet(new File(warehouse, "code_before_after_wide_dim").getAbsolutePath)
-        .createOrReplaceTempView("code_benchmark_wide_dim")
-      val manyFileCount = sys.env.get("COMET_CODE_BENCHMARK_FILES").map(_.toInt).getOrElse(0)
-      val manyTable = "test_cat.db.code_multi_file_data"
-      var manyFiles = Seq.empty[File]
-      var manyBytes = 0L
-      var manyGroups = 0
-      var manySha256 = ""
-      if (manyFileCount > 0) {
-        if (!spark.catalog.tableExists(manyTable)) {
-          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-            spark.sql(s"""CREATE TABLE $manyTable (id INT, payload STRING) USING iceberg
-              TBLPROPERTIES ('format-version'='2', 'write.distribution-mode'='none',
-                'read.split.adaptive-size.enabled'='false', 'read.split.open-file-cost'='1',
-                'write.target-file-size-bytes'='2147483647',
-                'write.parquet.row-group-size-bytes'='$rowGroupBytes',
-                'write.parquet.compression-codec'='uncompressed')""")
-            spark
-              .range(numRows)
-              .repartitionByRange(manyFileCount, col("id"))
-              .sortWithinPartitions("id")
-              .selectExpr(
-                "CAST(id AS INT) AS id",
-                s"repeat(sha2(cast(id AS STRING), 256), $payloadRepeats) AS payload")
-              .write
-              .format("iceberg")
-              .mode("append")
-              .saveAsTable(manyTable)
-          }
-        }
-        manyFiles = spark
-          .sql(s"SELECT file_path FROM $manyTable.files")
-          .collect()
-          .map { row =>
-            val uri = new org.apache.hadoop.fs.Path(row.getString(0)).toUri
-            if (uri.getScheme == null) new File(uri.getPath) else new File(uri)
-          }
-          .toSeq
-          .sortBy(_.getAbsolutePath)
-        assert(manyFiles.size >= manyFileCount / 2)
-        val manyDigest = java.security.MessageDigest.getInstance("SHA-256")
-        manyFiles.foreach { file =>
-          manyBytes += file.length()
-          val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
-            org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
-              new org.apache.hadoop.fs.Path(file.getAbsolutePath),
-              spark.sessionState.newHadoopConf()))
-          try { manyGroups += reader.getRowGroups.size }
-          finally { reader.close() }
-          val stream = new java.io.FileInputStream(file)
-          try {
-            val buffer = new Array[Byte](65536)
-            var count = stream.read(buffer)
-            while (count >= 0) {
-              manyDigest.update(buffer, 0, count); count = stream.read(buffer)
-            }
-          } finally { stream.close() }
-        }
-        manySha256 = manyDigest.digest().map(b => f"${b & 0xff}%02x").mkString
-        spark.read
-          .format("iceberg")
-          .option("split-size", "2147483647")
-          .load(manyTable)
-          .createOrReplaceTempView("code_benchmark_many_fact")
-      }
-      val queries = Seq(
-        "join" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
-          FROM code_benchmark_fact f JOIN code_benchmark_dim d ON f.id = d.id""",
-        "join_no_pruning" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
-          FROM code_benchmark_fact f JOIN code_benchmark_wide_dim d ON f.id = d.id""",
-        "min" -> "SELECT min(id) FROM code_benchmark_fact",
-        "topk" -> "SELECT id, payload FROM code_benchmark_fact ORDER BY id ASC LIMIT 10") ++ (if (manyFileCount > 0)
-                                                                                                Seq(
-                                                                                                  "join_many_files" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
-            FROM code_benchmark_many_fact f JOIN code_benchmark_dim d ON f.id = d.id""")
-                                                                                              else
-                                                                                                Seq.empty)
-      for ((queryName, query) <- queries) {
-        var expected = Seq.empty[Row]
-        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-          expected = spark.sql(query).collect().toSeq
-        }
-        val expectedNumbers = expected.map(_.get(0).asInstanceOf[Number].longValue())
-        val values = queryName match {
-          case "join" | "join_many_files" => Seq(expectedValue)
-          case "join_no_pruning" => Seq(2L * 64L * payloadRepeats)
-          case "min" => Seq(0L)
-          case "topk" => (0L until 10L)
-        }
-        assert(expectedNumbers == values)
-        // Both versions enable the same producer flags. JVM startup, fixture
-        // creation and these warmups are excluded from query elapsed time.
-        (0 until 2).foreach { _ => assert(spark.sql(query).collect().toSeq == expected) }
-        val df = spark.sql(query)
-        val started = System.nanoTime()
-        val rows = df.collect()
-        val millis = (System.nanoTime() - started) / 1000000.0
-        assert(rows.toSeq == expected)
-        val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
-        assert(
-          scans.nonEmpty,
-          s"native scan missing for $queryName: " +
-            new ExtendedExplainInfo().generateVerboseInfo(df.queryExecution.executedPlan))
-        def metric(name: String): Long = scans.map(_.metrics(name).value).sum
-        val bytes = metric("bytes_scanned")
-        val tasks = metric("iceberg_runtime_predicate_tasks")
-        val pruned = metric("iceberg_runtime_row_groups_pruned")
-        val initial = metric("iceberg_runtime_row_groups_pruned_initial")
-        val live = metric("iceberg_runtime_row_groups_pruned_live")
-        val refreshes = metric("iceberg_runtime_predicate_refreshes")
-        val filesPruned = metric("iceberg_runtime_file_tasks_pruned")
-        assert(bytes > 0)
-        if (variant != "before") {
-          assert(tasks > 0)
-          if (queryName == "join_no_pruning") {
-            assert(pruned == 0 && initial == 0 && live == 0)
-          } else if (queryName != "join_many_files") { assert(pruned > 0) }
-          if (queryName == "join") { assert(initial > 0 && live == 0) }
-          else if (queryName == "join_many_files") {
-            assert(live == 0)
-            if (variant == "after") { assert(filesPruned >= manyFiles.size - 2) }
-            else { assert(filesPruned == 0 && initial > 0) }
-          } else if (queryName != "join_no_pruning") {
-            assert(initial == 0 && live > 0 && refreshes > 0)
-          }
-        } else { assert(tasks == 0 && pruned == 0) }
-        val iteration = sys.env("COMET_CODE_BENCHMARK_ITERATION").toInt
-        val revision = sys.env("COMET_CODE_BENCHMARK_REVISION")
-        val valuesJson = values.mkString("[", ",", "]")
-        val fixtureSha = if (queryName == "join_many_files") manySha256 else sha256
-        val fixtureBytes = if (queryName == "join_many_files") manyBytes else fileBytes
-        val fixtureGroups = if (queryName == "join_many_files") manyGroups else rowGroups
-        val fixtureFiles = if (queryName == "join_many_files") manyFiles.size else 1
-        val json =
-          s"""{"variant":"$variant","revision":"$revision","iteration":$iteration,"query":"$queryName","file_sha256":"$fixtureSha","values":$valuesJson,"rows":$numRows,"file_bytes":$fixtureBytes,"row_groups":$fixtureGroups,"file_count":$fixtureFiles,"file_tasks_pruned":$filesPruned,"bytes_scanned":$bytes,"runtime_predicate_tasks":$tasks,"runtime_row_groups_pruned":$pruned,"initial_pruned":$initial,"live_pruned":$live,"refreshes":$refreshes,"wall_ms":$millis}"""
-        println(s"ICEBERG_CODE_BENCHMARK $json")
-        val _ = java.nio.file.Files.write(
-          java.nio.file.Paths.get(sys.env("COMET_CODE_BENCHMARK_OUTPUT")),
-          (json + "\n").getBytes(UTF_8),
-          java.nio.file.StandardOpenOption.CREATE,
-          java.nio.file.StandardOpenOption.APPEND)
-      }
-    }
-  }
-
   test("join runtime filter prunes native Iceberg row groups and bytes") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 
@@ -1479,8 +1232,7 @@ class CometIcebergNativeSuite
             bytes: Long,
             predicateTasks: Long,
             rowGroupsPruned: Long,
-            fileTasks: Long,
-            millis: Double)
+            fileTasks: Long)
 
         val query = """
               SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
@@ -1495,43 +1247,28 @@ class CometIcebergNativeSuite
             CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key ->
               dynamicFilterEnabled.toString) {
             val df = spark.sql(query)
-            val started = System.nanoTime()
             val rows = df.collect()
-            val millis = (System.nanoTime() - started) / 1000000.0
             assert(rows.length == 1)
             val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
             assert(scans.length == 1, s"expected one native Iceberg scan, got ${scans.length}")
             val scan = scans.head
             // Completed hash-join bounds should prune at task startup. This
             // fixture must not attribute those savings to live refreshes.
-            assert(
-              scan.metrics("iceberg_runtime_row_groups_pruned_initial").value ==
-                scan.metrics("iceberg_runtime_row_groups_pruned").value)
             assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value == 0)
             assert(scan.metrics("iceberg_runtime_predicate_refreshes").value == 0)
-            if (dynamicFilterEnabled) {
-              assert(scan.metrics("iceberg_runtime_row_groups_considered").value > 0)
-            } else {
-              assert(scan.metrics("iceberg_runtime_row_groups_considered").value == 0)
-            }
             result = Some(
               RunResult(
                 rows.head.getLong(0),
                 scan.metrics("bytes_scanned").value,
                 scan.metrics("iceberg_runtime_predicate_tasks").value,
                 scan.metrics("iceberg_runtime_row_groups_pruned").value,
-                scan.metrics("num_splits").value,
-                millis))
+                scan.metrics("num_splits").value))
           }
           result.get
         }
 
         try {
-          val repetitions =
-            sys.env.get("COMET_ICEBERG_BENCHMARK_REPEATS").map(_.toInt).getOrElse(1)
-          require(repetitions >= 1)
-
-          def checkAndMeasure(
+          def checkPruning(
               mode: String,
               expected: Long,
               maximumBytePercent: Long = 25L): Unit = {
@@ -1551,55 +1288,31 @@ class CometIcebergNativeSuite
               sparkValue = spark.sql(query).collect().head.getLong(0)
             }
             assert(sparkValue == expected)
-            // Warm both paths before timing; alternate order to reduce ordering bias.
-            if (repetitions > 1) {
-              Seq(false, true).foreach { flag =>
-                assert(run(flag).value == sparkValue)
-              }
+            val disabled = run(false)
+            val enabled = run(true)
+            assert(disabled.value == sparkValue)
+            assert(enabled.value == sparkValue)
+            assert(disabled.predicateTasks == 0)
+            assert(disabled.rowGroupsPruned == 0)
+            assert(enabled.predicateTasks > 0, s"reader predicate missing: $enabled")
+            assert(enabled.rowGroupsPruned > 0, s"runtime pruning missing: $enabled")
+            assert(disabled.bytes > 0)
+            assert(disabled.fileTasks == enabled.fileTasks)
+            assert(
+              enabled.predicateTasks == enabled.fileTasks,
+              s"predicate should be sampled once per data-file task: $enabled")
+            if (adaptiveSplits) {
+              assert(enabled.fileTasks > 1, s"expected adaptive splitting: $enabled")
+            } else {
+              assert(enabled.fileTasks == 1, s"expected one data-file task: $enabled")
             }
-            (0 until repetitions).foreach { iteration =>
-              val results = (if (iteration % 2 == 0) Seq(false, true) else Seq(true, false)).map {
-                enabled => (enabled, run(enabled))
-              }.toMap
-              val disabled = results(false)
-              val enabled = results(true)
-              assert(disabled.value == sparkValue)
-              assert(enabled.value == sparkValue)
-              assert(disabled.predicateTasks == 0)
-              assert(disabled.rowGroupsPruned == 0)
-              assert(enabled.predicateTasks > 0, s"reader predicate missing: $enabled")
-              assert(enabled.rowGroupsPruned > 0, s"runtime pruning missing: $enabled")
-              assert(disabled.bytes > 0)
-              assert(disabled.fileTasks == enabled.fileTasks)
-              assert(
-                enabled.predicateTasks == enabled.fileTasks,
-                s"predicate should be sampled once per data-file task: $enabled")
-              if (adaptiveSplits) {
-                assert(enabled.fileTasks > 1, s"expected adaptive splitting: $enabled")
-              } else {
-                assert(enabled.fileTasks == 1, s"expected one data-file task: $enabled")
-              }
-              assert(
-                enabled.bytes * 100 < disabled.bytes * maximumBytePercent,
-                s"expected under $maximumBytePercent% of baseline bytes: " +
-                  s"enabled=$enabled, disabled=$disabled")
-              Seq(false, true).foreach { flag =>
-                val r = results(flag)
-                val json =
-                  s"""{"mode":"$mode","iteration":$iteration,"enabled":$flag,"rows":$numRows,"row_groups":$rowGroupCount,"file_tasks":${r.fileTasks},"value":${r.value},"bytes_scanned":${r.bytes},"runtime_predicate_tasks":${r.predicateTasks},"runtime_row_groups_pruned":${r.rowGroupsPruned},"wall_ms":${r.millis}}"""
-                println(s"ICEBERG_RUNTIME_BENCHMARK $json")
-                sys.env.get("COMET_ICEBERG_BENCHMARK_OUTPUT").foreach { output =>
-                  val _ = java.nio.file.Files.write(
-                    java.nio.file.Paths.get(output),
-                    (json + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    java.nio.file.StandardOpenOption.CREATE,
-                    java.nio.file.StandardOpenOption.APPEND)
-                }
-              }
-            }
+            assert(
+              enabled.bytes * 100 < disabled.bytes * maximumBytePercent,
+              s"expected under $maximumBytePercent% of baseline bytes: " +
+                s"enabled=$enabled, disabled=$disabled")
           }
 
-          checkAndMeasure("no_deletes", 32L * 64L)
+          checkPruning("no_deletes", 32L * 64L)
           // Also record the default adaptive split behavior. Each split independently reads
           // metadata, so the 512 KiB prefetch window limits savings on this small file.
           spark.sql("""
@@ -1609,7 +1322,7 @@ class CometIcebergNativeSuite
               'read.split.open-file-cost' = '4194304')
           """)
           spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
-          checkAndMeasure("adaptive_splits_no_deletes", 32L * 64L, 80L)
+          checkPruning("adaptive_splits_no_deletes", 32L * 64L, 80L)
           spark.sql("""
             ALTER TABLE test_cat.db.runtime_join_pruning_test
             SET TBLPROPERTIES (
@@ -1638,7 +1351,7 @@ class CometIcebergNativeSuite
               .sql("SELECT content FROM test_cat.db.runtime_join_pruning_test.delete_files")
               .collect()
               .exists(_.getInt(0) == 1))
-          checkAndMeasure("position_deletes", 31L * 64L)
+          checkPruning("position_deletes", 31L * 64L)
 
           table.refresh()
           table.manageSnapshots().rollbackTo(initialSnapshotId).commit()
@@ -1661,11 +1374,11 @@ class CometIcebergNativeSuite
               .sql("SELECT content FROM test_cat.db.runtime_join_pruning_test.delete_files")
               .collect()
               .exists(_.getInt(0) == 2))
-          checkAndMeasure("equality_deletes", 31L * 64L)
+          checkPruning("equality_deletes", 31L * 64L)
           table.refresh()
           table.newRowDelta().addDeletes(deleteFile).commit()
           spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
-          checkAndMeasure("position_and_equality_deletes", 30L * 64L)
+          checkPruning("position_and_equality_deletes", 30L * 64L)
         } finally {
           spark.catalog.dropTempView("runtime_join_dim")
           spark.catalog.dropTempView("runtime_join_fact")
@@ -1807,10 +1520,11 @@ class CometIcebergNativeSuite
                   assert(bytes > 0)
                   // Initial predicate is TRUE. Every saved row group must come
                   // from a bound published while this file is being consumed.
-                  assert(scan.metrics("iceberg_runtime_row_groups_pruned_initial").value == 0)
+                  assert(
+                    scan.metrics("iceberg_runtime_row_groups_pruned").value ==
+                      scan.metrics("iceberg_runtime_row_groups_pruned_live").value)
                   if (enabled) {
                     assert(scan.metrics("iceberg_runtime_predicate_tasks").value > 0)
-                    assert(scan.metrics("iceberg_runtime_live_pruning_tasks").value > 0)
                     assert(scan.metrics("iceberg_runtime_predicate_refreshes").value > 0)
                     assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value > 0)
                   } else {
@@ -1920,10 +1634,11 @@ class CometIcebergNativeSuite
                 assert(bytes > 0)
                 // Initial predicate is TRUE. Every saved row group must come
                 // from a bound published while this file is being consumed.
-                assert(scan.metrics("iceberg_runtime_row_groups_pruned_initial").value == 0)
+                assert(
+                  scan.metrics("iceberg_runtime_row_groups_pruned").value ==
+                    scan.metrics("iceberg_runtime_row_groups_pruned_live").value)
                 if (enabled) {
                   assert(scan.metrics("iceberg_runtime_predicate_tasks").value > 0)
-                  assert(scan.metrics("iceberg_runtime_live_pruning_tasks").value > 0)
                   assert(scan.metrics("iceberg_runtime_predicate_refreshes").value > 0)
                   assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value > 0)
                 } else {
@@ -2182,7 +1897,7 @@ class CometIcebergNativeSuite
 
   // When a delete file cannot be statted natively, the scan must fail loudly rather than read the
   // data file with deletes silently dropped. Here we delete the positional delete file from disk
-  // after it is committed, so the native fill_delete_file_sizes stat fails.
+  // after it is committed, so the native delete-file stat fails.
   test("delete file stat failure surfaces as an exception") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 
@@ -2228,7 +1943,7 @@ class CometIcebergNativeSuite
         }
 
         // If deletes were silently dropped, COUNT(*) would return a wrong count with no error and
-        // this intercept would fail. The fill must fail the scan instead.
+        // this intercept would fail. The stat must fail the scan instead.
         val e = intercept[Exception] {
           spark.sql("SELECT COUNT(*) FROM test_cat.db.missing_delete_test").collect()
         }

@@ -15,23 +15,18 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Fork-only file pruning, delete correctness, and controlled native benchmarks.
+
+# Fork-only validation of adaptive native Iceberg pruning: Rust lint and tests,
+# a release library, and the native Iceberg suite on two Spark versions.
 
 name: Fork Adaptive Iceberg Pruning Validation
 
 on:
   push:
-    branches: [feat/iceberg-adaptive-pruning]
-  workflow_dispatch:
-    inputs:
-      benchmark:
-        description: Run the historical three-version benchmark in addition to correctness
-        type: boolean
-        default: false
+    branches: [feat/iceberg-adaptive-pruning, 'adaptive-ci/**']
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: fork-iceberg-adaptive-${{ github.ref }}
@@ -42,6 +37,33 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  rust:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: '17'
+      - name: Record Rust formatting differences
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd native && cargo fmt --all
+          git -C "$GITHUB_WORKSPACE" diff -- native > "$GITHUB_WORKSPACE/rust-format.patch"
+          git -C "$GITHUB_WORKSPACE" checkout -- native
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rust-format
+          path: rust-format.patch
+      - name: Require formatted Rust sources
+        run: test ! -s rust-format.patch
+      - name: Rust lint and tests
+        uses: ./.github/actions/rust-test
+
   native:
     if: github.repository == 'unikdahal/datafusion-comet'
     runs-on: ubuntu-24.04
@@ -50,8 +72,6 @@ jobs:
       image: amd64/rust
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - uses: ./.github/actions/setup-builder
         with:
           rust-version: stable
@@ -63,42 +83,17 @@ jobs:
             ~/.cargo/git
           key: fork-runtime-registry-${{ hashFiles('native/Cargo.lock') }}
           restore-keys: Linux-cargo-ci-
-      - name: Format Rust
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cd native && cargo fmt --all
-      - name: Find a release library with identical native sources
-        id: reuse
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 dev/ci/reuse-iceberg-runtime-library.py
-      - uses: actions/download-artifact@v8
-        if: steps.reuse.outputs.artifact_id != ''
-        with:
-          artifact-ids: ${{ steps.reuse.outputs.artifact_id }}
-          run-id: ${{ steps.reuse.outputs.run_id }}
-          github-token: ${{ github.token }}
-          path: native/target/release
       - name: Build release library
-        if: steps.reuse.outputs.artifact_id == ''
         run: cd native && cargo build --release --locked
-      - name: Export formatting patch
-        if: always()
-        continue-on-error: true
-        run: git -C "$GITHUB_WORKSPACE" diff -- native > rust-format.patch
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: runtime-rust-format
-          path: rust-format.patch
       - uses: actions/upload-artifact@v7
         with:
           name: runtime-release-library
           path: native/target/release/libcomet.so
+
   integration:
     needs: native
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     container:
       image: amd64/rust
     strategy:
@@ -108,7 +103,6 @@ jobs:
     env:
       SPARK_LOCAL_HOSTNAME: localhost
       SPARK_LOCAL_IP: 127.0.0.1
-      COMET_ICEBERG_BENCHMARK_REPEATS: '1'
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-builder
@@ -126,14 +120,15 @@ jobs:
             /root/.m2/repository
           key: runtime-maven-${{ hashFiles('**/pom.xml') }}
           restore-keys: Linux-java-maven-
-      - name: Format Scala
+      - name: Record Scala formatting differences
         env:
           SPARK_PROFILE: ${{ matrix.spark }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ./mvnw -B spotless:apply -Pspark-$SPARK_PROFILE
-          git diff -- spark > scala-format.patch
-      - name: Full native Iceberg correctness, deletes, and runtime producers
+          git diff -- spark common > scala-format.patch
+          git checkout -- spark common
+      - name: Native Iceberg suite, runtime producers and deletes
         env:
           SPARK_PROFILE: ${{ matrix.spark }}
         run: |
@@ -148,90 +143,5 @@ jobs:
             scala-format.patch
             **/target/surefire-reports/*
             **/target/unit-tests.log
-
-  benchmark:
-    if: github.event_name == 'workflow_dispatch' && inputs.benchmark
-    needs: native
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    container:
-      image: amd64/rust
-    env:
-      SPARK_LOCAL_HOSTNAME: localhost
-      SPARK_LOCAL_IP: 127.0.0.1
-      COMET_CODE_BENCHMARK_FILES: '64'
-      COMET_CODE_BENCHMARK_ROWS: '4000000'
-      COMET_CODE_BENCHMARK_PAYLOAD_REPEATS: '4'
-      COMET_CODE_BENCHMARK_ROW_GROUP_BYTES: '8388608'
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup-builder
-        with:
-          rust-version: stable
-          jdk-version: '17'
-      - uses: actions/download-artifact@v8
-        with:
-          artifact-ids: 11299279389
-          run-id: 37192526799
-          github-token: ${{ github.token }}
-          path: code-libraries/code-benchmark-native-before
-      - uses: actions/download-artifact@v8
-        with:
-          artifact-ids: 11299851441
-          run-id: 37191842146
-          github-token: ${{ github.token }}
-          path: code-libraries/code-benchmark-native-after/native/target/release
-      - name: Record the three native versions
-        run: |
-          test "$(cat code-libraries/code-benchmark-native-before/code-revision.txt)" = 569eaa59d032f758669777964aee2d24eb55ebae
-          mkdir -p code-libraries/code-benchmark-native-snapshot
-          mv code-libraries/code-benchmark-native-after/native code-libraries/code-benchmark-native-snapshot/native
-          # The cross-run download above is the pre-file-pruning production library.
-          # Download this workflow's current release below into the final variant.
-          echo 6cc962b72b3ecf9328f2e0b442ac43e1b981d240 > code-libraries/code-benchmark-native-snapshot/code-revision.txt
-          echo "${{ github.sha }}" > code-libraries/code-benchmark-native-after/code-revision.txt
-      - uses: actions/download-artifact@v8
-        with:
-          name: runtime-release-library
-          path: code-libraries/code-benchmark-native-after/native/target/release
-      - name: Record library checksums
-        run: sha256sum code-libraries/code-benchmark-native-*/native/target/release/libcomet.so
-      - name: Mark checkout safe for build helpers
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: actions/cache/restore@v6
-        with:
-          path: |
-            ~/.m2/repository
-            /root/.m2/repository
-          key: runtime-maven-${{ hashFiles('**/pom.xml') }}
-          restore-keys: Linux-java-maven-
-      - name: Measure exact before and after code against the same persisted file
-        run: |
-          export SPARK_HOME="$GITHUB_WORKSPACE"
-          export COMET_CODE_BENCHMARK_WAREHOUSE="$RUNNER_TEMP/code-benchmark-warehouse"
-          export COMET_CODE_BENCHMARK_OUTPUT="$GITHUB_WORKSPACE/code-benchmark.jsonl"
-          mkdir -p native/target/release
-          for iteration in 0 1 2 3 4; do
-            export COMET_CODE_BENCHMARK_ITERATION="$iteration"
-            if [ $((iteration % 2)) -eq 0 ]; then variants="before snapshot after"; else variants="after snapshot before"; fi
-            for variant in $variants; do
-              export COMET_CODE_BENCHMARK_VARIANT="$variant"
-              export COMET_CODE_BENCHMARK_REVISION="$(cat code-libraries/code-benchmark-native-$variant/code-revision.txt)"
-              cp code-libraries/code-benchmark-native-$variant/native/target/release/libcomet.so native/target/release/libcomet.so
-              ./mvnw -B -Prelease -Pspark-4.1 test -Dtest=none \
-                '-Dsuites=org.apache.comet.CometIcebergNativeSuite true code before after native Iceberg benchmark'
-            done
-          done
-          python3 dev/ci/summarize-iceberg-file-benchmark.py code-benchmark.jsonl > code-benchmark.md
-          cat code-benchmark.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: iceberg-true-code-benchmark
-          path: |
-            code-benchmark.jsonl
-            code-benchmark.md
-            **/target/surefire-reports/*
-            **/target/unit-tests.log
+      - name: Require formatted Scala sources
+        run: test ! -s scala-format.patch

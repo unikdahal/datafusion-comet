@@ -37,7 +37,7 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
-use super::iceberg_reader::try_attach_iceberg_reader_filter;
+use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_reader_filter};
 
 /// AggregateExec's default state reset can retain producer bounds. Reconstruct
 /// the aggregate from its public configuration for every execution instead.
@@ -49,6 +49,12 @@ pub(crate) struct IcebergMinMaxFilterExec {
 }
 
 impl IcebergMinMaxFilterExec {
+    /// Whether a partial aggregate over `input` can attach to an Iceberg reader.
+    /// The planner keeps the aggregate argument uncast only for such inputs.
+    pub(crate) fn accepts_input(input: &Arc<dyn ExecutionPlan>) -> bool {
+        reaches_iceberg_reader(input)
+    }
+
     pub(crate) fn try_new(
         aggregate: &AggregateExec,
         config: &ConfigOptions,
@@ -201,6 +207,8 @@ impl ExecutionPlan for IcebergMinMaxFilterExec {
             .counter("dynamic_filter_minmax_filters_attached", partition)
             .add(1);
         let result = aggregate.execute(partition, context);
+        // Each execution builds a fresh aggregate. Its metrics are summed by
+        // name when reported, so repeated executions accumulate correctly.
         for metric in aggregate.metrics().unwrap_or_default().iter() {
             self.metrics.register(Arc::clone(metric));
         }
