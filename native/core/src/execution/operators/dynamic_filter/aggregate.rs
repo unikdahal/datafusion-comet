@@ -22,9 +22,11 @@ use std::sync::Arc;
 
 use arrow::datatypes::DataType;
 use datafusion::common::config::ConfigOptions;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{internal_err, Result};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::expressions::{lit, Column, DynamicFilterPhysicalExpr};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 use datafusion::physical_plan::distribution_requirements::InputDistributionRequirements;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
@@ -149,6 +151,12 @@ impl ExecutionPlan for IcebergMinMaxFilterExec {
     }
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         self.template.children()
+    }
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        self.template.apply_expressions(f)
     }
     fn with_new_children(
         self: Arc<Self>,

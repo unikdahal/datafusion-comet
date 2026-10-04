@@ -49,6 +49,7 @@ fn scan(data_type: DataType) -> Arc<dyn ExecutionPlan> {
     let task = FileScanTask::builder()
         .with_data_file_path("/tmp/minmax.parquet".into())
         .with_data_file_format(DataFileFormat::Parquet)
+        .with_file_size_in_bytes(1024)
         .with_start(0)
         .with_length(1024)
         .with_record_count(Some(10))
