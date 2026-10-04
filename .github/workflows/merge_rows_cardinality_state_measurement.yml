@@ -1,0 +1,202 @@
+name: MergeRows Cardinality State Measurement
+
+on:
+  push:
+    branches:
+      - mergerows-roaring-cardinality-measure
+  workflow_dispatch:
+
+jobs:
+  measure:
+    name: 5M id before/after
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build isolated benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cardinality-bench/src
+          cat >/tmp/cardinality-bench/Cargo.toml <<'EOF'
+          [package]
+          name = "cardinality-bench"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          hashbrown = "0.17.1"
+          roaring = "0.11.5"
+          EOF
+
+          cat >/tmp/cardinality-bench/src/main.rs <<'EOF'
+          use hashbrown::HashSet;
+          use roaring::RoaringTreemap;
+          use std::hint::black_box;
+          use std::time::Instant;
+
+          const IDS: usize = 5_000_000;
+          const BATCH_ROWS: usize = 4_096;
+          const HASH_SLACK_BYTES: usize = 64;
+          const ROARING_PARTITION_OVERHEAD_BYTES: usize = 256;
+          const ROARING_CONTAINER_OVERHEAD_BYTES: usize = 64;
+
+          fn hash_reserved_bytes(len: usize) -> usize {
+              let estimated_buckets = ((len * 8) / 7).next_power_of_two();
+              std::mem::size_of::<i64>() * estimated_buckets
+                  + estimated_buckets
+                  + std::mem::size_of::<HashSet<i64>>()
+                  + HASH_SLACK_BYTES
+          }
+
+          fn roaring_reserved_bytes(seen: &RoaringTreemap) -> usize {
+              let mut total = std::mem::size_of::<RoaringTreemap>();
+              for (_, bitmap) in seen.bitmaps() {
+                  let stats = bitmap.statistics();
+                  let payload = stats.n_bytes_array_containers
+                      + stats.n_bytes_run_containers
+                      + stats.n_bytes_bitset_containers;
+                  total += ROARING_PARTITION_OVERHEAD_BYTES;
+                  total += stats.n_containers as usize * ROARING_CONTAINER_OVERHEAD_BYTES;
+                  total += usize::try_from(payload).unwrap();
+              }
+              total
+          }
+
+          fn run_hash(stride: u64) -> (u128, usize) {
+              let start = Instant::now();
+              let mut seen = HashSet::new();
+              for index in 0..IDS {
+                  let id = ((index as u64) * stride) as i64;
+                  if seen.len() < seen.capacity() {
+                      assert!(seen.insert(id));
+                  } else {
+                      assert!(!seen.contains(&id));
+                      black_box(hash_reserved_bytes(seen.len() + 1));
+                      seen.try_reserve(1).unwrap();
+                      assert!(seen.insert(id));
+                  }
+              }
+              black_box(&seen);
+              (start.elapsed().as_micros(), hash_reserved_bytes(seen.len()))
+          }
+
+          fn run_roaring(stride: u64) -> (u128, usize) {
+              let start = Instant::now();
+              let mut seen = RoaringTreemap::new();
+              let mut reserved = 0usize;
+              for batch_start in (0..IDS).step_by(BATCH_ROWS) {
+                  let batch_end = (batch_start + BATCH_ROWS).min(IDS);
+                  for index in batch_start..batch_end {
+                      assert!(seen.insert((index as u64) * stride));
+                  }
+                  reserved = roaring_reserved_bytes(&seen);
+                  black_box(reserved);
+              }
+              black_box(&seen);
+              (start.elapsed().as_micros(), reserved)
+          }
+
+          fn main() {
+              let args: Vec<String> = std::env::args().collect();
+              let implementation = &args[1];
+              let stride: u64 = args[2].parse().unwrap();
+              let (micros, tracked_bytes) = match implementation.as_str() {
+                  "hash" => run_hash(stride),
+                  "roaring" => run_roaring(stride),
+                  _ => panic!("unknown implementation"),
+              };
+              println!("{micros},{tracked_bytes}");
+          }
+          EOF
+
+          cd /tmp/cardinality-bench
+          cargo build --release --locked 2>/dev/null || cargo build --release
+
+      - name: Measure five alternating rounds
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq time
+          : > /tmp/results.csv
+          echo "layout,implementation,round,micros,tracked_bytes,max_rss_kib" >> /tmp/results.csv
+
+          run_one() {
+            local layout="$1"
+            local impl="$2"
+            local stride="$3"
+            local round="$4"
+            local value
+            /usr/bin/time -f "%M" -o /tmp/rss.txt               /tmp/cardinality-bench/target/release/cardinality-bench "$impl" "$stride"               > /tmp/value.txt
+            value=$(cat /tmp/value.txt)
+            echo "$layout,$impl,$round,$value,$(cat /tmp/rss.txt)" >> /tmp/results.csv
+          }
+
+          for spec in "dense:1" "one-in-8:8" "one-in-200:200"; do
+            layout="${spec%%:*}"
+            stride="${spec##*:}"
+            for round in 1 2 3 4 5; do
+              if (( round % 2 == 1 )); then
+                run_one "$layout" hash "$stride" "$round"
+                run_one "$layout" roaring "$stride" "$round"
+              else
+                run_one "$layout" roaring "$stride" "$round"
+                run_one "$layout" hash "$stride" "$round"
+              fi
+            done
+          done
+
+      - name: Summarize
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import csv, statistics
+
+          rows = list(csv.DictReader(open("/tmp/results.csv")))
+          layouts = ["dense", "one-in-8", "one-in-200"]
+
+          out = [
+              "# MergeRows cardinality state — 5M ids",
+              "",
+              "Five alternating rounds on the same GitHub-hosted runner. Runtime is median wall time; RSS is median per-process peak RSS.",
+              "",
+              "| layout | HashSet median | Roaring median | runtime change | HashSet tracked | Roaring tracked | tracked-memory reduction | HashSet RSS | Roaring RSS | RSS reduction |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+          ]
+
+          for layout in layouts:
+              groups = {}
+              for impl in ("hash", "roaring"):
+                  sample = [r for r in rows if r["layout"] == layout and r["implementation"] == impl]
+                  groups[impl] = {
+                      "us": statistics.median(int(r["micros"]) for r in sample),
+                      "bytes": statistics.median(int(r["tracked_bytes"]) for r in sample),
+                      "rss": statistics.median(int(r["max_rss_kib"]) for r in sample),
+                  }
+
+              h, rr = groups["hash"], groups["roaring"]
+              runtime_change = (rr["us"] / h["us"] - 1.0) * 100.0
+              tracked_ratio = h["bytes"] / rr["bytes"]
+              rss_ratio = h["rss"] / rr["rss"]
+              out.append(
+                  f'| {layout} | {h["us"]/1000:.2f} ms | {rr["us"]/1000:.2f} ms | {runtime_change:+.1f}% | '
+                  f'{h["bytes"]/1048576:.2f} MiB | {rr["bytes"]/1048576:.2f} MiB | {tracked_ratio:.1f}x | '
+                  f'{h["rss"]/1024:.2f} MiB | {rr["rss"]/1024:.2f} MiB | {rss_ratio:.1f}x |'
+              )
+
+          report = "\n".join(out) + "\n"
+          print(report)
+          open("/tmp/report.md", "w").write(report)
+          PY
+          cat /tmp/report.md >> "$GITHUB_STEP_SUMMARY"
+          cp /tmp/report.md ./merge_rows_cardinality_state_report.md
+          cp /tmp/results.csv ./merge_rows_cardinality_state_raw.csv
+
+      - name: Upload measurements
+        uses: actions/upload-artifact@v6
+        with:
+          name: merge-rows-cardinality-state-measurement
+          path: |
+            merge_rows_cardinality_state_report.md
+            merge_rows_cardinality_state_raw.csv
