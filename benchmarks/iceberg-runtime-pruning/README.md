@@ -25,7 +25,11 @@ a Markdown summary, and test logs for each Spark version.
 
 The fixture is one sorted Iceberg v2 Parquet file containing 120,000 integer keys and
 64-character SHA-256 payloads, written without compression with a 128 KiB row-group target.
-Adaptive split sizing is disabled for the four primary scenarios to keep the file in one task.
+The four primary scenarios set an explicit 128 MiB split-size read option and assert that
+the file is executed as exactly one data-file task. Adaptive split sizing is disabled and
+open-file cost is set to 1 byte: Iceberg first splits at Parquet offsets, then packs those
+pieces using a per-piece open-file weight. The default 4 MiB weight fragments this small
+file into more tasks as delete files are added.
 The test inspects the actual footer and records its row-group count. The build table contains
 32 even keys from 50,000 through 50,062, so min/max pruning must retain gaps for the exact
 membership consumer to remove.
@@ -35,8 +39,8 @@ Both variants use native Iceberg scans and native execution. OFF sets
 plain Spark. Every ON measurement must show an accepted Iceberg runtime predicate, additional
 row groups pruned, and less than one quarter of OFF's reader bytes. The test repeats this for
 no deletes, positional deletes, equality deletes on the payload column, and both delete types.
-A fifth scenario enables the default adaptive split sizing and requires at least 20% fewer
-reader bytes. Each resulting task independently prefetches 512 KiB of metadata; this case
+A fifth scenario restores the default 4 MiB open-file cost, enables adaptive split sizing,
+and requires at least 20% fewer reader bytes. Each resulting task independently prefetches 512 KiB of metadata; this case
 records how repeated metadata reads limit savings for a small file.
 
 Each scenario warms both paths, then executes five pairs in alternating order. The summary

@@ -1066,6 +1066,7 @@ class CometIcebergNativeSuite
           TBLPROPERTIES (
             'format-version' = '2',
             'read.split.adaptive-size.enabled' = 'false',
+            'read.split.open-file-cost' = '1',
             'write.parquet.row-group-size-bytes' = '131072',
             'write.parquet.compression-codec' = 'uncompressed'
           )
@@ -1116,11 +1117,12 @@ class CometIcebergNativeSuite
             bytes: Long,
             predicateTasks: Long,
             rowGroupsPruned: Long,
+            fileTasks: Long,
             millis: Double)
 
         val query = """
               SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
-              FROM test_cat.db.runtime_join_pruning_test f
+              FROM runtime_join_fact f
               JOIN runtime_join_dim d
                 ON f.id = d.id
             """
@@ -1144,6 +1146,7 @@ class CometIcebergNativeSuite
                 scan.metrics("bytes_scanned").value,
                 scan.metrics("iceberg_runtime_predicate_tasks").value,
                 scan.metrics("iceberg_runtime_row_groups_pruned").value,
+                scan.metrics("num_splits").value,
                 millis))
           }
           result.get
@@ -1158,6 +1161,17 @@ class CometIcebergNativeSuite
               mode: String,
               expected: Long,
               maximumBytePercent: Long = 25L): Unit = {
+            val adaptiveSplits = mode == "adaptive_splits_no_deletes"
+            val factReader = spark.read.format("iceberg")
+            val configuredReader =
+              if (adaptiveSplits) factReader
+              else {
+                // An explicit read option bypasses adaptive adjustments, including delete costs.
+                factReader.option("split-size", "134217728")
+              }
+            configuredReader
+              .load("test_cat.db.runtime_join_pruning_test")
+              .createOrReplaceTempView("runtime_join_fact")
             var sparkValue = 0L
             withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
               sparkValue = spark.sql(query).collect().head.getLong(0)
@@ -1182,6 +1196,15 @@ class CometIcebergNativeSuite
               assert(enabled.predicateTasks > 0, s"reader predicate missing: $enabled")
               assert(enabled.rowGroupsPruned > 0, s"runtime pruning missing: $enabled")
               assert(disabled.bytes > 0)
+              assert(disabled.fileTasks == enabled.fileTasks)
+              assert(
+                enabled.predicateTasks == enabled.fileTasks,
+                s"predicate should be sampled once per data-file task: $enabled")
+              if (adaptiveSplits) {
+                assert(enabled.fileTasks > 1, s"expected adaptive splitting: $enabled")
+              } else {
+                assert(enabled.fileTasks == 1, s"expected one data-file task: $enabled")
+              }
               assert(
                 enabled.bytes * 100 < disabled.bytes * maximumBytePercent,
                 s"expected under $maximumBytePercent% of baseline bytes: " +
@@ -1189,7 +1212,7 @@ class CometIcebergNativeSuite
               Seq(false, true).foreach { flag =>
                 val r = results(flag)
                 val json =
-                  s"""{"mode":"$mode","iteration":$iteration,"enabled":$flag,"rows":$numRows,"row_groups":$rowGroupCount,"value":${r.value},"bytes_scanned":${r.bytes},"runtime_predicate_tasks":${r.predicateTasks},"runtime_row_groups_pruned":${r.rowGroupsPruned},"wall_ms":${r.millis}}"""
+                  s"""{"mode":"$mode","iteration":$iteration,"enabled":$flag,"rows":$numRows,"row_groups":$rowGroupCount,"file_tasks":${r.fileTasks},"value":${r.value},"bytes_scanned":${r.bytes},"runtime_predicate_tasks":${r.predicateTasks},"runtime_row_groups_pruned":${r.rowGroupsPruned},"wall_ms":${r.millis}}"""
                 println(s"ICEBERG_RUNTIME_BENCHMARK $json")
                 sys.env.get("COMET_ICEBERG_BENCHMARK_OUTPUT").foreach { output =>
                   val _ = java.nio.file.Files.write(
@@ -1207,13 +1230,17 @@ class CometIcebergNativeSuite
           // metadata, so the 512 KiB prefetch window limits savings on this small file.
           spark.sql("""
             ALTER TABLE test_cat.db.runtime_join_pruning_test
-            SET TBLPROPERTIES ('read.split.adaptive-size.enabled' = 'true')
+            SET TBLPROPERTIES (
+              'read.split.adaptive-size.enabled' = 'true',
+              'read.split.open-file-cost' = '4194304')
           """)
           spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
           checkAndMeasure("adaptive_splits_no_deletes", 32L * 64L, 80L)
           spark.sql("""
             ALTER TABLE test_cat.db.runtime_join_pruning_test
-            SET TBLPROPERTIES ('read.split.adaptive-size.enabled' = 'false')
+            SET TBLPROPERTIES (
+              'read.split.adaptive-size.enabled' = 'false',
+              'read.split.open-file-cost' = '1')
           """)
           spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
           val catalog = spark.sessionState.catalogManager
@@ -1267,6 +1294,7 @@ class CometIcebergNativeSuite
           checkAndMeasure("position_and_equality_deletes", 30L * 64L)
         } finally {
           spark.catalog.dropTempView("runtime_join_dim")
+          spark.catalog.dropTempView("runtime_join_fact")
           spark.sql("DROP TABLE test_cat.db.runtime_join_pruning_test")
         }
       }
