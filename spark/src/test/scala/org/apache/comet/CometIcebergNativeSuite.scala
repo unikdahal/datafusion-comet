@@ -1108,7 +1108,9 @@ class CometIcebergNativeSuite
       }
       val files = spark.sql(s"SELECT file_path FROM $table.files").collect()
       assert(files.length == 1)
-      val dataFile = new File(new URI(files.head.getString(0)))
+      val dataUri = new org.apache.hadoop.fs.Path(files.head.getString(0)).toUri
+      val dataFile =
+        if (dataUri.getScheme == null) new File(dataUri.getPath) else new File(dataUri)
       val fileBytes = dataFile.length()
       val parquet = org.apache.parquet.hadoop.ParquetFileReader.open(
         org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
