@@ -1074,6 +1074,31 @@ mod tests {
         );
     }
 
+    fn run_cardinality_ids(
+        ids: &[i64],
+        batch_rows: usize,
+        reservation: &mut MemoryReservation,
+    ) -> Result<RoaringTreemap, DataFusionError> {
+        let mut seen = RoaringTreemap::new();
+        for chunk in ids.chunks(batch_rows) {
+            let len = chunk.len();
+            let batch = test_batch(
+                chunk.to_vec(),
+                vec![0; len],
+                vec![true; len],
+                vec![true; len],
+            );
+            check_cardinality(
+                &batch,
+                &BooleanArray::from(vec![true; len]),
+                0,
+                &mut seen,
+                reservation,
+            )?;
+        }
+        Ok(seen)
+    }
+
     #[test]
     fn insert_only_merge_does_not_register_memory_consumer() {
         use datafusion::datasource::memory::MemorySourceConfig;
@@ -1160,6 +1185,40 @@ mod tests {
         ] {
             let mut reservation = test_reservation();
             let seen = run_cardinality(n, batch_rows, &mut reservation).unwrap();
+            assert_seen_fully_reserved(&seen, &reservation);
+        }
+    }
+
+    #[test]
+    fn cardinality_admission_covers_dense_sparse_and_spark_layouts() {
+        let dense: Vec<i64> = (0..5_000).collect();
+        let sparse: Vec<i64> = (0..20_000).map(|i| i * 200).collect();
+        let spark_2k: Vec<i64> = (0..20_000)
+            .map(|i| {
+                let partition = i % 2_048;
+                let row = i / 2_048;
+                (partition << 33) + row
+            })
+            .collect();
+        let spark_16k: Vec<i64> = (0..20_000)
+            .map(|i| {
+                let partition = i % 16_384;
+                let row = i / 16_384;
+                (partition << 33) + row
+            })
+            .collect();
+
+        for (name, ids, batch_rows) in [
+            ("dense-single-row", &dense, 1usize),
+            ("dense-batched", &dense, 4096),
+            ("sparse", &sparse, 257),
+            ("spark-2k", &spark_2k, 4096),
+            ("spark-16k", &spark_16k, 4096),
+        ] {
+            let mut reservation = test_reservation();
+            let seen = run_cardinality_ids(ids, batch_rows, &mut reservation)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(seen.len(), ids.len() as u64, "{name}");
             assert_seen_fully_reserved(&seen, &reservation);
         }
     }
