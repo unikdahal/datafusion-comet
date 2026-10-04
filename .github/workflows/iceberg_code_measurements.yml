@@ -1,0 +1,121 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Fork Iceberg Verified Library Measurements
+
+on:
+  push:
+    branches: [feat/iceberg-adaptive-benchmark]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: fork-iceberg-library-measurements-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    container:
+      image: amd64/rust
+    env:
+      SPARK_LOCAL_HOSTNAME: localhost
+      SPARK_LOCAL_IP: 127.0.0.1
+      COMET_CODE_BENCHMARK_ROWS: '4000000'
+      COMET_CODE_BENCHMARK_PAYLOAD_REPEATS: '4'
+      COMET_CODE_BENCHMARK_ROW_GROUP_BYTES: '8388608'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: '17'
+      - name: Verify patched library production sources
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 - <<'PYCODE'
+          import re
+          import subprocess
+          revision = "6cc962b72b3ecf9328f2e0b442ac43e1b981d240"
+          changed = subprocess.check_output(["git", "diff", "--name-only", revision, "HEAD", "--", "native"], text=True).splitlines()
+          fixture = "native/core/src/execution/operators/dynamic_filter/topk/tests/iceberg.rs"
+          assert set(changed).issubset({fixture}), changed
+          parent = subprocess.check_output(["git", "show", "HEAD:native/core/src/execution/operators/dynamic_filter/topk.rs"], text=True)
+          assert re.search(r"#\[cfg\(test\)\]\s+mod tests;", parent)
+          for path in ("rust-toolchain.toml", ".github/actions/setup-builder/action.yaml"):
+              assert subprocess.check_output(["git", "rev-parse", f"{revision}:{path}"]) == subprocess.check_output(["git", "rev-parse", f"HEAD:{path}"])
+          PYCODE
+      - uses: actions/download-artifact@v8
+        with:
+          name: code-benchmark-native-before
+          run-id: 37192526799
+          github-token: ${{ github.token }}
+          path: code-libraries/code-benchmark-native-before
+      - uses: actions/download-artifact@v8
+        with:
+          name: runtime-release-library
+          run-id: 37191842146
+          github-token: ${{ github.token }}
+          path: code-libraries/code-benchmark-native-after/native/target/release
+      - name: Verify and record exact library revisions
+        run: |
+          test "$(cat code-libraries/code-benchmark-native-before/code-revision.txt)" = '569eaa59d032f758669777964aee2d24eb55ebae'
+          git rev-parse 6cc962b72b3ecf9328f2e0b442ac43e1b981d240 > code-libraries/code-benchmark-native-after/code-revision.txt
+          sha256sum code-libraries/code-benchmark-native-before/native/target/release/libcomet.so code-libraries/code-benchmark-native-after/native/target/release/libcomet.so
+      - name: Mark checkout safe for build helpers
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.m2/repository
+            /root/.m2/repository
+          key: runtime-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: Linux-java-maven-
+      - name: Measure exact before and after code against the same persisted file
+        run: |
+          export SPARK_HOME="$GITHUB_WORKSPACE"
+          export COMET_CODE_BENCHMARK_WAREHOUSE="$RUNNER_TEMP/code-benchmark-warehouse"
+          export COMET_CODE_BENCHMARK_OUTPUT="$GITHUB_WORKSPACE/code-benchmark.jsonl"
+          mkdir -p native/target/release
+          for iteration in 0 1 2 3 4; do
+            export COMET_CODE_BENCHMARK_ITERATION="$iteration"
+            if [ $((iteration % 2)) -eq 0 ]; then variants="before after"; else variants="after before"; fi
+            for variant in $variants; do
+              export COMET_CODE_BENCHMARK_VARIANT="$variant"
+              export COMET_CODE_BENCHMARK_REVISION="$(cat code-libraries/code-benchmark-native-$variant/code-revision.txt)"
+              cp code-libraries/code-benchmark-native-$variant/native/target/release/libcomet.so native/target/release/libcomet.so
+              ./mvnw -B -Prelease -Pspark-4.1 test -Dtest=none \
+                '-Dsuites=org.apache.comet.CometIcebergNativeSuite true code before after native Iceberg benchmark'
+            done
+          done
+          python3 dev/ci/summarize-iceberg-code-benchmark.py code-benchmark.jsonl > code-benchmark.md
+          cat code-benchmark.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: iceberg-true-code-benchmark
+          path: |
+            code-benchmark.jsonl
+            code-benchmark.md
+            **/target/surefire-reports/*
+            **/target/unit-tests.log
