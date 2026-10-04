@@ -19,7 +19,7 @@
 
 package org.apache.comet.shuffle
 
-import java.lang.reflect.Modifier
+import java.lang.reflect.{Field, Modifier}
 
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -38,7 +38,7 @@ class PatchedCelebornCompatibilityProof extends AnyFunSuite {
       "outstandingPushes"),
     RequiredField("org.apache.celeborn.client.ShuffleClientImpl", "pushDataRetryPool"))
 
-  private def field(owner: Class[_], name: String) = {
+  private def field(owner: Class[_], name: String): Field = {
     var current = owner
     while (current != null) {
       try {
