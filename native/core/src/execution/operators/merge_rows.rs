@@ -307,7 +307,9 @@ fn seen_memory_overflow() -> DataFusionError {
 }
 
 fn checked_seen_add(total: usize, additional: usize) -> Result<usize, DataFusionError> {
-    total.checked_add(additional).ok_or_else(seen_memory_overflow)
+    total
+        .checked_add(additional)
+        .ok_or_else(seen_memory_overflow)
 }
 
 fn estimate_seen_memory_size(seen: &RoaringTreemap) -> Result<usize, DataFusionError> {
@@ -319,8 +321,7 @@ fn estimate_seen_memory_size(seen: &RoaringTreemap) -> Result<usize, DataFusionE
             .checked_add(statistics.n_bytes_run_containers)
             .and_then(|bytes| bytes.checked_add(statistics.n_bytes_bitset_containers))
             .ok_or_else(seen_memory_overflow)?;
-        let payload_bytes =
-            usize::try_from(payload_bytes).map_err(|_| seen_memory_overflow())?;
+        let payload_bytes = usize::try_from(payload_bytes).map_err(|_| seen_memory_overflow())?;
         let container_overhead = (statistics.n_containers as usize)
             .checked_mul(SEEN_CONTAINER_OVERHEAD_BYTES)
             .ok_or_else(seen_memory_overflow)?;
@@ -578,10 +579,12 @@ fn check_cardinality(
     // completes, shrink the reservation back to the backing-capacity estimate.
     reserve_seen_batch(seen, &ids, reservation)?;
     for id in ids {
-        debug_assert!(seen.insert(id), "duplicates were validated before admission");
+        debug_assert!(
+            seen.insert(id),
+            "duplicates were validated before admission"
+        );
     }
     sync_seen_reservation(seen, reservation)
-
 }
 
 fn process_batch(
@@ -1238,7 +1241,10 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, DataFusionError::ResourcesExhausted(_)));
-        assert!(seen.is_empty(), "pool admission must happen before roaring allocation");
+        assert!(
+            seen.is_empty(),
+            "pool admission must happen before roaring allocation"
+        );
         assert_eq!(reservation.size(), 0);
     }
 
@@ -1322,7 +1328,10 @@ mod tests {
             matches!(memory_err, DataFusionError::ResourcesExhausted(_)),
             "expected memory exhaustion for a new id, got {memory_err}"
         );
-        assert!(!seen.contains(2), "failed admission must not mutate roaring state");
+        assert!(
+            !seen.contains(2),
+            "failed admission must not mutate roaring state"
+        );
     }
 
     #[test]
