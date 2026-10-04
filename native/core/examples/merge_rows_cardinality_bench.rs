@@ -125,8 +125,8 @@ fn batch_roaring_peak(ids: &[u64]) -> usize {
         }
 
         let cardinality = (end_index - index) as u64;
-        total += ROARING_CONTAINER_OVERHEAD_BYTES
-            + projected_container_payload_headroom(0, cardinality);
+        total +=
+            ROARING_CONTAINER_OVERHEAD_BYTES + projected_container_payload_headroom(0, cardinality);
         index = end_index;
     }
 
