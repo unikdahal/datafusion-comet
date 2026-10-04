@@ -1014,9 +1014,8 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     val nameMappingToPoolIndex = mutable.HashMap[String, Int]()
     val projectFieldIdsToPoolIndex = mutable.HashMap[Seq[Int], Int]()
     val partitionDataToPoolIndex = mutable.HashMap[String, Int]()
-    val runtimeMetricsEnabled = CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get() ||
-      CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get() ||
-      CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get()
+    // Only scans that a runtime filter producer can consume carry per-file statistics.
+    val runtimeMetricsEnabled = metadata.runtimeStatisticsRequested
     val fileMetricsToPoolIndex = mutable.HashMap[String, Int]()
     // Individual delete files are interned into a flat pool; deleteFilesToPoolIndex then dedups
     // the per-task sets as lists of indices into it, so a delete file that applies to many data

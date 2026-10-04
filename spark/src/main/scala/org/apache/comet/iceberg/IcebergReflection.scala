@@ -27,7 +27,6 @@ import scala.util.control.NonFatal
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 
-import org.apache.comet.CometConf
 import org.apache.comet.util.ClassLoaders
 
 /**
@@ -2323,7 +2322,8 @@ case class CometIcebergNativeScanMetadata(
     catalogProperties: Map[String, String],
     catalogName: Option[String],
     fileFormat: String,
-    @transient runtimeFileStatistics: Map[String, AnyRef] = Map.empty)
+    @transient runtimeFileStatistics: Map[String, AnyRef] = Map.empty,
+    runtimeStatisticsRequested: Boolean = false)
 
 object CometIcebergNativeScanMetadata extends Logging {
 
@@ -2343,6 +2343,9 @@ object CometIcebergNativeScanMetadata extends Logging {
    *   The scan's FileScanTasks (already extracted). Passed in rather than re-read via
    *   [[IcebergReflection.getTasks]], which for a staged scan rebuilds a flattened list of every
    *   task on each call.
+   * @param runtimeStatistics
+   *   Whether a runtime filter producer in the same stage can consume this scan, so that
+   *   per-file column statistics are worth collecting for pruning before files are opened.
    * @return
    *   Some(metadata) if all reflection succeeds, None to trigger fallback
    */
@@ -2350,7 +2353,8 @@ object CometIcebergNativeScanMetadata extends Logging {
       scan: Any,
       metadataLocation: String,
       catalogProperties: Map[String, String],
-      tasks: java.util.List[_]): Option[CometIcebergNativeScanMetadata] = {
+      tasks: java.util.List[_],
+      runtimeStatistics: Boolean = false): Option[CometIcebergNativeScanMetadata] = {
     import org.apache.comet.iceberg.IcebergReflection._
 
     for {
@@ -2385,14 +2389,13 @@ object CometIcebergNativeScanMetadata extends Logging {
         catalogName = IcebergReflection.deriveCatalogName(table),
         fileFormat = FileFormats.PARQUET,
         runtimeFileStatistics =
-          if (CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get() ||
-            CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get() ||
-            CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get()) {
+          if (runtimeStatistics) {
             IcebergReflection.runtimeFileStatistics(
               scan,
               tasks,
               IcebergReflection.runtimeKeyColumns(scanSchema))
-          } else { Map.empty })
+          } else { Map.empty },
+        runtimeStatisticsRequested = runtimeStatistics)
     }
   }
 

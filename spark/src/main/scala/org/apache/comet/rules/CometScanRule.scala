@@ -89,6 +89,7 @@ case class CometScanRule(session: SparkSession)
     }
 
     val fullPlan = plan
+    val runtimeFilterInputs = CometScanRule.runtimeFilterInputs(plan, conf)
 
     def transformScan(scanNode: SparkPlan): SparkPlan = scanNode match {
       // Tagged by CometSpark34AqeDppFallbackRule on Spark < 3.5 to keep a peer scan
@@ -111,7 +112,7 @@ case class CometScanRule(session: SparkSession)
       // is ever offered it. `transformV2Scan` applies the guard right after its contrib hook
       // declines.
       case scanExec: BatchScanExec =>
-        transformV2Scan(scanExec)
+        transformV2Scan(scanExec, runtimeFilterInputs.contains(scanExec))
     }
 
     plan.transform {
@@ -379,7 +380,9 @@ case class CometScanRule(session: SparkSession)
     Some(CometScanExec(scanExec, session))
   }
 
-  private def transformV2Scan(scanExec: BatchScanExec): SparkPlan = {
+  private def transformV2Scan(
+      scanExec: BatchScanExec,
+      runtimeFilterInput: Boolean = false): SparkPlan = {
 
     // Give any optional, out-of-tree scan contrib (e.g. Lance) first crack at this V2 scan. On a
     // default build no contrib is registered, so this returns None and we proceed with Comet's
@@ -623,7 +626,12 @@ case class CometScanRule(session: SparkSession)
                 .map(COMET_S3_COMPLIANT_SCHEMES_KEY -> _)
 
             val result = CometIcebergNativeScanMetadata
-              .extract(scanExec.scan, effectiveLocation, catalogProperties, icebergTasks)
+              .extract(
+                scanExec.scan,
+                effectiveLocation,
+                catalogProperties,
+                icebergTasks,
+                runtimeStatistics = runtimeFilterInput)
 
             result
           } catch {
@@ -1184,6 +1192,51 @@ case class CometScanTypeChecker() extends DataTypeSupport with CometTypeShim {
 }
 
 object CometScanRule extends Logging {
+
+  /**
+   * V2 scans that a runtime filter producer in the same stage can consume: an inner single-key
+   * join, a single-key TopK, or an ungrouped single MIN/MAX aggregate, with the matching option
+   * enabled. Runtime filters never cross an exchange. Only these scans collect per-file column
+   * statistics on the driver, so other queries pay nothing. This is a superset of native
+   * eligibility; the native planner still decides whether a filter attaches.
+   */
+  def runtimeFilterInputs(plan: SparkPlan, conf: SQLConf): java.util.Set[SparkPlan] = {
+    import org.apache.spark.sql.catalyst.expressions.aggregate.{Max, Min}
+    import org.apache.spark.sql.catalyst.plans.Inner
+    import org.apache.spark.sql.execution.TakeOrderedAndProjectExec
+    import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
+    import org.apache.spark.sql.execution.exchange.Exchange
+    import org.apache.spark.sql.execution.joins.BaseJoinExec
+
+    val inputs =
+      java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[SparkPlan, JBoolean]())
+    val joins = COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get(conf)
+    val topK = COMET_EXEC_TOPK_FUSION_ENABLED.get(conf) &&
+      COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get(conf)
+    val minMax = COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get(conf)
+    if (!joins && !topK && !minMax) return inputs
+
+    def producer(node: SparkPlan): Boolean = node match {
+      case join: BaseJoinExec => joins && join.joinType == Inner && join.leftKeys.size == 1
+      case limit: TakeOrderedAndProjectExec => topK && limit.sortOrder.size == 1
+      case aggregate: BaseAggregateExec =>
+        minMax && aggregate.groupingExpressions.isEmpty &&
+        aggregate.aggregateExpressions.size == 1 &&
+        aggregate.aggregateExpressions.forall(_.aggregateFunction match {
+          case _: Min | _: Max => true
+          case _ => false
+        })
+      case _ => false
+    }
+
+    def visit(node: SparkPlan, belowProducer: Boolean): Unit = {
+      val below = !node.isInstanceOf[Exchange] && (belowProducer || producer(node))
+      if (below && node.isInstanceOf[BatchScanExec]) inputs.add(node)
+      node.children.foreach(visit(_, below))
+    }
+    visit(plan, belowProducer = false)
+    inputs
+  }
 
   // Memo of `NativeBase.isObjectStoreSchemeSupported`, keyed by the probe URL rather than the
   // scheme: object_store's parser keys on (scheme, host-presence), so an authorityless URL would
