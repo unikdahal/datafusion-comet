@@ -18,7 +18,6 @@
 use datafusion::common::utils::memory::estimate_memory_size;
 use datafusion::common::HashSet;
 use roaring::RoaringTreemap;
-use std::collections::{HashMap, HashSet as StdHashSet};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -103,21 +102,29 @@ fn projected_container_payload_upper_bound(cardinality: u64) -> usize {
 }
 
 fn roaring_batch_headroom(seen: &RoaringTreemap, ids: &[u64]) -> usize {
-    let mut containers: HashMap<u64, u64> = HashMap::new();
-    let mut partitions: StdHashSet<u32> = StdHashSet::new();
+    let mut headroom = 0usize;
+    let mut last_partition = None;
+    let mut index = 0usize;
 
-    for &id in ids {
-        *containers.entry(id >> 16).or_default() += 1;
-        partitions.insert((id >> 32) as u32);
-    }
+    while index < ids.len() {
+        let container_key = ids[index] >> 16;
+        let partition = (ids[index] >> 32) as u32;
+        if last_partition != Some(partition) {
+            headroom += ROARING_PARTITION_OVERHEAD_BYTES;
+            last_partition = Some(partition);
+        }
 
-    let mut headroom = partitions.len() * ROARING_PARTITION_OVERHEAD_BYTES;
-    for (container_key, incoming) in containers {
+        let mut end_index = index + 1;
+        while end_index < ids.len() && (ids[end_index] >> 16) == container_key {
+            end_index += 1;
+        }
+
         let start = container_key << 16;
         let end = start | u16::MAX as u64;
-        let projected = seen.range_cardinality(start..=end) + incoming;
+        let projected = seen.range_cardinality(start..=end) + (end_index - index) as u64;
         headroom +=
             ROARING_CONTAINER_OVERHEAD_BYTES + projected_container_payload_upper_bound(projected);
+        index = end_index;
     }
     headroom
 }
@@ -151,14 +158,14 @@ fn roaring_run(layout: Layout) -> (Duration, usize, usize) {
     for batch_start in (0..IDS).step_by(BATCH_ROWS) {
         let batch_end = (batch_start + BATCH_ROWS).min(IDS);
         let mut ids = Vec::with_capacity(batch_end - batch_start);
-        let mut batch_seen = StdHashSet::with_capacity(batch_end - batch_start);
 
         for index in batch_start..batch_end {
             let id = row_id(layout, index);
             assert!(!seen.contains(id));
-            assert!(batch_seen.insert(id));
             ids.push(id);
         }
+        ids.sort_unstable();
+        assert!(ids.windows(2).all(|pair| pair[0] != pair[1]));
 
         let current = roaring_reserved_bytes(&seen);
         let admitted = current + roaring_batch_headroom(&seen, &ids);
