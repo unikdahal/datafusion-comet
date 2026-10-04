@@ -126,9 +126,10 @@ fn roaring_batch_headroom(seen: &RoaringTreemap, ids: &[u64]) -> usize {
 
         let start = container_key << 16;
         let end = start | u16::MAX as u64;
-        let projected = seen.range_cardinality(start..=end) + (end_index - index) as u64;
-        headroom +=
-            ROARING_CONTAINER_OVERHEAD_BYTES + projected_container_payload_headroom(existing, projected);
+        let existing = seen.range_cardinality(start..=end);
+        let projected = existing + (end_index - index) as u64;
+        headroom += ROARING_CONTAINER_OVERHEAD_BYTES
+            + projected_container_payload_headroom(existing, projected);
         index = end_index;
     }
     headroom
