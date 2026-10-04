@@ -138,6 +138,17 @@ impl IcebergScanExec {
                 .fields()
                 .iter()
                 .find(|f| f.id == current_id)?;
+            // Runtime references are bound by name using the task's case policy.
+            // In particular, case-insensitive binding can resolve `key` and `KEY`
+            // to the same id. Never let it change the projected field's identity.
+            let bound_field = if task.case_sensitive() {
+                task.schema().field_by_name(&field.name)
+            } else {
+                task.schema().field_by_name_case_insensitive(&field.name)
+            }?;
+            if bound_field.id != current_id {
+                return None;
+            }
             if !matches!(
                 (output.data_type(), field.field_type.as_ref()),
                 (DataType::Int32, Type::Primitive(PrimitiveType::Int))
@@ -812,6 +823,36 @@ mod tests {
             .unwrap();
         assert_eq!(
             scan(DataType::Int64, vec![nested_task]).runtime_predicate_field_name(0),
+            None
+        );
+
+        let case_schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(2, "KEY", Type::Primitive(PrimitiveType::Int)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let resolved_id = case_schema
+            .field_by_name_case_insensitive("key")
+            .unwrap()
+            .id;
+        let other_id = if resolved_id == 1 { 2 } else { 1 };
+        let case_task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("/tmp/case.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(case_schema)
+            .with_project_field_ids(vec![other_id])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+        assert_eq!(
+            scan(DataType::Int32, vec![case_task]).runtime_predicate_field_name(0),
             None
         );
     }

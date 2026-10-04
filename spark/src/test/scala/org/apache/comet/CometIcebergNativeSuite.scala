@@ -1065,6 +1065,7 @@ class CometIcebergNativeSuite
           ) USING iceberg
           TBLPROPERTIES (
             'format-version' = '2',
+            'read.split.adaptive-size.enabled' = 'false',
             'write.parquet.row-group-size-bytes' = '131072',
             'write.parquet.compression-codec' = 'uncompressed'
           )
@@ -1153,7 +1154,10 @@ class CometIcebergNativeSuite
             sys.env.get("COMET_ICEBERG_BENCHMARK_REPEATS").map(_.toInt).getOrElse(1)
           require(repetitions >= 1)
 
-          def checkAndMeasure(mode: String, expected: Long): Unit = {
+          def checkAndMeasure(
+              mode: String,
+              expected: Long,
+              maximumBytePercent: Long = 25L): Unit = {
             var sparkValue = 0L
             withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
               sparkValue = spark.sql(query).collect().head.getLong(0)
@@ -1179,8 +1183,9 @@ class CometIcebergNativeSuite
               assert(enabled.rowGroupsPruned > 0, s"runtime pruning missing: $enabled")
               assert(disabled.bytes > 0)
               assert(
-                enabled.bytes * 4 < disabled.bytes,
-                s"expected under 25% of baseline bytes: enabled=$enabled, disabled=$disabled")
+                enabled.bytes * 100 < disabled.bytes * maximumBytePercent,
+                s"expected under $maximumBytePercent% of baseline bytes: " +
+                  s"enabled=$enabled, disabled=$disabled")
               Seq(false, true).foreach { flag =>
                 val r = results(flag)
                 val json =
@@ -1198,6 +1203,19 @@ class CometIcebergNativeSuite
           }
 
           checkAndMeasure("no_deletes", 32L * 64L)
+          // Also record the default adaptive split behavior. Each split independently reads
+          // metadata, so the 512 KiB prefetch window limits savings on this small file.
+          spark.sql("""
+            ALTER TABLE test_cat.db.runtime_join_pruning_test
+            SET TBLPROPERTIES ('read.split.adaptive-size.enabled' = 'true')
+          """)
+          spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
+          checkAndMeasure("adaptive_splits_no_deletes", 32L * 64L, 80L)
+          spark.sql("""
+            ALTER TABLE test_cat.db.runtime_join_pruning_test
+            SET TBLPROPERTIES ('read.split.adaptive-size.enabled' = 'false')
+          """)
+          spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
           val catalog = spark.sessionState.catalogManager
             .catalog("test_cat")
             .asInstanceOf[org.apache.iceberg.spark.SparkCatalog]
