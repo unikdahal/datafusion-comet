@@ -17,11 +17,13 @@
 
 //! Runtime-filter wiring and shared filtering of decoded batches.
 
+mod aggregate;
 mod iceberg_reader;
 mod join;
 mod parquet_reader;
 mod topk;
 
+pub(crate) use aggregate::IcebergMinMaxFilterExec;
 pub(crate) use join::DynamicFilterJoinExec;
 pub(crate) use topk::TopKReaderFilterExec;
 

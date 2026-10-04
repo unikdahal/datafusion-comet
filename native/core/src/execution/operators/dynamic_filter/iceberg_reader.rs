@@ -190,6 +190,8 @@ fn extract_bound(
     let reference = Reference::new(iceberg_field_name);
 
     match binary.op() {
+        Operator::Gt => Some(reference.greater_than(datum)),
+        Operator::Lt => Some(reference.less_than(datum)),
         Operator::GtEq => Some(reference.greater_than_or_equal_to(datum)),
         Operator::LtEq => Some(reference.less_than_or_equal_to(datum)),
         _ => None,
@@ -230,6 +232,42 @@ mod tests {
             extract_iceberg_predicate(&expr, 0, "iceberg_key"),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn retains_minmax_strictness_at_integer_extremes() {
+        for (operator, literal, expected) in [
+            (
+                Operator::Gt,
+                lit(i32::MAX),
+                Reference::new("id").greater_than(Datum::int(i32::MAX)),
+            ),
+            (
+                Operator::Lt,
+                lit(i32::MIN),
+                Reference::new("id").less_than(Datum::int(i32::MIN)),
+            ),
+            (
+                Operator::Gt,
+                lit(i64::MAX),
+                Reference::new("id").greater_than(Datum::long(i64::MAX)),
+            ),
+            (
+                Operator::Lt,
+                lit(i64::MIN),
+                Reference::new("id").less_than(Datum::long(i64::MIN)),
+            ),
+        ] {
+            let expression: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("key", 0)),
+                operator,
+                literal,
+            ));
+            assert_eq!(
+                extract_iceberg_predicate(&expression, 0, "id"),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

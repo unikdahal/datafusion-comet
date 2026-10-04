@@ -36,8 +36,8 @@ mod lance_scan;
 
 use crate::execution::operators::init_csv_datasource_exec;
 use crate::execution::operators::DynamicFilterJoinExec;
-use crate::execution::operators::IcebergScanExec;
 use crate::execution::operators::TopKReaderFilterExec;
+use crate::execution::operators::{IcebergMinMaxFilterExec, IcebergScanExec};
 use crate::execution::{
     operators::{ExecutionError, ScanExec, ShuffleScanExec},
     planner::expression_registry::ExpressionRegistry,
@@ -76,7 +76,7 @@ use datafusion::{
         limit::LocalLimitExec,
         projection::ProjectionExec,
         sorts::sort::SortExec,
-        ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions,
+        ChildrenPropertiesMode, ExecutionPlan, ExecutionPlanProperties, ReplaceChildrenOptions,
     },
     prelude::SessionContext,
 };
@@ -1405,10 +1405,21 @@ impl PhysicalPlanner {
                 let has_partial_merge = proto_mode == ProtoAggregateMode::PartialMerge
                     || agg.expr_modes.contains(&partial_merge_value);
 
+                // Keep the direct integer column visible to DataFusion's MIN/MAX
+                // producer only for the explicitly enabled Iceberg shape. All
+                // ordinary aggregates retain their existing cast behavior.
+                let direct_minmax = agg.dynamic_filter_enabled
+                    && proto_mode == ProtoAggregateMode::Partial
+                    && !has_partial_merge
+                    && group_by.is_empty()
+                    && agg.agg_exprs.len() == 1
+                    && agg.agg_exprs.iter().all(|expr| expr.filter.is_none())
+                    && child.native_plan.is::<IcebergScanExec>()
+                    && child.native_plan.output_partitioning().partition_count() == 1;
                 let agg_exprs: PhyAggResult = agg
                     .agg_exprs
                     .iter()
-                    .map(|expr| self.create_agg_expr(expr, Arc::clone(&schema)))
+                    .map(|expr| self.create_agg_expr(expr, Arc::clone(&schema), direct_minmax))
                     .collect();
 
                 let aggr_expr: Vec<Arc<AggregateFunctionExpr>> = if has_partial_merge {
@@ -1488,16 +1499,25 @@ impl PhysicalPlanner {
                     })
                     .collect();
 
-                let aggregate: Arc<dyn ExecutionPlan> = Arc::new(
-                    datafusion::physical_plan::aggregates::AggregateExec::try_new(
-                        mode,
-                        group_by,
-                        aggr_expr,
-                        filter_exprs?,
-                        Arc::clone(&child.native_plan),
-                        Arc::clone(&schema),
-                    )?,
-                );
+                let aggregate = datafusion::physical_plan::aggregates::AggregateExec::try_new(
+                    mode,
+                    group_by,
+                    aggr_expr,
+                    filter_exprs?,
+                    Arc::clone(&child.native_plan),
+                    Arc::clone(&schema),
+                )?;
+                let aggregate: Arc<dyn ExecutionPlan> = if agg.dynamic_filter_enabled {
+                    match IcebergMinMaxFilterExec::try_new(
+                        &aggregate,
+                        self.session_ctx.copied_config().options(),
+                    )? {
+                        Some(wrapper) => Arc::new(wrapper),
+                        None => Arc::new(aggregate),
+                    }
+                } else {
+                    Arc::new(aggregate)
+                };
 
                 Ok((
                     scans,
@@ -2734,6 +2754,7 @@ impl PhysicalPlanner {
         &self,
         spark_expr: &AggExpr,
         schema: SchemaRef,
+        direct_minmax: bool,
     ) -> Result<AggregateFunctionExpr, ExecutionError> {
         self.register_query_context(spark_expr.expr_id, spark_expr.query_context.as_ref());
 
@@ -2757,7 +2778,15 @@ impl PhysicalPlanner {
             AggExprStruct::Min(expr) => {
                 let child = self.create_expr(expr.child.as_ref().unwrap(), Arc::clone(&schema))?;
                 let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
-                let child = Arc::new(CastExpr::new(child, datatype.clone(), None));
+                let child: Arc<dyn PhysicalExpr> = if direct_minmax
+                    && child.is::<Column>()
+                    && matches!(datatype, DataType::Int32 | DataType::Int64)
+                    && child.data_type(schema.as_ref())? == datatype
+                {
+                    child
+                } else {
+                    Arc::new(CastExpr::new(child, datatype, None))
+                };
 
                 AggregateExprBuilder::new(min_udaf(), vec![child])
                     .schema(schema)
@@ -2770,7 +2799,15 @@ impl PhysicalPlanner {
             AggExprStruct::Max(expr) => {
                 let child = self.create_expr(expr.child.as_ref().unwrap(), Arc::clone(&schema))?;
                 let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
-                let child = Arc::new(CastExpr::new(child, datatype.clone(), None));
+                let child: Arc<dyn PhysicalExpr> = if direct_minmax
+                    && child.is::<Column>()
+                    && matches!(datatype, DataType::Int32 | DataType::Int64)
+                    && child.data_type(schema.as_ref())? == datatype
+                {
+                    child
+                } else {
+                    Arc::new(CastExpr::new(child, datatype, None))
+                };
 
                 AggregateExprBuilder::new(max_udaf(), vec![child])
                     .schema(schema)
@@ -5623,6 +5660,7 @@ mod tests {
                 mode: spark_operator::AggregateMode::Partial as i32,
                 expr_modes: vec![],
                 initial_input_buffer_offset: 0,
+                dynamic_filter_enabled: false,
             })),
         };
         let projection = Operator {

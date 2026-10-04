@@ -827,6 +827,8 @@ message HashAggregate {
   // Offset in the child's output where aggregate buffer attributes start.
   // Used by PartialMerge to locate state fields in the input.
   int32 initial_input_buffer_offset = 7;
+  // Attach an eligible partial MIN/MAX execution to its native Iceberg reader.
+  bool dynamic_filter_enabled = 9;
 }
 
 message Limit {

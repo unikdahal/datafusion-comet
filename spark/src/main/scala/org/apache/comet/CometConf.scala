@@ -473,6 +473,17 @@ object CometConf extends ShimCometConf {
       .booleanConf
       .createWithDefault(false)
 
+  val COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED: ConfigEntry[Boolean] =
+    conf(s"$COMET_EXEC_CONFIG_PREFIX.aggregate.dynamicFilter.enabled")
+      .category(CATEGORY_EXEC)
+      .doc(
+        "Experimental opt-in: use a native MIN/MAX aggregate's improving bound to prune " +
+          "unread Iceberg row groups. Supports one direct INT or BIGINT argument, no GROUP BY, " +
+          "and one native input partition. Bounds are fresh for each execution and do not " +
+          "cross Spark exchanges. Unsupported aggregate shapes retain their existing path.")
+      .booleanConf
+      .createWithDefault(false)
+
   val COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED: ConfigEntry[Boolean] =
     conf(s"$COMET_EXEC_CONFIG_PREFIX.join.dynamicFilter.enabled")
       .category(CATEGORY_EXEC)

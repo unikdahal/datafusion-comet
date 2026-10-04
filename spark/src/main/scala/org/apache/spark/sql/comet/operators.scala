@@ -2149,6 +2149,8 @@ trait CometBaseAggregate {
         val hashAggBuilder = OperatorOuterClass.HashAggregate.newBuilder()
         hashAggBuilder.addAllGroupingExprs(groupingExprs.map(_.get).asJava)
         hashAggBuilder.addAllAggExprs(aggExprs.map(_.get).asJava)
+        hashAggBuilder.setDynamicFilterEnabled(
+          CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get(aggregate.conf))
         hashAggBuilder.setModeValue(mode.getNumber)
 
         // Send per-expression modes and buffer offset for PartialMerge handling
