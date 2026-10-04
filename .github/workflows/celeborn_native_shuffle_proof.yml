@@ -1,0 +1,273 @@
+name: Celeborn Native Shuffle Proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/celeborn_native_shuffle_proof.yml"
+      - "dev/ci/celeborn_native_shuffle_proof.py"
+      - "spark/src/test/celeborn-reflection-compatibility/**"
+
+permissions:
+  contents: read
+
+env:
+  CELEBORN_REPO: unikdahal/celeborn
+  CELEBORN_REF: debug/6523-v0.7.0-volatile-completion-fields
+  CELEBORN_VERSION: "0.7.0"
+  SPARK_VERSION: "3.5.8"
+
+jobs:
+  binary-contract:
+    name: Actual patched JAR satisfies completion contract
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.CELEBORN_REPO }}
+          ref: ${{ env.CELEBORN_REF }}
+          path: celeborn
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Build exact patched Celeborn Spark 3.5 client
+        working-directory: celeborn
+        run: |
+          ./build/mvn -B clean package \
+            -Pspark-3.5 \
+            -pl :celeborn-client-spark-3-shaded_2.12 \
+            -am \
+            -DskipTests
+
+      - name: Install patched shaded JAR into local Maven repository
+        run: |
+          JAR="celeborn/client-spark/spark-3-shaded/target/celeborn-client-spark-3-shaded_2.12-${CELEBORN_VERSION}.jar"
+          test -f "$JAR"
+          ./mvnw -B install:install-file \
+            -Dfile="$JAR" \
+            -DgroupId=org.apache.celeborn \
+            -DartifactId=celeborn-client-spark-3-shaded_2.12 \
+            -Dversion="${CELEBORN_VERSION}" \
+            -Dpackaging=jar \
+            -DgeneratePom=true
+
+      - name: Prove current Comet accepts the actual patched binary
+        env:
+          SPARK_LOCAL_HOSTNAME: localhost
+          SPARK_LOCAL_IP: 127.0.0.1
+        run: |
+          SPARK_HOME="$GITHUB_WORKSPACE" ./mvnw -B clean test \
+            -Pspark-3.5,scala-2.12,celeborn-reflection-compatibility \
+            -Dspark.version="${SPARK_VERSION}" \
+            -Dceleborn.version="${CELEBORN_VERSION}" \
+            -Dtest=none \
+            -Dsuites=org.apache.comet.shuffle.PatchedCelebornCompatibilitySuite \
+            -DfailIfNoTests=false
+
+  ownership-stress:
+    name: Transport ownership stress x20
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Compile once
+        run: |
+          ./mvnw -B test-compile \
+            -Pspark-3.5,scala-2.12 \
+            -Dspark.version="${SPARK_VERSION}" \
+            -DskipTests
+
+      - name: Repeat Netty, callback, retry, cancellation and admission tests
+        env:
+          SPARK_LOCAL_HOSTNAME: localhost
+          SPARK_LOCAL_IP: 127.0.0.1
+        run: |
+          set -euo pipefail
+          for iteration in $(seq 1 20); do
+            echo "::group::ownership iteration ${iteration}/20"
+            SPARK_HOME="$GITHUB_WORKSPACE" ./mvnw -B test \
+              -Pspark-3.5,scala-2.12 \
+              -Dspark.version="${SPARK_VERSION}" \
+              -Dtest=none \
+              -Dsuites=org.apache.comet.shuffle.CelebornShufflePartitionPusherSuite \
+              -DfailIfNoTests=false
+            echo "::endgroup::"
+          done
+
+  real-cluster-e2e:
+    name: Spark 3.5.8 + real Celeborn master/worker
+    needs: [binary-contract, ownership-stress]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.CELEBORN_REPO }}
+          ref: ${{ env.CELEBORN_REF }}
+          path: celeborn
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install exact Spark runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyspark==${SPARK_VERSION}"
+          SPARK_HOME=$(python - <<'PY'
+          import os, pyspark
+          print(os.path.dirname(pyspark.__file__))
+          PY
+          )
+          echo "SPARK_HOME=$SPARK_HOME" >> "$GITHUB_ENV"
+          "$SPARK_HOME/bin/spark-submit" --version
+
+      - name: Build patched Celeborn distribution and Spark client
+        working-directory: celeborn
+        run: |
+          ./build/make-distribution.sh -Pspark-3.5
+          test -f "dist/spark/celeborn-client-spark-3-shaded_2.12-${CELEBORN_VERSION}.jar"
+
+      - name: Configure and start one real Celeborn master and worker
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/celeborn-worker
+          cat > celeborn/dist/conf/celeborn-defaults.conf <<'EOF'
+          celeborn.master.host 127.0.0.1
+          celeborn.master.port 9097
+          celeborn.master.endpoints 127.0.0.1:9097
+          celeborn.metrics.enabled false
+          celeborn.worker.storage.dirs /tmp/celeborn-worker:disktype=SSD
+          celeborn.worker.monitor.disk.enabled false
+          EOF
+          celeborn/dist/sbin/start-master.sh
+          celeborn/dist/sbin/start-worker.sh
+          for attempt in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/9097) >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          (echo > /dev/tcp/127.0.0.1/9097) >/dev/null 2>&1
+          sleep 5
+          find celeborn/dist/logs -type f -maxdepth 1 -print -exec tail -n 40 {} \; || true
+
+      - name: Build current Comet for exact Spark 3.5.8
+        run: |
+          make release-nogit PROFILES="-Pspark-3.5 -Pscala-2.12 -Dspark.version=${SPARK_VERSION}"
+          COMET_JAR=$(ls spark/target/comet-spark-spark3.5_2.12-*.jar | grep -v -e sources -e tests | tail -1)
+          test -f "$COMET_JAR"
+          echo "COMET_JAR=$COMET_JAR" >> "$GITHUB_ENV"
+          CELEBORN_JAR="$GITHUB_WORKSPACE/celeborn/dist/spark/celeborn-client-spark-3-shaded_2.12-${CELEBORN_VERSION}.jar"
+          test -f "$CELEBORN_JAR"
+          echo "CELEBORN_JAR=$CELEBORN_JAR" >> "$GITHUB_ENV"
+
+      - name: Prepare deterministic Parquet inputs
+        run: |
+          rm -rf /tmp/celeborn-proof-data
+          "$SPARK_HOME/bin/spark-submit" \
+            --master 'local[4]' \
+            dev/ci/celeborn_native_shuffle_proof.py \
+            --mode prepare \
+            --data /tmp/celeborn-proof-data
+
+      - name: Run Spark baseline
+        run: |
+          "$SPARK_HOME/bin/spark-submit" \
+            --master 'local[4]' \
+            --conf spark.sql.adaptive.enabled=false \
+            --conf spark.sql.shuffle.partitions=64 \
+            dev/ci/celeborn_native_shuffle_proof.py \
+            --mode baseline \
+            --data /tmp/celeborn-proof-data \
+            --output /tmp/baseline.json 2>&1 | tee /tmp/baseline.log
+
+      - name: Run native Comet shuffle through real Celeborn
+        run: |
+          "$SPARK_HOME/bin/spark-submit" \
+            --master 'local[4]' \
+            --jars "$COMET_JAR,$CELEBORN_JAR" \
+            --driver-class-path "$COMET_JAR:$CELEBORN_JAR" \
+            --conf "spark.executor.extraClassPath=$COMET_JAR:$CELEBORN_JAR" \
+            --conf spark.plugins=org.apache.spark.CometPlugin \
+            --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManager \
+            --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+            --conf spark.celeborn.master.endpoints=127.0.0.1:9097 \
+            --conf spark.celeborn.client.spark.stageRerun.enabled=true \
+            --conf spark.celeborn.client.spark.shuffle.fallback.policy=NEVER \
+            --conf spark.shuffle.service.enabled=false \
+            --conf spark.comet.exec.enabled=true \
+            --conf spark.comet.shuffle.enabled=true \
+            --conf spark.comet.shuffle.mode=native \
+            --conf spark.comet.explain.fallback.enabled=true \
+            --conf spark.comet.shuffle.rss.maxFrameBytes=8m \
+            --conf spark.comet.shuffle.rss.maxInFlightBytes=64m \
+            --conf spark.memory.offHeap.enabled=true \
+            --conf spark.memory.offHeap.size=1g \
+            --conf spark.sql.adaptive.enabled=false \
+            --conf spark.sql.shuffle.partitions=64 \
+            dev/ci/celeborn_native_shuffle_proof.py \
+            --mode comet \
+            --data /tmp/celeborn-proof-data \
+            --output /tmp/comet.json 2>&1 | tee /tmp/comet.log
+
+      - name: Prove parity and reject silent compatibility fallback
+        run: |
+          python - <<'PY'
+          import json
+          baseline = json.load(open("/tmp/baseline.json"))
+          comet = json.load(open("/tmp/comet.json"))
+          assert baseline == comet, (baseline, comet)
+          print("RESULT_PARITY_OK", json.dumps(comet, sort_keys=True))
+          PY
+
+          if grep -Fq "Native Celeborn shuffle requires safely published transport completion tracking" /tmp/comet.log; then
+            echo "Native completion compatibility was rejected" >&2
+            exit 1
+          fi
+
+          if grep -Fq "Fallback to vanilla Spark SortShuffleManager" /tmp/comet.log; then
+            echo "Celeborn fell back to Spark local shuffle" >&2
+            exit 1
+          fi
+
+          grep -Fq "CELEBORN_CODE_SOURCE=" /tmp/comet.log
+          grep -Fq "CometExchange" /tmp/comet.log
+
+      - name: Show service evidence
+        if: always()
+        run: |
+          echo "=== baseline result ==="
+          cat /tmp/baseline.json 2>/dev/null || true
+          echo "=== comet result ==="
+          cat /tmp/comet.json 2>/dev/null || true
+          echo "=== Celeborn logs ==="
+          find celeborn/dist/logs -maxdepth 1 -type f -print -exec tail -n 120 {} \; 2>/dev/null || true
+          echo "=== worker files ==="
+          find /tmp/celeborn-worker -maxdepth 5 -type f -printf '%p %s bytes\n' 2>/dev/null | head -100 || true
+
+      - name: Stop Celeborn
+        if: always()
+        run: |
+          celeborn/dist/sbin/stop-worker.sh || true
+          celeborn/dist/sbin/stop-master.sh || true
