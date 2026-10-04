@@ -150,3 +150,89 @@ jobs:
             scala-format.patch
             **/target/surefire-reports/*
             **/target/unit-tests.log
+
+  benchmark:
+    needs: native
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    container:
+      image: amd64/rust
+    env:
+      SPARK_LOCAL_HOSTNAME: localhost
+      SPARK_LOCAL_IP: 127.0.0.1
+      COMET_CODE_BENCHMARK_FILES: '64'
+      COMET_CODE_BENCHMARK_ROWS: '4000000'
+      COMET_CODE_BENCHMARK_PAYLOAD_REPEATS: '4'
+      COMET_CODE_BENCHMARK_ROW_GROUP_BYTES: '8388608'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: '17'
+      - uses: actions/download-artifact@v8
+        with:
+          name: code-benchmark-native-before
+          run-id: 37192526799
+          github-token: ${{ github.token }}
+          path: code-libraries/code-benchmark-native-before
+      - uses: actions/download-artifact@v8
+        with:
+          name: runtime-release-library
+          run-id: 37191842146
+          github-token: ${{ github.token }}
+          path: code-libraries/code-benchmark-native-after/native/target/release
+      - name: Record the three native versions
+        run: |
+          test "$(cat code-libraries/code-benchmark-native-before/code-revision.txt)" = 569eaa59d032f758669777964aee2d24eb55ebae
+          mkdir -p code-libraries/code-benchmark-native-snapshot
+          mv code-libraries/code-benchmark-native-after/native code-libraries/code-benchmark-native-snapshot/native
+          # The cross-run download above is the pre-file-pruning production library.
+          # Download this workflow's current release below into the final variant.
+          echo 6cc962b72b3ecf9328f2e0b442ac43e1b981d240 > code-libraries/code-benchmark-native-snapshot/code-revision.txt
+          echo "${{ github.sha }}" > code-libraries/code-benchmark-native-after/code-revision.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: runtime-release-library
+          path: code-libraries/code-benchmark-native-after/native/target/release
+      - name: Record library checksums
+        run: sha256sum code-libraries/code-benchmark-native-*/native/target/release/libcomet.so
+      - name: Mark checkout safe for build helpers
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.m2/repository
+            /root/.m2/repository
+          key: runtime-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: Linux-java-maven-
+      - name: Measure exact before and after code against the same persisted file
+        run: |
+          export SPARK_HOME="$GITHUB_WORKSPACE"
+          export COMET_CODE_BENCHMARK_WAREHOUSE="$RUNNER_TEMP/code-benchmark-warehouse"
+          export COMET_CODE_BENCHMARK_OUTPUT="$GITHUB_WORKSPACE/code-benchmark.jsonl"
+          mkdir -p native/target/release
+          for iteration in 0 1 2 3 4; do
+            export COMET_CODE_BENCHMARK_ITERATION="$iteration"
+            if [ $((iteration % 2)) -eq 0 ]; then variants="before snapshot after"; else variants="after snapshot before"; fi
+            for variant in $variants; do
+              export COMET_CODE_BENCHMARK_VARIANT="$variant"
+              export COMET_CODE_BENCHMARK_REVISION="$(cat code-libraries/code-benchmark-native-$variant/code-revision.txt)"
+              cp code-libraries/code-benchmark-native-$variant/native/target/release/libcomet.so native/target/release/libcomet.so
+              ./mvnw -B -Prelease -Pspark-4.1 test -Dtest=none \
+                '-Dsuites=org.apache.comet.CometIcebergNativeSuite true code before after native Iceberg benchmark'
+            done
+          done
+          python3 dev/ci/summarize-iceberg-file-benchmark.py code-benchmark.jsonl > code-benchmark.md
+          cat code-benchmark.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: iceberg-true-code-benchmark
+          path: |
+            code-benchmark.jsonl
+            code-benchmark.md
+            **/target/surefire-reports/*
+            **/target/unit-tests.log

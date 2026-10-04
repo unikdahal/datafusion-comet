@@ -4113,13 +4113,7 @@ fn partition_data_to_struct(
     Ok(iceberg::spec::Struct::from_iter(literals))
 }
 
-/// Converts protobuf FileScanTasks from Scala into iceberg-rust FileScanTask objects.
-///
-/// Each task contains a residual predicate that is used for row-group level filtering
-/// during Parquet scanning.
-///
-/// This function uses deduplication pools from the IcebergScanCommon to avoid redundant
-/// parsing of schemas, partition specs, partition types, name mappings, and other repeated data.
+/// Decodes optional manifest bounds without rejecting a task on unusable statistics.
 fn parse_iceberg_file_metrics(
     metrics: &spark_operator::IcebergFileMetrics,
     schema: &iceberg::spec::Schema,
@@ -4148,6 +4142,13 @@ fn parse_iceberg_file_metrics(
     }
 }
 
+/// Converts protobuf FileScanTasks from Scala into iceberg-rust FileScanTask objects.
+///
+/// Each task contains a residual predicate that is used for row-group level filtering
+/// during Parquet scanning.
+///
+/// This function uses deduplication pools from the IcebergScanCommon to avoid redundant
+/// parsing of schemas, partition specs, partition types, name mappings, and other repeated data.
 fn parse_file_scan_tasks_from_common(
     proto_common: &spark_operator::IcebergScanCommon,
     proto_tasks: &[spark_operator::IcebergFileScanTask],

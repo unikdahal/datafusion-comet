@@ -1161,7 +1161,7 @@ class CometIcebergNativeSuite
     assume(sys.env.contains("COMET_CODE_BENCHMARK_WAREHOUSE"), "fork Actions benchmark only")
     val warehouse = new File(sys.env("COMET_CODE_BENCHMARK_WAREHOUSE"))
     val variant = sys.env("COMET_CODE_BENCHMARK_VARIANT")
-    require(Set("before", "after").contains(variant))
+    require(Set("before", "snapshot", "after").contains(variant))
     val table = "test_cat.db.code_before_after"
     val numRows = sys.env.get("COMET_CODE_BENCHMARK_ROWS").map(_.toLong).getOrElse(120000L)
     val payloadRepeats = sys.env
@@ -1260,13 +1260,81 @@ class CometIcebergNativeSuite
       spark.read
         .parquet(new File(warehouse, "code_before_after_wide_dim").getAbsolutePath)
         .createOrReplaceTempView("code_benchmark_wide_dim")
+      val manyFileCount = sys.env.get("COMET_CODE_BENCHMARK_FILES").map(_.toInt).getOrElse(0)
+      val manyTable = "test_cat.db.code_many_files"
+      var manyFiles = Seq.empty[File]
+      var manyBytes = 0L
+      var manyGroups = 0
+      var manySha256 = ""
+      if (manyFileCount > 0) {
+        if (!spark.catalog.tableExists(manyTable)) {
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            spark.sql(s"""CREATE TABLE $manyTable (id INT, payload STRING) USING iceberg
+              TBLPROPERTIES ('format-version'='2', 'write.distribution-mode'='none',
+                'read.split.adaptive-size.enabled'='false', 'read.split.open-file-cost'='1',
+                'write.target-file-size-bytes'='2147483647',
+                'write.parquet.row-group-size-bytes'='$rowGroupBytes',
+                'write.parquet.compression-codec'='uncompressed')""")
+            spark
+              .range(numRows)
+              .repartitionByRange(manyFileCount, col("id"))
+              .sortWithinPartitions("id")
+              .selectExpr(
+                "CAST(id AS INT) AS id",
+                s"repeat(sha2(cast(id AS STRING), 256), $payloadRepeats) AS payload")
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(manyTable)
+          }
+        }
+        manyFiles = spark
+          .sql(s"SELECT file_path FROM $manyTable.files")
+          .collect()
+          .map { row =>
+            val uri = new org.apache.hadoop.fs.Path(row.getString(0)).toUri
+            if (uri.getScheme == null) new File(uri.getPath) else new File(uri)
+          }
+          .toSeq
+          .sortBy(_.getAbsolutePath)
+        assert(manyFiles.size >= manyFileCount / 2)
+        val manyDigest = java.security.MessageDigest.getInstance("SHA-256")
+        manyFiles.foreach { file =>
+          manyBytes += file.length()
+          val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
+            org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
+              new org.apache.hadoop.fs.Path(file.getAbsolutePath),
+              spark.sessionState.newHadoopConf()))
+          try { manyGroups += reader.getRowGroups.size }
+          finally { reader.close() }
+          val stream = new java.io.FileInputStream(file)
+          try {
+            val buffer = new Array[Byte](65536)
+            var count = stream.read(buffer)
+            while (count >= 0) {
+              manyDigest.update(buffer, 0, count); count = stream.read(buffer)
+            }
+          } finally { stream.close() }
+        }
+        manySha256 = manyDigest.digest().map(b => f"${b & 0xff}%02x").mkString
+        spark.read
+          .format("iceberg")
+          .option("split-size", "2147483647")
+          .load(manyTable)
+          .createOrReplaceTempView("code_benchmark_many_fact")
+      }
       val queries = Seq(
         "join" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
           FROM code_benchmark_fact f JOIN code_benchmark_dim d ON f.id = d.id""",
         "join_no_pruning" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
           FROM code_benchmark_fact f JOIN code_benchmark_wide_dim d ON f.id = d.id""",
         "min" -> "SELECT min(id) FROM code_benchmark_fact",
-        "topk" -> "SELECT id, payload FROM code_benchmark_fact ORDER BY id ASC LIMIT 10")
+        "topk" -> "SELECT id, payload FROM code_benchmark_fact ORDER BY id ASC LIMIT 10") ++ (if (manyFileCount > 0)
+                                                                                                Seq(
+                                                                                                  "join_many_files" -> """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
+            FROM code_benchmark_many_fact f JOIN code_benchmark_dim d ON f.id = d.id""")
+                                                                                              else
+                                                                                                Seq.empty)
       for ((queryName, query) <- queries) {
         var expected = Seq.empty[Row]
         withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
@@ -1274,7 +1342,7 @@ class CometIcebergNativeSuite
         }
         val expectedNumbers = expected.map(_.get(0).asInstanceOf[Number].longValue())
         val values = queryName match {
-          case "join" => Seq(expectedValue)
+          case "join" | "join_many_files" => Seq(expectedValue)
           case "join_no_pruning" => Seq(2L * 64L * payloadRepeats)
           case "min" => Seq(0L)
           case "topk" => (0L until 10L)
@@ -1289,30 +1357,39 @@ class CometIcebergNativeSuite
         val millis = (System.nanoTime() - started) / 1000000.0
         assert(rows.toSeq == expected)
         val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
-        assert(scans.length == 1)
-        val scan = scans.head
-        val bytes = scan.metrics("bytes_scanned").value
-        val tasks = scan.metrics("iceberg_runtime_predicate_tasks").value
-        val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value
-        val initial = scan.metrics("iceberg_runtime_row_groups_pruned_initial").value
-        val live = scan.metrics("iceberg_runtime_row_groups_pruned_live").value
-        val refreshes = scan.metrics("iceberg_runtime_predicate_refreshes").value
+        assert(scans.nonEmpty)
+        def metric(name: String): Long = scans.map(_.metrics(name).value).sum
+        val bytes = metric("bytes_scanned")
+        val tasks = metric("iceberg_runtime_predicate_tasks")
+        val pruned = metric("iceberg_runtime_row_groups_pruned")
+        val initial = metric("iceberg_runtime_row_groups_pruned_initial")
+        val live = metric("iceberg_runtime_row_groups_pruned_live")
+        val refreshes = metric("iceberg_runtime_predicate_refreshes")
+        val filesPruned = metric("iceberg_runtime_file_tasks_pruned")
         assert(bytes > 0)
-        if (variant == "after") {
+        if (variant != "before") {
           assert(tasks > 0)
           if (queryName == "join_no_pruning") {
             assert(pruned == 0 && initial == 0 && live == 0)
-          } else { assert(pruned > 0) }
+          } else if (queryName != "join_many_files") { assert(pruned > 0) }
           if (queryName == "join") { assert(initial > 0 && live == 0) }
-          else if (queryName != "join_no_pruning") {
+          else if (queryName == "join_many_files") {
+            assert(live == 0)
+            if (variant == "after") { assert(filesPruned >= manyFiles.size - 2) }
+            else { assert(filesPruned == 0 && initial > 0) }
+          } else if (queryName != "join_no_pruning") {
             assert(initial == 0 && live > 0 && refreshes > 0)
           }
         } else { assert(tasks == 0 && pruned == 0) }
         val iteration = sys.env("COMET_CODE_BENCHMARK_ITERATION").toInt
         val revision = sys.env("COMET_CODE_BENCHMARK_REVISION")
         val valuesJson = values.mkString("[", ",", "]")
+        val fixtureSha = if (queryName == "join_many_files") manySha256 else sha256
+        val fixtureBytes = if (queryName == "join_many_files") manyBytes else fileBytes
+        val fixtureGroups = if (queryName == "join_many_files") manyGroups else rowGroups
+        val fixtureFiles = if (queryName == "join_many_files") manyFiles.size else 1
         val json =
-          s"""{"variant":"$variant","revision":"$revision","iteration":$iteration,"query":"$queryName","file_sha256":"$sha256","values":$valuesJson,"rows":$numRows,"file_bytes":$fileBytes,"row_groups":$rowGroups,"bytes_scanned":$bytes,"runtime_predicate_tasks":$tasks,"runtime_row_groups_pruned":$pruned,"initial_pruned":$initial,"live_pruned":$live,"refreshes":$refreshes,"wall_ms":$millis}"""
+          s"""{"variant":"$variant","revision":"$revision","iteration":$iteration,"query":"$queryName","file_sha256":"$fixtureSha","values":$valuesJson,"rows":$numRows,"file_bytes":$fixtureBytes,"row_groups":$fixtureGroups,"file_count":$fixtureFiles,"file_tasks_pruned":$filesPruned,"bytes_scanned":$bytes,"runtime_predicate_tasks":$tasks,"runtime_row_groups_pruned":$pruned,"initial_pruned":$initial,"live_pruned":$live,"refreshes":$refreshes,"wall_ms":$millis}"""
         println(s"ICEBERG_CODE_BENCHMARK $json")
         val _ = java.nio.file.Files.write(
           java.nio.file.Paths.get(sys.env("COMET_CODE_BENCHMARK_OUTPUT")),
