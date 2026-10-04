@@ -1066,6 +1066,7 @@ class CometIcebergNativeSuite
           TBLPROPERTIES (
             'format-version' = '2',
             'read.split.adaptive-size.enabled' = 'false',
+            'read.split.open-file-cost' = '1',
             'write.parquet.row-group-size-bytes' = '131072',
             'write.parquet.compression-codec' = 'uncompressed'
           )
@@ -1139,25 +1140,6 @@ class CometIcebergNativeSuite
             val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
             assert(scans.length == 1, s"expected one native Iceberg scan, got ${scans.length}")
             val scan = scans.head
-            val ranges = scan.perPartitionData.toSeq.flatMap { bytes =>
-              org.apache.comet.serde.OperatorOuterClass.IcebergScan
-                .parseFrom(bytes)
-                .getFileScanTasksList
-                .asScala
-                .map { task =>
-                  s"start=${task.getStart},length=${task.getLength},size=${task.getFileSizeInBytes}"
-                }
-            }
-            println(
-              s"ICEBERG_RUNTIME_TASK_RANGES enabled=$dynamicFilterEnabled ${ranges.mkString("; ")}")
-            val readConfField = Class
-              .forName("org.apache.iceberg.spark.source.SparkScan")
-              .getDeclaredField("readConf")
-            readConfField.setAccessible(true)
-            val readConf = readConfField.get(scan.originalPlan.scan)
-            val splitSize = readConf.getClass.getMethod("splitSize").invoke(readConf)
-            val splitOption = readConf.getClass.getMethod("splitSizeOption").invoke(readConf)
-            println(s"ICEBERG_RUNTIME_SPLIT_CONF size=$splitSize option=$splitOption")
             result = Some(
               RunResult(
                 rows.head.getLong(0),
@@ -1215,9 +1197,13 @@ class CometIcebergNativeSuite
               assert(enabled.rowGroupsPruned > 0, s"runtime pruning missing: $enabled")
               assert(disabled.bytes > 0)
               assert(disabled.fileTasks == enabled.fileTasks)
-              if (!adaptiveSplits) {
+              assert(
+                enabled.predicateTasks == enabled.fileTasks,
+                s"predicate should be sampled once per data-file task: $enabled")
+              if (adaptiveSplits) {
+                assert(enabled.fileTasks > 1, s"expected adaptive splitting: $enabled")
+              } else {
                 assert(enabled.fileTasks == 1, s"expected one data-file task: $enabled")
-                assert(enabled.predicateTasks == 1, s"predicate should be sampled once: $enabled")
               }
               assert(
                 enabled.bytes * 100 < disabled.bytes * maximumBytePercent,
@@ -1244,13 +1230,17 @@ class CometIcebergNativeSuite
           // metadata, so the 512 KiB prefetch window limits savings on this small file.
           spark.sql("""
             ALTER TABLE test_cat.db.runtime_join_pruning_test
-            SET TBLPROPERTIES ('read.split.adaptive-size.enabled' = 'true')
+            SET TBLPROPERTIES (
+              'read.split.adaptive-size.enabled' = 'true',
+              'read.split.open-file-cost' = '4194304')
           """)
           spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
           checkAndMeasure("adaptive_splits_no_deletes", 32L * 64L, 80L)
           spark.sql("""
             ALTER TABLE test_cat.db.runtime_join_pruning_test
-            SET TBLPROPERTIES ('read.split.adaptive-size.enabled' = 'false')
+            SET TBLPROPERTIES (
+              'read.split.adaptive-size.enabled' = 'false',
+              'read.split.open-file-cost' = '1')
           """)
           spark.catalog.refreshTable("test_cat.db.runtime_join_pruning_test")
           val catalog = spark.sessionState.catalogManager
