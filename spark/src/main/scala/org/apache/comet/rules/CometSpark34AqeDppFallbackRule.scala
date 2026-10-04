@@ -25,6 +25,7 @@ import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.{FileSourceScanExec, InSubqueryExec, SparkPlan, SubqueryAdaptiveBroadcastExec, SubqueryBroadcastExec}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
+import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, ObjectHashAggregateExec}
 import org.apache.spark.sql.execution.datasources.HadoopFsRelation
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
@@ -120,6 +121,7 @@ case object CometSpark34AqeDppFallbackRule
     if (sabScans.isEmpty && sbScans.isEmpty) return plan
 
     sabScans.foreach { case (scan, sab) =>
+      tagDppAggregatePath(plan, scan)
       tagForSab(plan, scan, sab)
     }
 
@@ -127,6 +129,7 @@ case object CometSpark34AqeDppFallbackRule
     // re-optimize cycles Spark's PlanAdaptiveSubqueries hands us a SubqueryBroadcastExec (not
     // the original SAB), and the freshly-planned main-BHJ build BE has no tag carried over.
     sbScans.foreach { case (scan, sb) =>
+      tagDppAggregatePath(plan, scan)
       tagForSubqueryBroadcast(plan, scan, sb)
     }
 
@@ -192,6 +195,34 @@ case object CometSpark34AqeDppFallbackRule
           inSub.plan.asInstanceOf[SubqueryBroadcastExec]
       })
       .headOption
+  }
+
+  /**
+   * Mark aggregate nodes on the path from a DPP scan to the current plan root. AQE can later
+   * reuse one of these aggregates after its shuffle becomes a materialized stage. Changing that
+   * reused aggregate's native Scan leaf to ShuffleScan during the Spark 3.4 compatibility replan
+   * changes its physical identity and can prevent Spark from reusing the matching DPP broadcast.
+   *
+   * Only aggregates on the DPP-bearing branch are marked. Ordinary Spark 3.4 AQE aggregates keep
+   * the direct-shuffle refresh path.
+   */
+  private def tagDppAggregatePath(plan: SparkPlan, dppScan: SparkPlan): Unit = {
+    def mark(node: SparkPlan): Boolean = {
+      var containsDppScan = node eq dppScan
+      node.children.foreach { child =>
+        if (mark(child)) containsDppScan = true
+      }
+      if (containsDppScan) {
+        node match {
+          case _: HashAggregateExec | _: ObjectHashAggregateExec =>
+            node.setTagValue(CometExecRule.SKIP_STALE_SHUFFLE_REFRESH_TAG, ())
+          case _ =>
+        }
+      }
+      containsDppScan
+    }
+
+    val _ = mark(plan)
   }
 
   /**
