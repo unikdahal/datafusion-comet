@@ -17,16 +17,15 @@ specific language governing permissions and limitations
 under the License.
 -->
 
-
 # Native Iceberg runtime pruning benchmark
 
 `.github/workflows/iceberg_adaptive_benchmark.yml` compares three variants on one runner:
 
-| variant | Comet build | runtime filter settings |
-|---|---|---|
-| main | the main commit this branch is based on | enabled (they apply only to Parquet there) |
-| off | this branch | disabled |
-| on | this branch | enabled |
+| variant | Comet build                             | runtime filter settings                    |
+| ------- | --------------------------------------- | ------------------------------------------ |
+| main    | the main commit this branch is based on | enabled (they apply only to Parquet there) |
+| off     | this branch                             | disabled                                   |
+| on      | this branch                             | enabled                                    |
 
 Main versus off isolates dependency changes (iceberg-rust revision and the Parquet backport);
 off versus on isolates the runtime pruning itself. Both sides are built with the same commands

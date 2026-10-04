@@ -106,14 +106,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      # Each matrix build lands in jars/comet-main and jars/comet-branch.
       - uses: actions/download-artifact@v8
         with:
-          name: comet-main
-          path: jars/main
-      - uses: actions/download-artifact@v8
-        with:
-          name: comet-branch
-          path: jars/branch
+          pattern: comet-*
+          path: jars
       - name: Install Spark 3.5.9 and Iceberg 1.8.1
         run: |
           python3 -m pip install --user --break-system-packages pyspark==3.5.9
@@ -125,8 +122,8 @@ jobs:
           {
             echo "## Environment"
             echo
-            echo "- main commit: \`$(cat jars/main/comet-commit.txt)\`"
-            echo "- branch commit: \`$(cat jars/branch/comet-commit.txt)\`"
+            echo "- main commit: \`$(cat jars/comet-main/comet-commit.txt)\`"
+            echo "- branch commit: \`$(cat jars/comet-branch/comet-commit.txt)\`"
             echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) vCPUs"
             echo "- memory: $(free -g | awk '/Mem:/ {print $2}') GiB"
             echo "- Spark 3.5.9, Iceberg 1.8.1, Java $(java -version 2>&1 | head -1)"
@@ -160,9 +157,9 @@ jobs:
             for offset in 0 1 2; do
               variant="${variants[$(((round + offset) % 3))]}"
               case "$variant" in
-                main) jar=jars/main/comet.jar; enabled=true ;;
-                off) jar=jars/branch/comet.jar; enabled=false ;;
-                on) jar=jars/branch/comet.jar; enabled=true ;;
+                main) jar=jars/comet-main/comet.jar; enabled=true ;;
+                off) jar=jars/comet-branch/comet.jar; enabled=false ;;
+                on) jar=jars/comet-branch/comet.jar; enabled=true ;;
               esac
               echo "round $round variant $variant"
               BENCH_VARIANT="$variant" BENCH_ROUND="$round" \
