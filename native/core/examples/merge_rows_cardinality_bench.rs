@@ -32,9 +32,29 @@ const ROARING_PARTITION_OVERHEAD_BYTES: usize = 256;
 const ROARING_CONTAINER_OVERHEAD_BYTES: usize = 64;
 
 #[derive(Clone, Copy)]
+enum Layout {
+    Stride(u64),
+    SparkPartitions(u64),
+}
+
+#[derive(Clone, Copy)]
 struct Scenario {
     name: &'static str,
-    stride: u64,
+    layout: Layout,
+}
+
+fn row_id(layout: Layout, index: usize) -> u64 {
+    let index = index as u64;
+    match layout {
+        Layout::Stride(stride) => index * stride,
+        // Spark's MonotonicallyIncreasingID encodes partition_id << 33 plus a per-partition row
+        // counter. Interleave partitions here so the benchmark also exercises treemap lookups.
+        Layout::SparkPartitions(partitions) => {
+            let partition = index % partitions;
+            let row = index / partitions;
+            (partition << 33) + row
+        }
+    }
 }
 
 fn baseline_reserved_bytes(len: usize) -> usize {
@@ -64,12 +84,12 @@ fn roaring_reserved_bytes(seen: &RoaringTreemap) -> usize {
     total
 }
 
-fn baseline_run(stride: u64) -> (Duration, usize) {
+fn baseline_run(layout: Layout) -> (Duration, usize) {
     let start = Instant::now();
     let mut seen = HashSet::new();
 
     for index in 0..IDS {
-        let id = ((index as u64) * stride) as i64;
+        let id = row_id(layout, index) as i64;
         if seen.len() < seen.capacity() {
             assert!(seen.insert(id));
         } else {
@@ -84,7 +104,7 @@ fn baseline_run(stride: u64) -> (Duration, usize) {
     (start.elapsed(), baseline_reserved_bytes(seen.len()))
 }
 
-fn roaring_run(stride: u64) -> (Duration, usize) {
+fn roaring_run(layout: Layout) -> (Duration, usize) {
     let start = Instant::now();
     let mut seen = RoaringTreemap::new();
     let mut reserved = 0usize;
@@ -92,8 +112,7 @@ fn roaring_run(stride: u64) -> (Duration, usize) {
     for batch_start in (0..IDS).step_by(BATCH_ROWS) {
         let batch_end = (batch_start + BATCH_ROWS).min(IDS);
         for index in batch_start..batch_end {
-            let id = (index as u64) * stride;
-            assert!(seen.insert(id));
+            assert!(seen.insert(row_id(layout, index)));
         }
         reserved = roaring_reserved_bytes(&seen);
         black_box(reserved);
@@ -116,15 +135,23 @@ fn main() {
     let scenarios = [
         Scenario {
             name: "dense",
-            stride: 1,
+            layout: Layout::Stride(1),
         },
         Scenario {
             name: "one-in-8",
-            stride: 8,
+            layout: Layout::Stride(8),
         },
         Scenario {
             name: "one-in-200",
-            stride: 200,
+            layout: Layout::Stride(200),
+        },
+        Scenario {
+            name: "spark-2k-partitions",
+            layout: Layout::SparkPartitions(2_048),
+        },
+        Scenario {
+            name: "spark-16k-partitions",
+            layout: Layout::SparkPartitions(16_384),
         },
     ];
 
@@ -134,6 +161,9 @@ fn main() {
         "5,000,000 distinct ids, 4,096 ids per accounting batch, 5 timed rounds per implementation."
     );
     println!("Each round alternates implementation order to reduce runner-order bias.");
+    println!(
+        "spark-* layouts model Spark MonotonicallyIncreasingID as partition_id << 33 plus row index."
+    );
     println!();
     println!(
         "| layout | baseline HashSet median | RoaringTreemap median | runtime change | baseline reservation | roaring reservation | memory reduction |"
@@ -148,19 +178,19 @@ fn main() {
 
         for round in 0..ROUNDS {
             if round % 2 == 0 {
-                let (baseline_time, bytes) = baseline_run(scenario.stride);
+                let (baseline_time, bytes) = baseline_run(scenario.layout);
                 baseline_times.push(baseline_time);
                 baseline_bytes = bytes;
 
-                let (roaring_time, bytes) = roaring_run(scenario.stride);
+                let (roaring_time, bytes) = roaring_run(scenario.layout);
                 roaring_times.push(roaring_time);
                 roaring_bytes = bytes;
             } else {
-                let (roaring_time, bytes) = roaring_run(scenario.stride);
+                let (roaring_time, bytes) = roaring_run(scenario.layout);
                 roaring_times.push(roaring_time);
                 roaring_bytes = bytes;
 
-                let (baseline_time, bytes) = baseline_run(scenario.stride);
+                let (baseline_time, bytes) = baseline_run(scenario.layout);
                 baseline_times.push(baseline_time);
                 baseline_bytes = bytes;
             }
