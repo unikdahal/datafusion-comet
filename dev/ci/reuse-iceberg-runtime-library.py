@@ -85,7 +85,7 @@ for artifact in artifacts:
     if artifact["expired"] or run["head_branch"] not in (
         "feat/iceberg-runtime-pruning", "feat/iceberg-live-runtime-pruning",
         "feat/iceberg-minmax-runtime-filter", "feat/iceberg-topk-runtime-filter",
-        "feat/iceberg-adaptive-benchmark", "feat/iceberg-file-runtime-pruning",
+        "feat/iceberg-adaptive-benchmark", "feat/iceberg-file-runtime-pruning", "feat/iceberg-file-runtime-pruning-final",
     ):
         continue
     try:

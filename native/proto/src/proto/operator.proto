@@ -442,7 +442,7 @@ message IcebergFileScanTask {
 
 // Iceberg binary bounds are decoded against the task schema in native code.
 message IcebergFileMetrics {
-  uint64 record_count = 1;
+  optional uint64 record_count = 1;
   map<int32, uint64> value_counts = 2;
   map<int32, uint64> null_value_counts = 3;
   map<int32, uint64> nan_value_counts = 4;

@@ -4892,7 +4892,7 @@ mod tests {
             .build()
             .unwrap();
         let proto = spark_operator::IcebergFileMetrics {
-            record_count: 20,
+            record_count: Some(20),
             lower_bounds: std::collections::HashMap::from([
                 (1, (-10_i32).to_le_bytes().to_vec()),
                 (2, 10_i32.to_le_bytes().to_vec()),
@@ -4906,7 +4906,7 @@ mod tests {
             ..Default::default()
         };
         let metrics = super::parse_iceberg_file_metrics(&proto, &schema);
-        assert_eq!(metrics.record_count, 20);
+        assert_eq!(metrics.record_count, Some(20));
         assert_eq!(
             metrics.lower_bounds,
             std::collections::HashMap::from([(1, Datum::int(-10))])
@@ -4934,7 +4934,7 @@ mod tests {
             tasks[0].file_metrics().unwrap(),
             tasks[1].file_metrics().unwrap()
         ));
-        assert_eq!(tasks[0].file_metrics().unwrap().record_count, 20);
+        assert_eq!(tasks[0].file_metrics().unwrap().record_count, Some(20));
     }
 
     mod empty_native_scan;

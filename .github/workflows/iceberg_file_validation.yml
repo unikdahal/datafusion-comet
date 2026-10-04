@@ -21,7 +21,7 @@ name: Fork Iceberg File Pruning Validation
 
 on:
   push:
-    branches: [feat/iceberg-file-runtime-pruning]
+    branches: [feat/iceberg-file-runtime-pruning, feat/iceberg-file-runtime-pruning-final]
     # Unit-test/import and description fixes use ordinary CI. Dispatch this
     # release integration workflow after an unchanged native artifact finishes.
     paths-ignore:
