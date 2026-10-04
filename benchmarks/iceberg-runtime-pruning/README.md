@@ -25,7 +25,8 @@ a Markdown summary, and test logs for each Spark version.
 
 The fixture is one sorted Iceberg v2 Parquet file containing 120,000 integer keys and
 64-character SHA-256 payloads, written without compression with a 128 KiB row-group target.
-Adaptive split sizing is disabled for the four primary scenarios to keep the file in one task.
+The four primary scenarios set an explicit 128 MiB split-size read option and assert that
+the file is executed as exactly one data-file task; adaptive split sizing is also disabled.
 The test inspects the actual footer and records its row-group count. The build table contains
 32 even keys from 50,000 through 50,062, so min/max pruning must retain gaps for the exact
 membership consumer to remove.
