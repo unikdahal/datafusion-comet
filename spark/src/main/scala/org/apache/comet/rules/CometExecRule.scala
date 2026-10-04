@@ -621,7 +621,7 @@ case class CometExecRule(session: SparkSession)
     }
 
     plan.transformUp { case op =>
-      val converted = ShimCometMergeRows.preserveV2WriteMergeSummary(convertNode(op))
+      val converted = convertNode(op)
       // Replace SubqueryBroadcastExec with CometSubqueryBroadcastExec in DPP expressions
       // when the broadcast child has a Comet plan underneath. This enables exchange reuse
       // between the DPP subquery and the join's CometBroadcastExchangeExec because both
