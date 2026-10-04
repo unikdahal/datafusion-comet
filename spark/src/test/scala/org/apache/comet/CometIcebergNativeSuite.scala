@@ -1115,7 +1115,9 @@ class CometIcebergNativeSuite
               if (enabled) {
                 assert(
                   pruned >= fileCount - 2,
-                  s"too few tasks rejected before footer I/O: $pruned")
+                  s"too few tasks rejected before footer I/O: $pruned; " +
+                    s"metrics=${scans.map(_.metrics.map { case (k, v) => k -> v.value })}; " +
+                    s"plan=${df.queryExecution.executedPlan}")
               } else { assert(pruned == 0) }
             }
             bytes
@@ -1261,7 +1263,7 @@ class CometIcebergNativeSuite
         .parquet(new File(warehouse, "code_before_after_wide_dim").getAbsolutePath)
         .createOrReplaceTempView("code_benchmark_wide_dim")
       val manyFileCount = sys.env.get("COMET_CODE_BENCHMARK_FILES").map(_.toInt).getOrElse(0)
-      val manyTable = "test_cat.db.code_many_files"
+      val manyTable = "test_cat.db.code_multi_file_data"
       var manyFiles = Seq.empty[File]
       var manyBytes = 0L
       var manyGroups = 0
@@ -1357,7 +1359,10 @@ class CometIcebergNativeSuite
         val millis = (System.nanoTime() - started) / 1000000.0
         assert(rows.toSeq == expected)
         val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
-        assert(scans.nonEmpty)
+        assert(
+          scans.nonEmpty,
+          s"native scan missing for $queryName: " +
+            new ExtendedExplainInfo().generateVerboseInfo(df.queryExecution.executedPlan))
         def metric(name: String): Long = scans.map(_.metrics(name).value).sum
         val bytes = metric("bytes_scanned")
         val tasks = metric("iceberg_runtime_predicate_tasks")

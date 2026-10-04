@@ -1245,7 +1245,11 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                     taskBuilder.getDataFilePath, {
                       val idx = fileMetricsToPoolIndex.size
                       commonBuilder.addFileMetricsPool(
-                        fileMetrics(contentFileClass, dataFile, runtimeFieldIds))
+                        fileMetrics(
+                          contentFileClass,
+                          metadata.runtimeFileStatistics
+                            .getOrElse(taskBuilder.getDataFilePath, dataFile),
+                          runtimeFieldIds))
                       idx
                     })
                   taskBuilder.setFileMetricsIdx(metricsIdx)

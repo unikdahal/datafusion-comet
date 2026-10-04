@@ -27,6 +27,7 @@ import scala.util.control.NonFatal
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 
+import org.apache.comet.CometConf
 import org.apache.comet.util.ClassLoaders
 
 /**
@@ -448,6 +449,46 @@ object IcebergReflection extends Logging {
    */
   def getTasks(scan: Any): Option[java.util.List[AnyRef]] =
     if (isStagedScan(scan)) tasksFromTaskGroups(scan) else tasksFromTasksAccessor(scan)
+
+  /**
+   * Spark strips column statistics from its FileScanTasks. Read the same Iceberg scan's manifest
+   * metadata with statistics retained, without replacing Spark's tasks or splits. Match only the
+   * already selected immutable data-file paths; absent metadata fails open. Staged and older
+   * scans without this API keep row-group pruning.
+   */
+  def runtimeFileStatistics(scan: Any, tasks: java.util.List[_]): Map[String, AnyRef] = {
+    if (isStagedScan(scan)) return Map.empty
+    try {
+      val selected = tasks.toArray.toSeq.flatMap { task =>
+        val file = getMethod(loadClass(ClassNames.CONTENT_SCAN_TASK), "file").invoke(task)
+        extractFileLocation(file)
+      }.toSet
+      val icebergScan = findMethodInHierarchy(scan.getClass, "scan")
+        .map(_.invoke(scan))
+        .orNull
+      if (icebergScan == null) return Map.empty
+      val scanClass = loadClass("org.apache.iceberg.Scan")
+      val withStats = getMethod(scanClass, "includeColumnStats").invoke(icebergScan)
+      val planned = getMethod(scanClass, "planFiles").invoke(withStats)
+      try {
+        val result = Map.newBuilder[String, AnyRef]
+        val iterator = planned.asInstanceOf[java.lang.Iterable[_]].iterator()
+        val fileMethod = getMethod(loadClass(ClassNames.CONTENT_SCAN_TASK), "file")
+        while (iterator.hasNext) {
+          val file = fileMethod.invoke(iterator.next())
+          extractFileLocation(file).filter(selected.contains).foreach { path =>
+            result += path -> file
+          }
+        }
+        result.result()
+      } finally { planned.asInstanceOf[AutoCloseable].close() }
+    } catch {
+      case NonFatal(e) =>
+        logWarning(
+          s"Runtime file statistics unavailable; retaining row-group pruning: ${e.getMessage}")
+        Map.empty
+    }
+  }
 
   private def tasksFromTasksAccessor(scan: Any): Option[java.util.List[AnyRef]] =
     findMethodInHierarchy(scan.getClass, "tasks") match {
@@ -2248,7 +2289,8 @@ case class CometIcebergNativeScanMetadata(
     globalFieldIdMapping: Map[String, Int],
     catalogProperties: Map[String, String],
     catalogName: Option[String],
-    fileFormat: String)
+    fileFormat: String,
+    @transient runtimeFileStatistics: Map[String, AnyRef] = Map.empty)
 
 object CometIcebergNativeScanMetadata extends Logging {
 
@@ -2308,7 +2350,13 @@ object CometIcebergNativeScanMetadata extends Logging {
         globalFieldIdMapping = globalFieldIdMapping,
         catalogProperties = catalogProperties,
         catalogName = IcebergReflection.deriveCatalogName(table),
-        fileFormat = FileFormats.PARQUET)
+        fileFormat = FileFormats.PARQUET,
+        runtimeFileStatistics =
+          if (CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get() ||
+            CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get() ||
+            CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get()) {
+            IcebergReflection.runtimeFileStatistics(scan, tasks)
+          } else { Map.empty })
     }
   }
 
