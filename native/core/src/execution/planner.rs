@@ -36,8 +36,8 @@ mod lance_scan;
 
 use crate::execution::operators::init_csv_datasource_exec;
 use crate::execution::operators::DynamicFilterJoinExec;
-use crate::execution::operators::IcebergScanExec;
 use crate::execution::operators::TopKReaderFilterExec;
+use crate::execution::operators::{IcebergMinMaxFilterExec, IcebergScanExec};
 use crate::execution::{
     operators::{ExecutionError, MergeInstructionExec, MergeRowsExec, ScanExec, ShuffleScanExec},
     planner::expression_registry::ExpressionRegistry,
@@ -76,7 +76,7 @@ use datafusion::{
         limit::LocalLimitExec,
         projection::ProjectionExec,
         sorts::sort::SortExec,
-        ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions,
+        ChildrenPropertiesMode, ExecutionPlan, ExecutionPlanProperties, ReplaceChildrenOptions,
     },
     prelude::SessionContext,
 };
@@ -1450,10 +1450,21 @@ impl PhysicalPlanner {
                 let has_partial_merge = proto_mode == ProtoAggregateMode::PartialMerge
                     || agg.expr_modes.contains(&partial_merge_value);
 
+                // Keep the direct integer column visible to DataFusion's MIN/MAX
+                // producer only for the explicitly enabled Iceberg shape. All
+                // ordinary aggregates retain their existing cast behavior.
+                let direct_minmax = agg.dynamic_filter_enabled
+                    && proto_mode == ProtoAggregateMode::Partial
+                    && !has_partial_merge
+                    && group_by.is_empty()
+                    && agg.agg_exprs.len() == 1
+                    && agg.agg_exprs.iter().all(|expr| expr.filter.is_none())
+                    && child.native_plan.is::<IcebergScanExec>()
+                    && child.native_plan.output_partitioning().partition_count() == 1;
                 let agg_exprs: PhyAggResult = agg
                     .agg_exprs
                     .iter()
-                    .map(|expr| self.create_agg_expr(expr, Arc::clone(&schema)))
+                    .map(|expr| self.create_agg_expr(expr, Arc::clone(&schema), direct_minmax))
                     .collect();
 
                 let aggr_expr: Vec<Arc<AggregateFunctionExpr>> = if has_partial_merge {
@@ -1533,16 +1544,25 @@ impl PhysicalPlanner {
                     })
                     .collect();
 
-                let aggregate: Arc<dyn ExecutionPlan> = Arc::new(
-                    datafusion::physical_plan::aggregates::AggregateExec::try_new(
-                        mode,
-                        group_by,
-                        aggr_expr,
-                        filter_exprs?,
-                        Arc::clone(&child.native_plan),
-                        Arc::clone(&schema),
-                    )?,
-                );
+                let aggregate = datafusion::physical_plan::aggregates::AggregateExec::try_new(
+                    mode,
+                    group_by,
+                    aggr_expr,
+                    filter_exprs?,
+                    Arc::clone(&child.native_plan),
+                    Arc::clone(&schema),
+                )?;
+                let aggregate: Arc<dyn ExecutionPlan> = if agg.dynamic_filter_enabled {
+                    match IcebergMinMaxFilterExec::try_new(
+                        &aggregate,
+                        self.session_ctx.copied_config().options(),
+                    )? {
+                        Some(wrapper) => Arc::new(wrapper),
+                        None => Arc::new(aggregate),
+                    }
+                } else {
+                    Arc::new(aggregate)
+                };
 
                 Ok((
                     scans,
@@ -2903,6 +2923,7 @@ impl PhysicalPlanner {
         &self,
         spark_expr: &AggExpr,
         schema: SchemaRef,
+        direct_minmax: bool,
     ) -> Result<AggregateFunctionExpr, ExecutionError> {
         self.register_query_context(spark_expr.expr_id, spark_expr.query_context.as_ref());
 
@@ -2927,7 +2948,15 @@ impl PhysicalPlanner {
                 let child = self.create_expr(expr.child.as_ref().unwrap(), Arc::clone(&schema))?;
                 let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
                 let func = min_max_udaf(&datatype, false);
-                let child = Arc::new(CastExpr::new(child, datatype.clone(), None));
+                let child: Arc<dyn PhysicalExpr> = if direct_minmax
+                    && child.is::<Column>()
+                    && matches!(datatype, DataType::Int32 | DataType::Int64)
+                    && child.data_type(schema.as_ref())? == datatype
+                {
+                    child
+                } else {
+                    Arc::new(CastExpr::new(child, datatype, None))
+                };
 
                 AggregateExprBuilder::new(func, vec![child])
                     .schema(schema)
@@ -2941,7 +2970,15 @@ impl PhysicalPlanner {
                 let child = self.create_expr(expr.child.as_ref().unwrap(), Arc::clone(&schema))?;
                 let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
                 let func = min_max_udaf(&datatype, true);
-                let child = Arc::new(CastExpr::new(child, datatype.clone(), None));
+                let child: Arc<dyn PhysicalExpr> = if direct_minmax
+                    && child.is::<Column>()
+                    && matches!(datatype, DataType::Int32 | DataType::Int64)
+                    && child.data_type(schema.as_ref())? == datatype
+                {
+                    child
+                } else {
+                    Arc::new(CastExpr::new(child, datatype, None))
+                };
 
                 AggregateExprBuilder::new(func, vec![child])
                     .schema(schema)
@@ -4263,6 +4300,35 @@ fn partition_data_to_struct(
     Ok(iceberg::spec::Struct::from_iter(literals))
 }
 
+/// Decodes optional manifest bounds without rejecting a task on unusable statistics.
+fn parse_iceberg_file_metrics(
+    metrics: &spark_operator::IcebergFileMetrics,
+    schema: &iceberg::spec::Schema,
+) -> iceberg::scan::FileScanTaskMetrics {
+    let bounds = |values: &std::collections::HashMap<i32, Vec<u8>>| {
+        values
+            .iter()
+            .filter_map(|(id, bytes)| {
+                let field = schema.field_by_id(*id)?;
+                let data_type = field.field_type.as_primitive_type()?;
+                // Invalid or historical encodings fail open for this column. In
+                // particular, an old INT bound need not decode as a promoted BIGINT.
+                iceberg::spec::Datum::try_from_bytes(bytes, data_type.clone())
+                    .ok()
+                    .map(|datum| (*id, datum))
+            })
+            .collect()
+    };
+    iceberg::scan::FileScanTaskMetrics {
+        record_count: metrics.record_count,
+        value_counts: metrics.value_counts.clone(),
+        null_value_counts: metrics.null_value_counts.clone(),
+        nan_value_counts: metrics.nan_value_counts.clone(),
+        lower_bounds: bounds(&metrics.lower_bounds),
+        upper_bounds: bounds(&metrics.upper_bounds),
+    }
+}
+
 /// Converts protobuf FileScanTasks from Scala into iceberg-rust FileScanTask objects.
 ///
 /// Each task contains a residual predicate that is used for row-group level filtering
@@ -4486,6 +4552,10 @@ fn parse_file_scan_tasks_from_common(
 
     let unified_partition_type_arc = Arc::new(unified_partition_type);
 
+    let mut file_metrics_cache: std::collections::HashMap<
+        (u32, u32),
+        Arc<iceberg::scan::FileScanTaskMetrics>,
+    > = std::collections::HashMap::new();
     let results: Result<Vec<_>, _> = proto_tasks
         .iter()
         .map(|proto_task| {
@@ -4598,6 +4668,24 @@ fn parse_file_scan_tasks_from_common(
                 None
             };
 
+            let file_metrics = if let Some(idx) = proto_task.file_metrics_idx {
+                let metrics = proto_common
+                    .file_metrics_pool
+                    .get(idx as usize)
+                    .ok_or_else(|| {
+                        ExecutionError::GeneralError(format!("Invalid file_metrics_idx: {idx}"))
+                    })?;
+                Some(Arc::clone(
+                    file_metrics_cache
+                        .entry((idx, proto_task.schema_idx))
+                        .or_insert_with(|| {
+                            Arc::new(parse_iceberg_file_metrics(metrics, &schema_ref))
+                        }),
+                ))
+            } else {
+                None
+            };
+
             // `FileScanTask`'s fields are private as of iceberg-rust 665c64e, so the task is
             // constructed through its builder. `build()` runs the task's validation (partition
             // vs. partition-spec consistency), surfaced here as a GeneralError.
@@ -4606,6 +4694,7 @@ fn parse_file_scan_tasks_from_common(
                 .with_start(proto_task.start)
                 .with_length(proto_task.length)
                 .with_record_count(proto_task.record_count)
+                .with_file_metrics(file_metrics)
                 // RAW data-file path -- do NOT rewrite the alias to s3://. iceberg-rust matches
                 // positional deletes by comparing this against the path recorded inside the delete
                 // file, so changing the scheme drops deletes. The S3 backend opens a raw alias path
@@ -4979,6 +5068,62 @@ fn needs_fields_coercion(sig: &TypeSignature) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn iceberg_file_metrics_decode_bounds_and_ignore_unusable_encodings() {
+        use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
+        let schema = Schema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(2, "promoted", Type::Primitive(PrimitiveType::Long)).into(),
+            ])
+            .build()
+            .unwrap();
+        let proto = spark_operator::IcebergFileMetrics {
+            record_count: Some(20),
+            lower_bounds: std::collections::HashMap::from([
+                (1, (-10_i32).to_le_bytes().to_vec()),
+                (2, 10_i32.to_le_bytes().to_vec()),
+                (99, 10_i32.to_le_bytes().to_vec()),
+            ]),
+            upper_bounds: std::collections::HashMap::from([
+                (1, 30_i32.to_le_bytes().to_vec()),
+                (2, vec![1]),
+            ]),
+            null_value_counts: std::collections::HashMap::from([(1, 2)]),
+            ..Default::default()
+        };
+        let metrics = super::parse_iceberg_file_metrics(&proto, &schema);
+        assert_eq!(metrics.record_count, Some(20));
+        assert_eq!(
+            metrics.lower_bounds,
+            std::collections::HashMap::from([(1, Datum::int(-10))])
+        );
+        assert_eq!(
+            metrics.upper_bounds,
+            std::collections::HashMap::from([(1, Datum::int(30))])
+        );
+        assert_eq!(metrics.null_value_counts.get(&1), Some(&2));
+        let common = spark_operator::IcebergScanCommon {
+            schema_pool: vec![serde_json::to_string(&schema).unwrap()],
+            project_field_ids_pool: vec![spark_operator::ProjectFieldIdList { field_ids: vec![1] }],
+            file_metrics_pool: vec![proto],
+            ..Default::default()
+        };
+        let task = spark_operator::IcebergFileScanTask {
+            data_file_path: "file:///tmp/pooled.parquet".to_string(),
+            file_size_in_bytes: 100,
+            file_metrics_idx: Some(0),
+            ..Default::default()
+        };
+        let tasks =
+            super::parse_file_scan_tasks_from_common(&common, &[task.clone(), task]).unwrap();
+        assert!(Arc::ptr_eq(
+            tasks[0].file_metrics().unwrap(),
+            tasks[1].file_metrics().unwrap()
+        ));
+        assert_eq!(tasks[0].file_metrics().unwrap().record_count, Some(20));
+    }
+
     mod empty_native_scan;
 
     use futures::{poll, StreamExt};
@@ -5810,6 +5955,7 @@ mod tests {
                 mode: spark_operator::AggregateMode::Partial as i32,
                 expr_modes: vec![],
                 initial_input_buffer_offset: 0,
+                dynamic_filter_enabled: false,
             })),
         };
         let projection = Operator {

@@ -35,6 +35,7 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 
 mod correctness;
 mod eligibility;
+mod iceberg;
 mod lifecycle;
 mod reader;
 mod schema;

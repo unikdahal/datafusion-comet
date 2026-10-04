@@ -40,19 +40,21 @@ Both broadcast and shuffled hash joins support either Spark build side. Unsuppor
 their existing execution path.
 
 Once the build completes, its key domain filters probe batches before the hash probe. Eligible
-native Parquet readers also use the domain to prune row groups. Reader attachment can pass through
-direct-column `IS NOT NULL` checks, including conjunctions, and remaps columns when the scan itself
-projects the file schema. The original null checks and residual runtime filter remain in place.
+native Parquet and Iceberg readers also use the domain to prune row groups before reading their
+column chunks. Reader attachment can pass through direct-column `IS NOT NULL` checks, including
+conjunctions. Parquet remaps columns through its scan schema adapter; Iceberg resolves the projected
+probe column through the task field ID before creating the runtime predicate. The original null
+checks and residual runtime filter remain in place.
 The original join still verifies matches, including any hash collisions admitted by the filter.
 Standalone projections, other filter expressions, and limits prevent reader attachment.
 
-To preserve schema-conversion and timestamp-overflow errors, runtime reader pruning is disabled for
-each file whose projected or statically filtered columns require schema adaptations beyond direct
-column mappings or literal values. This conservative check also disables reader pruning for allowed
-`INT32` to `BIGINT` promotion and for projecting a subset of a struct's fields, even when those
-adaptations cannot fail. Nested column pruning still reads only the requested struct fields. Scans
-with supplied file statistics also skip reader attachment. These cases still use runtime filtering
-on decoded batches.
+For native Parquet, schema-conversion safeguards still apply: runtime reader pruning is disabled
+for each file whose projected or statically filtered columns require schema adaptations beyond
+direct column mappings or literal values. This conservative check also disables Parquet reader
+pruning for allowed `INT32` to `BIGINT` promotion and struct-subset projection. Iceberg uses its
+projected field IDs and task schema when binding the runtime predicate; if that mapping or binding
+is not safe, the runtime predicate is ignored for that task. In every case, decoded-batch filtering
+and the hash join remain responsible for correctness.
 
 Filters stay within the task's native plan and do not propagate across Spark exchanges or JVM/Arrow
 boundaries. A shuffled hash join can still filter probe batches after shuffle, but it cannot send
