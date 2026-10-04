@@ -2,7 +2,9 @@ name: Celeborn Native Shuffle Proof
 
 on:
   workflow_dispatch:
-  pull_request:
+  push:
+    branches:
+      - proof/celeborn-native-shuffle
     paths:
       - ".github/workflows/celeborn_native_shuffle_proof.yml"
       - "dev/ci/celeborn_native_shuffle_proof.py"
