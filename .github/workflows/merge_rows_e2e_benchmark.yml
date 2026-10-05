@@ -44,6 +44,7 @@ jobs:
     container:
       image: amd64/rust
     strategy:
+      fail-fast: false
       matrix:
         side: [main, previous, pr]
     steps:
@@ -70,7 +71,10 @@ jobs:
         env:
           COMET_COMMIT: ${{ steps.commit.outputs.sha }}
         run: |
-          cd native && cargo build --release --locked && cd ..
+          # The previous revision never refreshed its lock file for its roaring pin.
+          locked=--locked
+          if [ "${{ matrix.side }}" = previous ]; then locked=; fi
+          cd native && cargo build --release $locked && cd ..
           ./mvnw -B install -Prelease -DskipTests -Pspark-3.5
           mkdir -p dist
           echo "$COMET_COMMIT" > dist/comet-commit.txt
