@@ -1,0 +1,92 @@
+name: Buffer shuffle validation
+on:
+  push:
+    branches: [feature/async-buffer-shuffle]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  RUSTFLAGS: '-Ctarget-cpu=x86-64-v3 -Clink-arg=-fuse-ld=bfd'
+  SPARK_LOCAL_IP: 127.0.0.1
+  SPARK_LOCAL_HOSTNAME: localhost
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - run: |
+          (cd native && cargo fmt --all)
+          ./mvnw -B -Pspark-3.5,scala-2.12 spotless:apply
+          git diff > formatting.patch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-formatting
+          path: formatting.patch
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('native/**/Cargo.lock', 'native/**/Cargo.toml') }}
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Compile JVM exception classes
+        run: ./mvnw -B -DskipTests compile
+      - name: Native shuffle and JNI contract tests
+        run: |
+          export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:${LD_LIBRARY_PATH:-}"
+          cd native
+          cargo test --profile ci -p datafusion-comet-shuffle -p datafusion-comet-jni-bridge
+          cargo build --profile ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-library
+          path: native/target/ci/libcomet.so
+  spark:
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ['spark-3.5,scala-2.12', 'spark-4.1,scala-2.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-library
+          path: native/target/release
+      - name: Celeborn and both shuffle implementations
+        run: |
+          SPARK_HOME="$PWD" ./mvnw -B -P${{ matrix.profile }} -Prelease test \
+            -Dtest=none -Dsuites=org.apache.comet.shuffle.CelebornShufflePartitionPusherSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornNativeShuffleWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleReaderSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManagerSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleFallbackSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShufflePlanningSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornConcurrentMaterializationSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleStatisticsSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornLocalFetchFailureSuite,org.apache.comet.exec.CometNativeShuffleSuite,org.apache.comet.exec.CometColumnarShuffleSuite
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spark-${{ matrix.profile }}
+          path: |
+            **/target/surefire-reports/**
+            **/target/test-reports/**
+            **/target/*.txt

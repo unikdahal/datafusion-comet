@@ -214,7 +214,7 @@ impl RssPartitionWriter {
                 )
             })?;
         let admitted_frame_limit =
-            (reservation_limit.saturating_sub(ipc_scratch) / 3).min(self.max_frame_size);
+            (reservation_limit.saturating_sub(ipc_scratch) / self.pusher.frame_copies()).min(self.max_frame_size);
         if admitted_frame_limit < 20 {
             if batch.num_rows() > 1 {
                 return self.push_split_batch(partition_id, batch, metrics);
@@ -241,11 +241,11 @@ impl RssPartitionWriter {
             .min(admitted_frame_limit);
 
         loop {
-            // Native output capacity, its JNI byte array, and Celeborn's copied transport request
-            // overlap. Acquire all three plus the encoding workspace atomically, before either
+            // Charge the callback's overlapping payload representations and encoding workspace
+            // atomically before either
             // compaction or encoding, without ever clamping a calculated memory bound.
             let reservation = frame_bound
-                .checked_mul(3)
+                .checked_mul(self.pusher.frame_copies())
                 .and_then(|bytes| bytes.checked_add(ipc_scratch))
                 .ok_or_else(|| {
                     Self::size_limit_error(
@@ -278,7 +278,7 @@ impl RssPartitionWriter {
             }
 
             // Bound encoding by the admitted estimate, not only the configured maximum, so all
-            // three eventual frame copies fit the reservation that was acquired atomically.
+            // negotiated payload representations fit the reservation that was acquired atomically.
             let mut output = match BoundedBuffer::try_new(frame_bound) {
                 Ok(output) => output,
                 Err(error) => {

@@ -17,7 +17,7 @@
 
 use crate::{check_exception, errors::CometError, JVMClasses};
 use datafusion::common::{DataFusionError, Result};
-use jni::objects::{Global, JMethodID, JObject, JValue};
+use jni::objects::{Global, JByteBuffer, JMethodID, JObject, JValue};
 use jni::signature::{Primitive, ReturnType};
 use jni::Env;
 
@@ -51,6 +51,9 @@ pub trait ShufflePartitionPusher: Send + Sync {
         usize::MAX
     }
 
+    /// Payload representations overlapping during submission (native, JNI, transport).
+    fn frame_copies(&self) -> usize { 3 }
+
     /// Sends one complete, length-prefixed Arrow IPC shuffle block.
     fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()>;
 }
@@ -63,6 +66,8 @@ pub trait ShufflePartitionPusher: Send + Sync {
 pub struct JavaShufflePartitionPusher {
     callback: Global<JObject<'static>>,
     push_method: JMethodID,
+    direct_push_method: Option<JMethodID>,
+    frame_copies: usize,
     reserve_method: JMethodID,
     release_method: JMethodID,
     max_frame_size: usize,
@@ -92,6 +97,28 @@ impl JavaShufflePartitionPusher {
                 jni::jni_sig!("(I[BI)V"),
             )
             .map_err(CometError::from)?;
+        let direct_method = env.get_method_id(&callback_class,
+            jni::jni_str!("supportsDirectPush"), jni::jni_sig!("()Z"))
+            .map_err(CometError::from)?;
+        // SAFETY: the method was resolved on this class with the exact no-argument boolean ABI.
+        let direct = unsafe { env.call_method_unchecked(callback, direct_method,
+            ReturnType::Primitive(Primitive::Boolean), &[]) };
+        if let Some(exception) = check_exception(env)? { return Err(exception.into()); }
+        let direct = direct.map_err(CometError::from)?.z().map_err(CometError::from)?;
+        let direct_push_method = if direct {
+            Some(env.get_method_id(&callback_class, jni::jni_str!("pushPartitionDataDirect"),
+                jni::jni_sig!("(ILjava/nio/ByteBuffer;I)V")).map_err(CometError::from)?)
+        } else { None };
+        let copies_method = env.get_method_id(&callback_class,
+            jni::jni_str!("frameCopies"), jni::jni_sig!("()I")).map_err(CometError::from)?;
+        // SAFETY: the method was resolved on this class with the exact no-argument int ABI.
+        let copies = unsafe { env.call_method_unchecked(callback, copies_method,
+            ReturnType::Primitive(Primitive::Int), &[]) };
+        if let Some(exception) = check_exception(env)? { return Err(exception.into()); }
+        let copies = copies.map_err(CometError::from)?.i().map_err(CometError::from)?;
+        if !(1..=3).contains(&copies) || (!direct && copies < 2) {
+            return Err(DataFusionError::Execution("Invalid remote shuffle copy reservation".into()));
+        }
         let reserve_method = env
             .get_method_id(
                 &callback_class,
@@ -167,6 +194,8 @@ impl JavaShufflePartitionPusher {
         Ok(Self {
             callback,
             push_method,
+            direct_push_method,
+            frame_copies: copies as usize,
             reserve_method,
             release_method,
             max_frame_size: configured_maximum as usize,
@@ -248,8 +277,30 @@ impl ShufflePartitionPusher for JavaShufflePartitionPusher {
         self.max_reservation_size
     }
 
+    fn frame_copies(&self) -> usize { self.frame_copies }
+
     fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()> {
         let payload_length = Self::checked_payload_length(partition_id, data.len())?;
+
+        if let Some(method) = self.direct_push_method {
+            return JVMClasses::with_env(|env| {
+                // SAFETY: data remains live and immutable through the synchronous callback.
+                // The callback contract retires every transport/retry owner before any return,
+                // including exceptional returns. No Java reference may access the allocation later.
+                let payload: JByteBuffer = unsafe {
+                    env.new_direct_byte_buffer(data.as_ptr() as *mut u8, data.len())
+                }.map_err(CometError::from)?;
+                // SAFETY: cached method has the exact (int, ByteBuffer, int) void ABI.
+                let result = unsafe { env.call_method_unchecked(self.callback.as_obj(), method,
+                    ReturnType::Primitive(Primitive::Void), &[
+                        JValue::Int(partition_id).as_jni(),
+                        JValue::Object(payload.as_ref()).as_jni(),
+                        JValue::Int(payload_length).as_jni()]) };
+                if let Some(exception) = check_exception(env)? { return Err(exception.into()); }
+                result.map_err(CometError::from)?;
+                Ok(())
+            });
+        }
 
         JVMClasses::with_env(|env| {
             let payload = env.byte_array_from_slice(data).map_err(CometError::from)?;

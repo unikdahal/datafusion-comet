@@ -35,8 +35,6 @@ final class ExecutorShufflePushAdmission {
 
   private final int limit;
   private final Semaphore available;
-  private CelebornTransportCallbackTracker transportCallbacks;
-  private boolean transportCallbacksInitialized;
   private boolean closed;
 
   private ExecutorShufflePushAdmission(int limit) {
@@ -68,26 +66,9 @@ final class ExecutorShufflePushAdmission {
     }
   }
 
-  synchronized CelebornTransportCallbackTracker transportCallbacks(Object client) {
-    if (closed) {
-      return null;
-    }
-    if (!transportCallbacksInitialized) {
-      transportCallbacks = CelebornTransportCallbackTracker.tryCreate(client);
-      transportCallbacksInitialized = true;
-    }
-    return transportCallbacks;
-  }
+  private synchronized void close() { closed = true; }
 
-  private synchronized void close() {
-    if (closed) {
-      return;
-    }
-    closed = true;
-    if (transportCallbacks != null) {
-      transportCallbacks.close();
-    }
-  }
+  private synchronized boolean isClosed() { return closed; }
 
   void acquire(int bytes, BooleanSupplier cancelled) throws IOException {
     if (bytes <= 0 || bytes > limit) {
@@ -99,11 +80,11 @@ final class ExecutorShufflePushAdmission {
     }
     try {
       while (!available.tryAcquire(bytes, 25, TimeUnit.MILLISECONDS)) {
-        if (cancelled.getAsBoolean()) {
+        if (isClosed() || cancelled.getAsBoolean()) {
           throw new IOException("Celeborn shuffle map attempt was cancelled during admission");
         }
       }
-      if (cancelled.getAsBoolean()) {
+      if (isClosed() || cancelled.getAsBoolean()) {
         available.release(bytes);
         throw new IOException("Celeborn shuffle map attempt was cancelled during admission");
       }

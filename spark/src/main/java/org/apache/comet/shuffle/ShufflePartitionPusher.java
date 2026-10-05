@@ -20,6 +20,7 @@
 package org.apache.comet.shuffle;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 /**
  * Receives complete encoded shuffle blocks from a native partition writer.
@@ -48,6 +49,18 @@ public interface ShufflePartitionPusher {
   /** Returns the largest complete frame that this callback can safely accept. */
   default int maxFrameBytes() {
     return Integer.MAX_VALUE - 8;
+  }
+
+  /** Number of overlapping payload representations to reserve before encoding. */
+  default int frameCopies() { return 3; }
+
+  /** Whether this callback can borrow a direct frame for one synchronous invocation. */
+  default boolean supportsDirectPush() { return false; }
+
+  /** Must retire every user of native memory before returning or throwing. */
+  default void pushPartitionDataDirect(int partitionId, ByteBuffer data, int length)
+      throws IOException {
+    throw new UnsupportedOperationException("Direct shuffle push is unavailable");
   }
 
   /** Pushes one complete, length-prefixed Arrow IPC block for the given output partition. */
