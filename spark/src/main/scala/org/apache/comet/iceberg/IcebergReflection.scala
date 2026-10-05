@@ -497,11 +497,17 @@ object IcebergReflection extends Logging {
         .orNull
       if (icebergScan == null) return Map.empty
       val scanClass = loadClass("org.apache.iceberg.Scan")
-      // Restrict statistics to the candidate key columns where Iceberg supports it.
-      val withStats =
+      // Do not fall back to includeColumnStats() without a column list: that would decode
+      // statistics for every column in the scan just to support one runtime-filter key.
+      val includeSelected =
         findMethod(scanClass, "includeColumnStats", classOf[java.util.Collection[_]])
-          .map(_.invoke(icebergScan, java.util.Arrays.asList(columns: _*)))
-          .getOrElse(getMethod(scanClass, "includeColumnStats").invoke(icebergScan))
+      if (includeSelected.isEmpty) {
+        logDebug(
+          "Selective Iceberg column statistics are unavailable; retaining row-group pruning only")
+        return Map.empty
+      }
+      val withStats =
+        includeSelected.get.invoke(icebergScan, java.util.Arrays.asList(columns: _*))
       val planned = getMethod(scanClass, "planFiles").invoke(withStats)
       try {
         val result = Map.newBuilder[String, AnyRef]
@@ -2323,7 +2329,7 @@ case class CometIcebergNativeScanMetadata(
     catalogName: Option[String],
     fileFormat: String,
     @transient runtimeFileStatistics: Map[String, AnyRef] = Map.empty,
-    runtimeStatisticsRequested: Boolean = false)
+    runtimeStatisticsColumns: Set[String] = Set.empty)
 
 object CometIcebergNativeScanMetadata extends Logging {
 
@@ -2343,9 +2349,9 @@ object CometIcebergNativeScanMetadata extends Logging {
    *   The scan's FileScanTasks (already extracted). Passed in rather than re-read via
    *   [[IcebergReflection.getTasks]], which for a staged scan rebuilds a flattened list of every
    *   task on each call.
-   * @param runtimeStatistics
-   *   Whether a runtime filter producer in the same stage can consume this scan, so that per-file
-   *   column statistics are worth collecting for pruning before files are opened.
+   * @param runtimeStatisticsColumns
+   *   Exact top-level runtime-filter key columns for this scan. Only these columns retain manifest
+   *   statistics for pruning before files are opened.
    * @return
    *   Some(metadata) if all reflection succeeds, None to trigger fallback
    */
@@ -2354,7 +2360,7 @@ object CometIcebergNativeScanMetadata extends Logging {
       metadataLocation: String,
       catalogProperties: Map[String, String],
       tasks: java.util.List[_],
-      runtimeStatistics: Boolean = false): Option[CometIcebergNativeScanMetadata] = {
+      runtimeStatisticsColumns: Set[String] = Set.empty): Option[CometIcebergNativeScanMetadata] = {
     import org.apache.comet.iceberg.IcebergReflection._
 
     for {
@@ -2373,6 +2379,8 @@ object CometIcebergNativeScanMetadata extends Logging {
       }
 
       val globalFieldIdMapping = buildFieldIdMapping(scanSchema)
+      val eligibleRuntimeStatisticsColumns =
+        runtimeStatisticsColumns.intersect(IcebergReflection.runtimeKeyColumns(scanSchema).toSet)
 
       // File format is always PARQUET,
       // validated in CometScanRule.validateIcebergFileScanTasks()
@@ -2388,13 +2396,12 @@ object CometIcebergNativeScanMetadata extends Logging {
         catalogProperties = catalogProperties,
         catalogName = IcebergReflection.deriveCatalogName(table),
         fileFormat = FileFormats.PARQUET,
-        runtimeFileStatistics = if (runtimeStatistics) {
+        runtimeFileStatistics =
           IcebergReflection.runtimeFileStatistics(
             scan,
             tasks,
-            IcebergReflection.runtimeKeyColumns(scanSchema))
-        } else { Map.empty },
-        runtimeStatisticsRequested = runtimeStatistics)
+            eligibleRuntimeStatisticsColumns.toSeq.sorted),
+        runtimeStatisticsColumns = eligibleRuntimeStatisticsColumns)
     }
   }
 
