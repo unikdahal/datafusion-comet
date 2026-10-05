@@ -8,7 +8,12 @@ on:
     paths:
       - ".github/workflows/celeborn_native_shuffle_proof.yml"
       - "dev/ci/celeborn_native_shuffle_proof.py"
+      - "native/jni-bridge/src/shuffle_partition_pusher.rs"
+      - "native/shuffle/src/writers/rss/**"
+      - "spark/src/main/java/org/apache/comet/shuffle/**"
+      - "spark/src/main/scala/org/apache/comet/shuffle/**"
       - "spark/src/test/celeborn-reflection-compatibility/**"
+      - "spark/src/test/scala/org/apache/comet/shuffle/**"
 
 permissions:
   contents: read
