@@ -93,7 +93,11 @@ def main():
             suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
             for suite in suites:
                 for key in counts:
-                    counts[key] += int(suite.get(key, 0))
+                    value = int(suite.get(key, 0))
+                    if key == "skipped":
+                        # ScalaTest emits testcase/skipped without a suite-level count.
+                        value = max(value, len(suite.findall("testcase/skipped")))
+                    counts[key] += value
         if counts["tests"]:
             report["test_reports"][artifact.name] = counts
             assert counts["failures"] == 0 and counts["errors"] == 0, (artifact, counts)
