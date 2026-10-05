@@ -21,7 +21,7 @@ permissions:
 
 env:
   CELEBORN_REPO: unikdahal/celeborn
-  CELEBORN_REF: experiment/comet-zero-copy-buffer
+  CELEBORN_REF: f3a1b99a363e2e83b7b87fffab2717fcbd1c397c
   CELEBORN_VERSION: "0.7.0"
   SPARK_VERSION: "3.5.8"
 
@@ -272,6 +272,7 @@ jobs:
           fi
 
           grep -Fq "CELEBORN_CODE_SOURCE=" /tmp/comet.log
+          grep -Fq "CELEBORN_DIRECT_PUSH_CONTRACT_OK" /tmp/comet.log
           grep -Fq "CometExchange" /tmp/comet.log
 
       - name: Show service evidence
