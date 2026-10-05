@@ -1981,3 +1981,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "merge_rows_cardinality_bench.rs"]
+mod cardinality_bench;

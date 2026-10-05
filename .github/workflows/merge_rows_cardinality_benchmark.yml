@@ -1,0 +1,88 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements. See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership. The ASF licenses this file
+# to you under the Apache License, Version 2.0.
+
+name: MergeRows Cardinality Benchmark
+
+on:
+  push:
+    branches:
+      - bench/merge-rows-cardinality
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Cardinality before/after
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust and Java
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: 17
+
+      - name: Check formatting
+        run: |
+          cd native
+          cargo fmt --all -- --check --color=never
+
+      - name: Run MergeRows unit tests
+        run: |
+          cd native
+          export LD_LIBRARY_PATH=${JAVA_HOME}/lib/server:${LD_LIBRARY_PATH}
+          cargo test --profile ci -p datafusion-comet merge_rows --lib -- --nocapture --test-threads=1
+
+      - name: Run cardinality benchmark
+        run: |
+          cd native
+          export LD_LIBRARY_PATH=${JAVA_HOME}/lib/server:${LD_LIBRARY_PATH}
+          cargo test --release -p datafusion-comet --lib merge_rows_cardinality_benchmark \
+            -- --ignored --nocapture --test-threads=1 | tee merge_rows_cardinality_benchmark.md
+          cat merge_rows_cardinality_benchmark.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark output
+        uses: actions/upload-artifact@v6
+        with:
+          name: merge-rows-cardinality-benchmark
+          path: native/merge_rows_cardinality_benchmark.md
+
+  spark-baseline:
+    name: Plain Spark baseline
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust and Java
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: 17
+
+      - name: Run plain Spark baseline
+        run: |
+          for version in 1.3.0 1.6.10; do
+            curl -sSfL -o RoaringBitmap-$version.jar \
+              https://repo1.maven.org/maven2/org/roaringbitmap/RoaringBitmap/$version/RoaringBitmap-$version.jar
+            java -Xmx4g -cp RoaringBitmap-$version.jar \
+              benchmarks/merge-rows-cardinality/SparkCardinalityBench.java $version \
+              | tee -a spark_cardinality_baseline.md
+          done
+          cat spark_cardinality_baseline.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Spark baseline
+        uses: actions/upload-artifact@v6
+        with:
+          name: spark-cardinality-baseline
+          path: spark_cardinality_baseline.md
+
