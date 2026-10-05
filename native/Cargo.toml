@@ -104,7 +104,3 @@ codegen-units = 16   # Parallel codegen (faster compile, slightly larger binary)
 debug-assertions = true
 panic = "unwind"     # Allow panics to be caught and logged across FFI boundary
 # overflow-checks inherited as false from release
-
-# Cargo patches are workspace-local; preserve registry Arrow types at 59.3.
-[patch.crates-io]
-parquet = { git = "https://github.com/unikdahal/arrow-rs.git", rev = "fa20c8b77ff3d613c8b638f4f686f5316eb0138a" }
