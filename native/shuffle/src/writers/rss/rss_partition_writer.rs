@@ -352,8 +352,9 @@ impl RssPartitionWriter {
             // A direct push waits for network/retry retirement. Hand this worker's other
             // tasks back to Tokio while the native allocation is synchronously borrowed.
             let direct_on_runtime = self.pusher.frame_copies() == 1
-                && tokio::runtime::Handle::try_current()
-                    .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+                && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+                    handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+                });
             let result = if direct_on_runtime {
                 tokio::task::block_in_place(|| self.pusher.push_partition_data(partition_id, frame))
             } else {

@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import json
 import time
+import struct
 from pathlib import Path
 
 from pyspark.sql import SparkSession, functions as F
@@ -78,6 +79,22 @@ def main():
                 if repeat > 0:
                     record["seconds"].append(elapsed)
                 Path(args.output + "." + name + ".plan.txt").write_text(plan)
+        if args.mode != "baseline":
+            samples = []
+            for file in Path("/tmp/celeborn-worker").rglob("*"):
+                if not file.is_file() or file.stat().st_size < 32:
+                    continue
+                with file.open("rb") as stream:
+                    head = stream.read(32)
+                map_id, attempt, batch_id, payload_bytes = struct.unpack("<4i", head[:16])
+                frame_body_bytes, fields = struct.unpack("<2q", head[16:32])
+                if payload_bytes >= 16 and frame_body_bytes == payload_bytes - 8 and 0 < fields < 1024:
+                    samples.append({"path": str(file), "file_bytes": file.stat().st_size,
+                        "payload_bytes": payload_bytes, "field_count": fields,
+                        "map_id": map_id, "attempt": attempt, "batch_id": batch_id})
+            assert samples, "No complete Comet frames found in live Celeborn worker storage"
+            Path(args.output + ".worker-native-frames.json").write_text(json.dumps(samples, indent=2))
+            print("STORED_NATIVE_FRAMES=" + str(len(samples)))
         Path(args.output).write_text(json.dumps(records, indent=2))
         print("RESULTS=" + json.dumps(records, sort_keys=True))
     finally:

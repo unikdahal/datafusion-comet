@@ -513,8 +513,12 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
         // A transferred direct frame must still drain its lifetime promise. Reporting cleanup
         // failure from this finally block would unwind across JNI while owners remain live.
         if (!transferred) {
-          if (submissionFailure == null) { throw cleanupFailure; }
-          if (submissionFailure != cleanupFailure) { submissionFailure.addSuppressed(cleanupFailure); }
+          if (submissionFailure == null) {
+            throw cleanupFailure;
+          }
+          if (submissionFailure != cleanupFailure) {
+            submissionFailure.addSuppressed(cleanupFailure);
+          }
         }
         synchronized (lock) {
           if (failure == null) {
@@ -527,7 +531,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
 
   private void failSubmission(Throwable cause) {
     synchronized (lock) {
-      if (failure == null) { failure = asIOException("Celeborn submission failed", cause); }
+      if (failure == null) {
+        failure = asIOException("Celeborn submission failed", cause);
+      }
       state = State.ABORTED;
       lock.notifyAll();
     }

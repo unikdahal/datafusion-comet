@@ -3,6 +3,15 @@ on:
   push:
     branches: [feature/async-buffer-shuffle]
   workflow_dispatch:
+    inputs:
+      celeborn_repository:
+        description: Repository containing the buffer API client
+        type: string
+        default: apache/celeborn
+      celeborn_ref:
+        description: Exact companion client commit or release
+        type: string
+        default: main
 permissions:
   contents: read
 env:
@@ -126,8 +135,8 @@ jobs:
           echo "COMET_JAR=$COMET_JAR" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
-          repository: unikdahal/celeborn
-          ref: 0264bf2442c653659bd4909cdf88828c93b515f6
+          repository: ${{ inputs.celeborn_repository || format('{0}/celeborn', github.repository_owner) }}
+          ref: ${{ inputs.celeborn_ref || github.ref_name }}
           path: celeborn
       - name: Build Celeborn master, worker and matching client
         run: |
@@ -202,7 +211,8 @@ jobs:
           EOF
           ! rg 'Fallback to vanilla Spark SortShuffleManager|requires the public caller-owned' /tmp/shuffle-results/heap.log /tmp/shuffle-results/direct.log
           find /tmp/celeborn-worker -type f -printf '%p %s bytes\n' > /tmp/shuffle-results/worker-files.txt
-          test -s /tmp/shuffle-results/worker-files.txt
+          test -s /tmp/shuffle-results/heap.json.worker-native-frames.json
+          test -s /tmp/shuffle-results/direct.json.worker-native-frames.json
           git rev-parse HEAD > /tmp/shuffle-results/comet-sha.txt
           git -C celeborn rev-parse HEAD > /tmp/shuffle-results/celeborn-sha.txt
       - name: Stop services
