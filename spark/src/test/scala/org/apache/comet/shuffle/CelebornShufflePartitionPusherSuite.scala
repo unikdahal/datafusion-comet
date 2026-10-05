@@ -500,7 +500,7 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     assert(client.lastPush.partitionId == 4)
   }
 
-  test("configured complete-frame and three-copy executor bounds are both enforced") {
+  test("configured complete-frame and two-copy-overlap executor bounds are both enforced") {
     val client = new RecordingCelebornPushClient
     val bounded = new CelebornShufflePartitionPusher(client, 19, 3, 7, 12, 9, 24, 160)
     assert(bounded.maxFrameBytes() == 24)
@@ -515,14 +515,14 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
 
     val budgetClient = new RecordingCelebornPushClient
     val admissionBounded =
-      new CelebornShufflePartitionPusher(budgetClient, 19, 3, 7, 12, 9, 1024, 76)
+      new CelebornShufflePartitionPusher(budgetClient, 19, 3, 7, 12, 9, 1024, 56)
     assert(admissionBounded.maxFrameBytes() == 20)
 
     intercept[IllegalArgumentException] {
-      new CelebornShufflePartitionPusher(new RecordingCelebornPushClient, 19, 3, 7, 12, 9, 15, 76)
+      new CelebornShufflePartitionPusher(new RecordingCelebornPushClient, 19, 3, 7, 12, 9, 15, 56)
     }
     intercept[IllegalArgumentException] {
-      new CelebornShufflePartitionPusher(new RecordingCelebornPushClient, 19, 3, 7, 12, 9, 20, 63)
+      new CelebornShufflePartitionPusher(new RecordingCelebornPushClient, 19, 3, 7, 12, 9, 20, 55)
     }
   }
 
@@ -1345,11 +1345,11 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     assert(adapter.finish()(2) == bytes.length)
   }
 
-  test("native and JNI frame admission waits for both retirement and transport completion") {
+  test("native-to-JNI handoff admission waits for retirement and transport completion") {
     Seq(false, true).foreach { nativeRetiresFirst =>
       val client = new TransportRecordingCelebornPushClient
       val bytes = frame(8852)
-      val budget = bytes.length * 3 + 16
+      val budget = bytes.length * 2 + 16
       val first =
         new CelebornShufflePartitionPusher(client, 19, 3, encodedAttemptId, 12, 9, 8860, budget)
       val next =
