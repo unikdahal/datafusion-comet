@@ -214,7 +214,7 @@ impl RssPartitionWriter {
                 )
             })?;
         let admitted_frame_limit =
-            (reservation_limit.saturating_sub(ipc_scratch) / 3).min(self.max_frame_size);
+            (reservation_limit.saturating_sub(ipc_scratch) / 2).min(self.max_frame_size);
         if admitted_frame_limit < 20 {
             if batch.num_rows() > 1 {
                 return self.push_split_batch(partition_id, batch, metrics);
@@ -227,7 +227,7 @@ impl RssPartitionWriter {
                  required reservation plus transport overhead. \
                  The effective frame limit from spark.comet.shuffle.rss.maxFrameBytes and \
                  spark.comet.shuffle.rss.maxInFlightBytes is {} bytes",
-                ipc_scratch.saturating_add(60),
+                ipc_scratch.saturating_add(40),
                 self.max_frame_size
             )));
         }
@@ -241,11 +241,12 @@ impl RssPartitionWriter {
             .min(admitted_frame_limit);
 
         loop {
-            // Native output capacity, its JNI byte array, and Celeborn's copied transport request
-            // overlap. Acquire all three plus the encoding workspace atomically, before either
-            // compaction or encoding, without ever clamping a calculated memory bound.
+            // The native output overlaps the JNI byte array while crossing JNI. The bridge then
+            // retires the native Vec before Celeborn materializes its framed request, so at most
+            // two frame-sized representations overlap. Admit those plus encoding workspace before
+            // either compaction or encoding, without clamping a calculated memory bound.
             let reservation = frame_bound
-                .checked_mul(3)
+                .checked_mul(2)
                 .and_then(|bytes| bytes.checked_add(ipc_scratch))
                 .ok_or_else(|| {
                     Self::size_limit_error(
@@ -277,8 +278,8 @@ impl RssPartitionWriter {
                 return self.push_split_batch(partition_id, batch, metrics);
             }
 
-            // Bound encoding by the admitted estimate, not only the configured maximum, so all
-            // three eventual frame copies fit the reservation that was acquired atomically.
+            // Bound encoding by the admitted estimate, not only the configured maximum, so the
+            // two overlapping frame-sized representations fit the reservation acquired atomically.
             let mut output = match BoundedBuffer::try_new(frame_bound) {
                 Ok(output) => output,
                 Err(error) => {
@@ -307,7 +308,7 @@ impl RssPartitionWriter {
                 }
                 if batch.num_rows() <= 1 {
                     let minimum_reservation =
-                        ipc_scratch.saturating_add(minimum_frame_size.saturating_mul(3));
+                        ipc_scratch.saturating_add(minimum_frame_size.saturating_mul(2));
                     let reason = if admitted_frame_limit < self.max_frame_size {
                         format!(
                             "only {admitted_frame_limit} encoded bytes fit alongside the \
@@ -337,21 +338,18 @@ impl RssPartitionWriter {
                 return self.push_split_batch(partition_id, batch, metrics);
             }
 
-            // The Java callback must keep this reservation until both transport ownership and
-            // this native encoder's explicit acknowledgement have ended.
+            // Transfer the encoded Vec into the callback. The JVM bridge copies it into the JNI
+            // array and drops the native allocation before entering Celeborn, avoiding a
+            // native + JNI + Celeborn three-way overlap.
             drop(compacted);
-            let frame = output.inner.get_ref();
+            let frame = output.inner.into_inner();
             if frame.is_empty() {
-                drop(output);
                 self.pusher.release_partition_data_reservation()?;
                 return Ok(());
             }
             let mut timer = metrics.write_time.timer();
-            let result = self.pusher.push_partition_data(partition_id, frame);
+            let result = self.pusher.push_partition_data_owned(partition_id, frame);
             timer.stop();
-            // The JNI bridge has popped its local frame on return. Drop the native capacity
-            // before acknowledging completion even when the callback failed or completed inline.
-            drop(output);
             let released = self.pusher.release_partition_data_reservation();
             return result.and(released);
         }
