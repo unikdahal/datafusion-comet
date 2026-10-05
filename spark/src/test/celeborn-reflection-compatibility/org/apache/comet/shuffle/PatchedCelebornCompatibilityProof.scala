@@ -63,6 +63,41 @@ class PatchedCelebornCompatibilityProof extends AnyFunSuite {
     }
   }
 
+
+  test("loaded Celeborn binary exposes the direct native-frame push contract") {
+    val client =
+      Class.forName(
+        "org.apache.celeborn.client.ShuffleClientImpl",
+        false,
+        getClass.getClassLoader)
+
+    val push =
+      client.getMethod(
+        "pushDataDirect",
+        Integer.TYPE,
+        Integer.TYPE,
+        Integer.TYPE,
+        Integer.TYPE,
+        classOf[java.nio.ByteBuffer],
+        Integer.TYPE,
+        Integer.TYPE,
+        Integer.TYPE)
+    assert(push.getReturnType == Integer.TYPE)
+    assert(!Modifier.isStatic(push.getModifiers))
+
+    val crc =
+      client.getMethod(
+        "computeBatchCRCDirect",
+        Integer.TYPE,
+        Integer.TYPE,
+        Integer.TYPE,
+        Integer.TYPE,
+        classOf[java.nio.ByteBuffer],
+        Integer.TYPE)
+    assert(crc.getReturnType == java.lang.Void.TYPE)
+    assert(!Modifier.isStatic(crc.getModifiers))
+  }
+
   test("Comet accepts the loaded Celeborn binary for native push completion") {
     val client =
       Class.forName(
