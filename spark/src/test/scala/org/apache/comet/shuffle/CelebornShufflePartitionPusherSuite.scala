@@ -502,7 +502,7 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
 
 
   test("direct-capable clients use one-frame admission without relaxing legacy clients") {
-    val directClient = new DirectCapableRecordingCelebornPushClient
+    val directClient = new TransportRecordingCelebornPushClient
     val direct =
       new CelebornShufflePartitionPusher(directClient, 19, 3, 7, 12, 9, 1024, 76)
     assert(direct.supportsDirectBuffer())
@@ -1671,28 +1671,6 @@ class RecordingCelebornPushClient {
 }
 
 
-/** Exposes the optional direct-buffer contract without exercising JNI ownership in unit tests. */
-final class DirectCapableRecordingCelebornPushClient extends RecordingCelebornPushClient {
-
-  def pushDataDirect(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      partitionId: Int,
-      data: ByteBuffer,
-      length: Int,
-      numMappers: Int,
-      numPartitions: Int): Int = length + 16
-
-  def computeBatchCRCDirect(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      partitionId: Int,
-      data: ByteBuffer,
-      length: Int): Unit = ()
-}
-
 /** Mirrors stock Celeborn's private request tracker without requiring its optional dependency. */
 final class RecordingCelebornInFlightTracker {
   val totalInflightReqs: LongAdder = new LongAdder()
@@ -1812,13 +1790,31 @@ final class FinalFieldsRecordingCelebornFactory {
 }
 
 /** Models completion boundaries with safely published hooks, unlike stock Celeborn 0.6/0.7. */
-final class TransportRecordingCelebornPushClient extends AsyncRecordingCelebornPushClient {
+class TransportRecordingCelebornPushClient extends AsyncRecordingCelebornPushClient {
   val dataClientFactory: RecordingCelebornTransportClientFactory =
     new RecordingCelebornTransportClientFactory
   val retryExecutor = new RecordingCelebornRetryExecutor
   @volatile var pushDataRetryPool: ExecutorService = retryExecutor
 
   def getDataClientFactory: RecordingCelebornTransportClientFactory = dataClientFactory
+
+  def pushDataDirect(
+      shuffleId: Int,
+      mapId: Int,
+      attemptId: Int,
+      partitionId: Int,
+      data: ByteBuffer,
+      length: Int,
+      numMappers: Int,
+      numPartitions: Int): Int = length + 16
+
+  def computeBatchCRCDirect(
+      shuffleId: Int,
+      mapId: Int,
+      attemptId: Int,
+      partitionId: Int,
+      data: ByteBuffer,
+      length: Int): Unit = ()
 
   var openConnectionBeforePush: Boolean = false
   var openUninstrumentableConnectionBeforePush: Boolean = false
