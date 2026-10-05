@@ -60,6 +60,30 @@ impl ShufflePartitionPusher for RecordingPusher {
     }
 }
 
+#[derive(Default)]
+struct OwnedRecordingPusher {
+    frames: Mutex<Vec<RecordedFrame>>,
+}
+
+impl OwnedRecordingPusher {
+    fn frames(&self) -> Vec<RecordedFrame> {
+        self.frames.lock().unwrap().clone()
+    }
+}
+
+impl ShufflePartitionPusher for OwnedRecordingPusher {
+    fn push_partition_data(&self, _partition_id: i32, _data: &[u8]) -> Result<()> {
+        Err(DataFusionError::Execution(
+            "RSS writer used the borrowed shuffle-frame path".to_string(),
+        ))
+    }
+
+    fn push_partition_data_owned(&self, partition_id: i32, data: Vec<u8>) -> Result<()> {
+        self.frames.lock().unwrap().push((partition_id, data));
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct CallbackSentinel;
 
@@ -210,6 +234,28 @@ fn rss_single_partition_preserves_complete_frames_and_codecs() {
         assert_eq!(metric_value(&execution, "input_batches"), 2);
         assert_eq!(metric_value(&execution, "output_rows"), 32);
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn rss_transfers_encoded_frame_ownership_to_remote_pusher() {
+    let batch = int_batch(0, 32);
+    let pusher = Arc::new(OwnedRecordingPusher::default());
+    let execution = rss_execution(
+        vec![batch.clone()],
+        batch.schema(),
+        CometPartitioning::SinglePartition,
+        pusher.clone(),
+        CompressionCodec::Lz4Frame,
+        1024 * 1024,
+        None,
+    );
+
+    assert!(run_execution(&execution).unwrap().is_empty());
+    let frames = pusher.frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, 0);
+    assert_eq!(values_in_frames(&frames), (0..32).collect::<Vec<_>>());
 }
 
 #[test]
