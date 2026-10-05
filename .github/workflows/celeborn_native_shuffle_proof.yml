@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: celeborn-native-shuffle-proof-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CELEBORN_REPO: unikdahal/celeborn
   CELEBORN_REF: f3a1b99a363e2e83b7b87fffab2717fcbd1c397c
