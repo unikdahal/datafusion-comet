@@ -123,6 +123,18 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     }
   }
 
+  private static final class ReservationRelease {
+    private static final ReservationRelease NONE = new ReservationRelease(0, 0);
+
+    private final int bytes;
+    private final long nativeFrameHandle;
+
+    private ReservationRelease(int bytes, long nativeFrameHandle) {
+      this.bytes = bytes;
+      this.nativeFrameHandle = nativeFrameHandle;
+    }
+  }
+
   private static final class ObservedPushState {
     private final LongAdder inFlightRequests;
     private final AtomicReference<?> exception;
@@ -550,18 +562,18 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       return;
     }
     encodingReservation.remove();
-    int released;
+    ReservationRelease release;
     synchronized (lifecycleLock) {
       reservation.nativeReleased = true;
       if (!reservation.claimed) {
         // Encoding failed (or was split) before entering the Java push path.
         reservation.transportComplete = true;
       }
-      released = releasableBytes(reservation);
+      release = takeRelease(reservation);
       activeEncoders--;
       lifecycleLock.notifyAll();
     }
-    admission.release(released);
+    releaseReservation(release);
   }
 
   /** Sends exactly one complete, already-compressed Comet shuffle frame to Celeborn. */
@@ -873,28 +885,31 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   }
 
   // All reservation transitions are protected by lifecycleLock. Native retirement and transport
-  // completion may arrive in either order; neither alone proves that the overlapping copies died.
-  private int releasableBytes(PushReservation reservation) {
+  // completion may arrive in either order; neither alone proves that the direct buffer is dead.
+  private ReservationRelease takeRelease(PushReservation reservation) {
     if (!reservation.released && reservation.nativeReleased && reservation.transportComplete) {
       reservation.released = true;
-      return reservation.bytes;
+      long nativeFrameHandle = reservation.nativeFrameHandle;
+      reservation.nativeFrameHandle = 0;
+      return new ReservationRelease(reservation.bytes, nativeFrameHandle);
     }
-    return 0;
+    return ReservationRelease.NONE;
+  }
+
+  private void releaseReservation(ReservationRelease release) {
+    if (release.nativeFrameHandle != 0) {
+      releaseNativeShuffleFrame(release.nativeFrameHandle);
+    }
+    admission.release(release.bytes);
   }
 
   private void completeTransport(PushReservation reservation) {
-    int released;
-    long nativeFrameHandle;
+    ReservationRelease release;
     synchronized (lifecycleLock) {
       reservation.transportComplete = true;
-      nativeFrameHandle = reservation.nativeFrameHandle;
-      reservation.nativeFrameHandle = 0;
-      released = releasableBytes(reservation);
+      release = takeRelease(reservation);
     }
-    if (nativeFrameHandle != 0) {
-      releaseNativeShuffleFrame(nativeFrameHandle);
-    }
-    admission.release(released);
+    releaseReservation(release);
   }
 
   private void safelyReconcileAcceptedPushes() {
