@@ -45,7 +45,7 @@ jobs:
         run: |
           cd native
           export LD_LIBRARY_PATH=${JAVA_HOME}/lib/server:${LD_LIBRARY_PATH}
-          cargo run --profile ci -p datafusion-comet --example merge_rows_cardinality_bench \
+          cargo run --release -p datafusion-comet --example merge_rows_cardinality_bench \
             | tee merge_rows_cardinality_benchmark.md
           cat merge_rows_cardinality_benchmark.md >> "$GITHUB_STEP_SUMMARY"
 
