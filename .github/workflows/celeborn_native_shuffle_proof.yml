@@ -27,6 +27,30 @@ env:
   SPARK_VERSION: "3.5.8"
 
 jobs:
+  native-compile:
+    name: Native direct-buffer compile
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust and Java
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: "17"
+
+      - name: Check Rust formatting
+        run: |
+          cd native
+          cargo fmt --all -- --check
+
+      - name: Compile native core
+        run: |
+          cd native
+          cargo check -p datafusion-comet
+
   binary-contract:
     name: Actual patched JAR satisfies completion contract
     runs-on: ubuntu-24.04
@@ -117,7 +141,7 @@ jobs:
 
   real-cluster-e2e:
     name: Spark 3.5.8 + real Celeborn master/worker
-    needs: [binary-contract, ownership-stress]
+    needs: [native-compile, binary-contract, ownership-stress]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
