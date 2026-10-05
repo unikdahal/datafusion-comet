@@ -1195,8 +1195,8 @@ case class CometScanTypeChecker() extends DataTypeSupport with CometTypeShim {
 object CometScanRule extends Logging {
 
   /**
-   * Exact scan columns that can receive a runtime predicate from an eligible producer in the
-   * same native stage. This intentionally mirrors the reader-attachment shapes instead of walking
+   * Exact scan columns that can receive a runtime predicate from an eligible producer in the same
+   * native stage. This intentionally mirrors the reader-attachment shapes instead of walking
    * every descendant below a producer: joins mark only their probe input, TopK requires a direct
    * scan, and MIN/MAX / joins may cross only direct-column IS NOT NULL filters.
    *
@@ -1243,13 +1243,14 @@ object CometScanRule extends Logging {
         }
     }
 
-    def readerInput(node: SparkPlan, key: Attribute, allowNullFilters: Boolean): Unit = node match {
-      case scan: BatchScanExec =>
-        record(scan, key)
-      case filter: FilterExec if allowNullFilters && directNullChecks(filter.condition) =>
-        readerInput(filter.child, key, allowNullFilters = true)
-      case _ =>
-    }
+    def readerInput(node: SparkPlan, key: Attribute, allowNullFilters: Boolean): Unit =
+      node match {
+        case scan: BatchScanExec =>
+          record(scan, key)
+        case filter: FilterExec if allowNullFilters && directNullChecks(filter.condition) =>
+          readerInput(filter.child, key, allowNullFilters = true)
+        case _ =>
+      }
 
     def visit(node: SparkPlan): Unit = {
       node match {

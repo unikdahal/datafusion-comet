@@ -2350,8 +2350,8 @@ object CometIcebergNativeScanMetadata extends Logging {
    *   [[IcebergReflection.getTasks]], which for a staged scan rebuilds a flattened list of every
    *   task on each call.
    * @param runtimeStatisticsColumns
-   *   Exact top-level runtime-filter key columns for this scan. Only these columns retain manifest
-   *   statistics for pruning before files are opened.
+   *   Exact top-level runtime-filter key columns for this scan. Only these columns retain
+   *   manifest statistics for pruning before files are opened.
    * @return
    *   Some(metadata) if all reflection succeeds, None to trigger fallback
    */
@@ -2360,7 +2360,8 @@ object CometIcebergNativeScanMetadata extends Logging {
       metadataLocation: String,
       catalogProperties: Map[String, String],
       tasks: java.util.List[_],
-      runtimeStatisticsColumns: Set[String] = Set.empty): Option[CometIcebergNativeScanMetadata] = {
+      runtimeStatisticsColumns: Set[String] = Set.empty)
+      : Option[CometIcebergNativeScanMetadata] = {
     import org.apache.comet.iceberg.IcebergReflection._
 
     for {
@@ -2396,11 +2397,10 @@ object CometIcebergNativeScanMetadata extends Logging {
         catalogProperties = catalogProperties,
         catalogName = IcebergReflection.deriveCatalogName(table),
         fileFormat = FileFormats.PARQUET,
-        runtimeFileStatistics =
-          IcebergReflection.runtimeFileStatistics(
-            scan,
-            tasks,
-            eligibleRuntimeStatisticsColumns.toSeq.sorted),
+        runtimeFileStatistics = IcebergReflection.runtimeFileStatistics(
+          scan,
+          tasks,
+          eligibleRuntimeStatisticsColumns.toSeq.sorted),
         runtimeStatisticsColumns = eligibleRuntimeStatisticsColumns)
     }
   }
