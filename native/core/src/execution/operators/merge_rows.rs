@@ -676,7 +676,7 @@ fn check_cardinality(
     // where possible instead of repeating a treemap lookup for every row.
     let ids_capacity = ids.capacity();
     reserve_seen_batch(seen, &ids, ids_capacity, reservation)?;
-    let batch_seen = RoaringTreemap::from_sorted_iter(ids.into_iter()).map_err(|_| {
+    let batch_seen = RoaringTreemap::from_sorted_iter(ids).map_err(|_| {
         DataFusionError::Internal(
             "MergeRows: sorted cardinality ids unexpectedly failed roaring construction"
                 .to_string(),
