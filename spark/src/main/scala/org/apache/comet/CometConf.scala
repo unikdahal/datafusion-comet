@@ -896,7 +896,8 @@ object CometConf extends ShimCometConf {
           "an executor-side remote shuffle client. Admission includes native encoding " +
           "scratch and overlapping native, JNI, and remote shuffle frame copies. " +
           "A frame must fit its codec and Arrow workspace as well as its encoded bytes; " +
-          "ordinary uncompressed frames need encoding workspace plus two payload representations by default (one with direct buffers), and " +
+          "ordinary frames need encoding workspace plus two payload representations " +
+          "by default (one with direct buffers), and " +
           "schema and transport overhead. Compressed frames also reserve workspace for " +
           "their uncompressed data. Admission is acquired before encoding. " +
           "Encrypted native RSS is not supported; " +
