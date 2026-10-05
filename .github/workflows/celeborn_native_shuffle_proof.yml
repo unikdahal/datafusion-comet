@@ -5,9 +5,14 @@ on:
   push:
     branches:
       - proof/celeborn-native-shuffle
+      - experiment/celeborn-zero-copy
     paths:
       - ".github/workflows/celeborn_native_shuffle_proof.yml"
       - "dev/ci/celeborn_native_shuffle_proof.py"
+      - "native/core/src/execution/jni_api.rs"
+      - "native/jni-bridge/src/**"
+      - "native/shuffle/src/writers/rss/**"
+      - "spark/src/main/java/org/apache/comet/shuffle/**"
       - "spark/src/test/celeborn-reflection-compatibility/**"
 
 permissions:
@@ -15,7 +20,7 @@ permissions:
 
 env:
   CELEBORN_REPO: unikdahal/celeborn
-  CELEBORN_REF: debug/6523-v0.7.0-volatile-completion-fields
+  CELEBORN_REF: experiment/comet-zero-copy-buffer
   CELEBORN_VERSION: "0.7.0"
   SPARK_VERSION: "3.5.8"
 
