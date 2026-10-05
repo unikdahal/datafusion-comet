@@ -78,6 +78,36 @@ jobs:
         with:
           name: native-source-formatting
           path: formatting.patch
+  native-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ runner.os }}-cargo-buffer-release-debug0-${{ hashFiles('native/**/Cargo.lock', 'native/**/Cargo.toml') }}
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build production native library
+        run: |
+          ./mvnw -B -ntp spotless:apply
+          ./mvnw -B -ntp -DskipTests compile
+          cd native
+          cargo build --release -j 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-release-library
+          path: native/target/release/libcomet.so
   spark:
     needs: native
     runs-on: ubuntu-24.04
@@ -144,7 +174,7 @@ jobs:
             **/target/surefire-reports/**
             **/target/test-reports/**
   integration:
-    needs: native
+    needs: native-release
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -160,8 +190,13 @@ jobs:
           cache: maven
       - uses: actions/download-artifact@v4
         with:
-          name: native-library
+          name: native-release-library
           path: native/target/release
+      - name: Record benchmark environment
+        run: |
+          mkdir -p /tmp/shuffle-results
+          lscpu > /tmp/shuffle-results/hardware.txt
+          java -version 2> /tmp/shuffle-results/java.txt
       - name: Build Comet and install Spark 3.5.9 runtime
         run: |
           python -m pip install pyspark==3.5.9
@@ -273,3 +308,19 @@ jobs:
           path: |
             /tmp/shuffle-results/**
             celeborn/dist/logs/**
+  evidence:
+    needs: [format, native, native-release, spark, released-client, integration]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: evidence-input
+      - name: Summarize verified parity and measured queries
+        run: |
+          python dev/ci/celeborn_buffer_report.py --artifacts evidence-input --output evidence-report
+          cat evidence-report/evidence.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: evidence-report
+          path: evidence-report/**
