@@ -500,6 +500,20 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     assert(client.lastPush.partitionId == 4)
   }
 
+
+  test("direct-capable clients use one-frame admission without relaxing legacy clients") {
+    val directClient = new DirectCapableRecordingCelebornPushClient
+    val direct =
+      new CelebornShufflePartitionPusher(directClient, 19, 3, 7, 12, 9, 1024, 76)
+    assert(direct.supportsDirectBuffer())
+    assert(direct.maxFrameBytes() == 60)
+
+    val legacy =
+      new CelebornShufflePartitionPusher(new RecordingCelebornPushClient, 19, 3, 7, 12, 9, 1024, 76)
+    assert(!legacy.supportsDirectBuffer())
+    assert(legacy.maxFrameBytes() == 20)
+  }
+
   test("configured complete-frame and three-copy executor bounds are both enforced") {
     val client = new RecordingCelebornPushClient
     val bounded = new CelebornShufflePartitionPusher(client, 19, 3, 7, 12, 9, 24, 160)
@@ -1654,6 +1668,29 @@ class RecordingCelebornPushClient {
       throw cleanupFailure
     }
   }
+}
+
+
+/** Exposes the optional direct-buffer contract without exercising JNI ownership in unit tests. */
+final class DirectCapableRecordingCelebornPushClient extends RecordingCelebornPushClient {
+
+  def pushDataDirect(
+      shuffleId: Int,
+      mapId: Int,
+      attemptId: Int,
+      partitionId: Int,
+      data: ByteBuffer,
+      length: Int,
+      numMappers: Int,
+      numPartitions: Int): Int = length + 16
+
+  def computeBatchCRCDirect(
+      shuffleId: Int,
+      mapId: Int,
+      attemptId: Int,
+      partitionId: Int,
+      data: ByteBuffer,
+      length: Int): Unit = ()
 }
 
 /** Mirrors stock Celeborn's private request tracker without requiring its optional dependency. */
