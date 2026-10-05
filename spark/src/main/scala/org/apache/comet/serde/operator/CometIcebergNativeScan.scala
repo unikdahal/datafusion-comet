@@ -1014,8 +1014,9 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     val nameMappingToPoolIndex = mutable.HashMap[String, Int]()
     val projectFieldIdsToPoolIndex = mutable.HashMap[Seq[Int], Int]()
     val partitionDataToPoolIndex = mutable.HashMap[String, Int]()
-    // Only scans that a runtime filter producer can consume carry per-file statistics.
-    val runtimeMetricsEnabled = metadata.runtimeStatisticsRequested
+    // Only exact runtime-filter key columns carry per-file statistics.
+    val runtimeFieldNames = metadata.runtimeStatisticsColumns
+    val runtimeMetricsEnabled = runtimeFieldNames.nonEmpty
     val fileMetricsToPoolIndex = mutable.HashMap[String, Int]()
     // Individual delete files are interned into a flat pool; deleteFilesToPoolIndex then dedups
     // the per-task sets as lists of indices into it, so a delete file that applies to many data
@@ -1234,28 +1235,31 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                 }
 
                 if (runtimeMetricsEnabled) {
-                  // Current runtime producers support direct INT/BIGINT keys. Avoid
-                  // serializing unrelated payload statistics, particularly wide strings.
-                  val runtimeFieldIds = output
-                    .zip(projectFieldIds)
-                    .collect {
-                      case (attr, id)
-                          if attr.dataType == IntegerType || attr.dataType == LongType =>
-                        id
-                    }
-                    .toSet
-                  val metricsIdx = fileMetricsToPoolIndex.getOrElseUpdate(
-                    taskBuilder.getDataFilePath, {
-                      val idx = fileMetricsToPoolIndex.size
-                      commonBuilder.addFileMetricsPool(
-                        fileMetrics(
-                          contentFileClass,
-                          metadata.runtimeFileStatistics
-                            .getOrElse(taskBuilder.getDataFilePath, dataFile),
-                          runtimeFieldIds))
-                      idx
-                    })
-                  taskBuilder.setFileMetricsIdx(metricsIdx)
+                  // Serialize only the exact runtime-filter keys identified for this scan. If the
+                  // selective manifest re-plan was unavailable, omit file metrics entirely rather
+                  // than sending an empty/stat-stripped Spark DataFile.
+                  metadata.runtimeFileStatistics.get(taskBuilder.getDataFilePath).foreach {
+                    statistics =>
+                      val runtimeFieldIds = output
+                        .zip(projectFieldIds)
+                        .collect {
+                          case (attr, id)
+                              if runtimeFieldNames.contains(attr.name) &&
+                                (attr.dataType == IntegerType || attr.dataType == LongType) =>
+                            id
+                        }
+                        .toSet
+                      if (runtimeFieldIds.nonEmpty) {
+                        val metricsIdx = fileMetricsToPoolIndex.getOrElseUpdate(
+                          taskBuilder.getDataFilePath, {
+                            val idx = fileMetricsToPoolIndex.size
+                            commonBuilder.addFileMetricsPool(
+                              fileMetrics(contentFileClass, statistics, runtimeFieldIds))
+                            idx
+                          })
+                        taskBuilder.setFileMetricsIdx(metricsIdx)
+                      }
+                  }
                 }
 
                 val projectFieldIdsIdx = projectFieldIdsToPoolIndex.getOrElseUpdate(
