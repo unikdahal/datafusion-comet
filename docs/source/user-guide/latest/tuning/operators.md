@@ -159,9 +159,11 @@ refresh the next row group's page selection and row filter, and avoid reading pa
 rejected rows. Positional and equality deletes keep their original semantics. A bound that cannot
 be applied to a file, for example after schema evolution, is ignored for that file.
 
-To prune files before opening them, Comet re-plans each eligible Iceberg scan on the driver with
-column statistics retained for its top-level `INT` and `BIGINT` columns, because Spark drops those
-statistics from its tasks. This happens only when one of the runtime filter options is enabled.
+To prune files before opening them, Comet re-plans only the eligible Iceberg reader input on the
+driver and retains statistics only for the exact direct `INT` or `BIGINT` runtime-filter key.
+For joins this is the probe side only. If the linked Iceberg version cannot request selected column
+statistics, Comet skips whole-file pruning and keeps row-group runtime pruning instead of loading
+statistics for every column.
 
 ### MIN/MAX Reader Pruning
 
