@@ -116,12 +116,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/checkout@v7
-        with:
-          repository: ${{ env.CELEBORN_REPO }}
-          ref: ${{ env.CELEBORN_REF }}
-          path: celeborn
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -150,11 +144,33 @@ jobs:
           echo "SPARK_HOME=$SPARK_HOME" >> "$GITHUB_ENV"
           "$SPARK_HOME/bin/spark-submit" --version
 
+      # Build Comet before checking out Celeborn. Keeping the external Celeborn
+      # tree out of the workspace during release-nogit prevents Apache RAT from
+      # scanning Celeborn's generated/build files as if they belonged to Comet.
+      - name: Build current Comet for exact Spark 3.5.8
+        run: |
+          make release-nogit PROFILES="-Pspark-3.5 -Pscala-2.12 -Dspark.version=${SPARK_VERSION}"
+          COMET_JAR=$(ls spark/target/comet-spark-spark3.5_2.12-*.jar | grep -v -e sources -e tests | tail -1)
+          test -f "$COMET_JAR"
+          echo "COMET_JAR=$COMET_JAR" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.CELEBORN_REPO }}
+          ref: ${{ env.CELEBORN_REF }}
+          path: celeborn
+
       - name: Build patched Celeborn distribution and Spark client
         working-directory: celeborn
         run: |
           ./build/make-distribution.sh -Pspark-3.5
           test -f "dist/spark/celeborn-client-spark-3-shaded_2.12-${CELEBORN_VERSION}.jar"
+
+      - name: Select patched Celeborn runtime JAR
+        run: |
+          CELEBORN_JAR="$GITHUB_WORKSPACE/celeborn/dist/spark/celeborn-client-spark-3-shaded_2.12-${CELEBORN_VERSION}.jar"
+          test -f "$CELEBORN_JAR"
+          echo "CELEBORN_JAR=$CELEBORN_JAR" >> "$GITHUB_ENV"
 
       - name: Configure and start one real Celeborn master and worker
         run: |
@@ -179,16 +195,6 @@ jobs:
           (echo > /dev/tcp/127.0.0.1/9097) >/dev/null 2>&1
           sleep 5
           find celeborn/dist/logs -type f -maxdepth 1 -print -exec tail -n 40 {} \; || true
-
-      - name: Build current Comet for exact Spark 3.5.8
-        run: |
-          make release-nogit PROFILES="-Pspark-3.5 -Pscala-2.12 -Dspark.version=${SPARK_VERSION}"
-          COMET_JAR=$(ls spark/target/comet-spark-spark3.5_2.12-*.jar | grep -v -e sources -e tests | tail -1)
-          test -f "$COMET_JAR"
-          echo "COMET_JAR=$COMET_JAR" >> "$GITHUB_ENV"
-          CELEBORN_JAR="$GITHUB_WORKSPACE/celeborn/dist/spark/celeborn-client-spark-3-shaded_2.12-${CELEBORN_VERSION}.jar"
-          test -f "$CELEBORN_JAR"
-          echo "CELEBORN_JAR=$CELEBORN_JAR" >> "$GITHUB_ENV"
 
       - name: Prepare deterministic Parquet inputs
         run: |
