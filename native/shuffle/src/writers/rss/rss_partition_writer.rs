@@ -307,7 +307,7 @@ impl RssPartitionWriter {
                 }
                 if batch.num_rows() <= 1 {
                     let minimum_reservation =
-                        ipc_scratch.saturating_add(minimum_frame_size.saturating_mul(3));
+                        ipc_scratch.saturating_add(minimum_frame_size.saturating_mul(self.pusher.frame_copies()));
                     let reason = if admitted_frame_limit < self.max_frame_size {
                         format!(
                             "only {admitted_frame_limit} encoded bytes fit alongside the \

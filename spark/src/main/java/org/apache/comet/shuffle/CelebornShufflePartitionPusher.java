@@ -41,6 +41,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   private final int shuffleId, mapId, attemptId, numMappers, numPartitions;
   private final int maxFrameBytes, maxReservationBytes;
   private final AtomicLongArray partitionLengths;
+  private final boolean direct;
   private final Object lock = new Object();
   private final Object submissionLock = new Object();
   private final ThreadLocal<Reservation> encoding = new ThreadLocal<>();
@@ -71,6 +72,13 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   public CelebornShufflePartitionPusher(Object client, int shuffleId, int mapId,
       int attemptId, int numMappers, int numPartitions, int configuredMaxFrameBytes,
       int maxInFlightBytes) {
+    this(client, shuffleId, mapId, attemptId, numMappers, numPartitions,
+        configuredMaxFrameBytes, maxInFlightBytes, false);
+  }
+  public CelebornShufflePartitionPusher(Object client, int shuffleId, int mapId,
+      int attemptId, int numMappers, int numPartitions, int configuredMaxFrameBytes,
+      int maxInFlightBytes, boolean direct) {
+    this.direct = direct;
     if (client == null || shuffleId < 0 || mapId < 0 || attemptId < 0 ||
         numMappers <= mapId || numMappers <= 0 || numPartitions <= 0 ||
         configuredMaxFrameBytes < MIN_FRAME_BYTES || maxInFlightBytes < MIN_FRAME_BYTES + HEADER_BYTES) {
@@ -102,7 +110,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     this.numPartitions = numPartitions;
     this.maxReservationBytes = maxInFlightBytes - HEADER_BYTES;
     this.maxFrameBytes = Math.min(Math.min(configuredMaxFrameBytes, MAX_BUFFER_BYTES),
-        maxReservationBytes);
+        maxReservationBytes / (direct ? 1 : 2));
     this.partitionLengths = new AtomicLongArray(numPartitions);
   }
   private static Method publicMethod(Class<?> owner, String name, Class<?> result,
@@ -140,8 +148,8 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       throw new IllegalArgumentException("Cannot inspect public Celeborn buffer support", failure);
     }
   }
-  @Override public boolean supportsDirectPush() { return true; }
-  @Override public int frameCopies() { return 1; }
+  @Override public boolean supportsDirectPush() { return direct; }
+  @Override public int frameCopies() { return direct ? 1 : 2; }
   @Override public int maxFrameBytes() { return maxFrameBytes; }
   @Override public int maxReservationBytes() { return maxReservationBytes; }
   public int numPartitions() { return numPartitions; }
@@ -211,6 +219,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     if (data == null || !data.isDirect()) { throw new IOException("Expected a direct frame"); }
     CompletableFuture<Integer> completion = submit(partition, data, length, 1);
     boolean interrupted = false;
+    IOException cancellationFailure = null;
     try {
       for (;;) {
         try {
@@ -219,12 +228,13 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
         } catch (InterruptedException cause) {
           interrupted = true;
           // Do not unwind across JNI while Netty can still read the native allocation.
-          abort();
+          try { abort(); }
+          catch (IOException cleanupFailure) { cancellationFailure = cleanupFailure; }
         } catch (ExecutionException cause) {
           throw asIOException("Celeborn buffer push failed", cause.getCause());
         }
       }
-      if (interrupted) { throw new IOException("Interrupted during Celeborn buffer push"); }
+      if (interrupted) { throw new IOException("Interrupted during Celeborn buffer push", cancellationFailure); }
     } finally {
       if (interrupted) { Thread.currentThread().interrupt(); }
     }
@@ -236,6 +246,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     synchronized (lock) { checkOpen(); submissions++; }
     Reservation reservation = null;
     boolean transferred = false;
+    boolean counted = false;
     try {
       int bytes = Math.addExact(Math.multiplyExact(length, copies), HEADER_BYTES);
       reservation = encoding.get();
@@ -250,6 +261,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
         checkOpen();
         reservation.claimed = true;
         pending++;
+        counted = true;
       }
       final Reservation owned = reservation;
       final CompletionStage<Integer> stage;
@@ -285,14 +297,20 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     } finally {
       if (!transferred && reservation != null) {
         synchronized (lock) {
-          if (reservation.claimed) { pending--; }
+          if (counted) { pending--; }
           reservation.transportReleased = true;
           lock.notifyAll();
         }
         releaseIfRetired(reservation);
       }
       synchronized (lock) { submissions--; lock.notifyAll(); }
-      cleanupIfReady();
+      try { cleanupIfReady(); }
+      catch (IOException cleanupFailure) {
+        // A transferred direct frame must still drain its lifetime promise. Reporting cleanup
+        // failure from this finally block would unwind across JNI while owners remain live.
+        if (!transferred) { throw cleanupFailure; }
+        synchronized (lock) { if (failure == null) { failure = cleanupFailure; } }
+      }
     }
   }
   /** Waits for every push and native encoder before committing mapperEnd. */

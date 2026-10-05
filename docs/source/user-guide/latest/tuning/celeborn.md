@@ -46,3 +46,16 @@ executor memory use.
 Native frames use Comet's [shuffle compression settings](shuffle.md#shuffle-compression).
 The raw Celeborn path bypasses Celeborn's additional row compression and decompression, so
 frames are not compressed twice.
+
+## Caller-owned native buffers
+
+With a client exposing the public buffer completion API, the default heap push retains
+native encoding output and a single JNI heap copy. Direct pushes
+(`spark.comet.shuffle.celeborn.directBuffer.enabled=true`) retain one native payload.
+Celeborn's 16-byte header is a separate buffer. Admission reserves the selected number
+of payload representations plus the codec and Arrow workspace before encoding, and
+returns those bytes only after both native retirement and client completion.
+
+Direct pushes wait for every retry, callback, and transport reference to retire before
+returning across JNI, even on interruption or cancellation. Heap pushes remain
+asynchronous. Compare complete query timings as well as allocation when choosing a mode.

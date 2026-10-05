@@ -47,8 +47,12 @@ jobs:
             native/target
           key: ${{ runner.os }}-cargo-ci-${{ hashFiles('native/**/Cargo.lock', 'native/**/Cargo.toml') }}
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Compile JVM exception classes
-        run: ./mvnw -B -DskipTests compile
+      - name: Format source and compile JVM exception classes
+        run: |
+          (cd native && cargo fmt --all)
+          ./mvnw -B -ntp spotless:apply
+          git diff > formatting.patch
+          ./mvnw -B -ntp -DskipTests compile
       - name: Native shuffle and JNI contract tests
         run: |
           export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:${LD_LIBRARY_PATH:-}"
@@ -59,6 +63,11 @@ jobs:
         with:
           name: native-library
           path: native/target/ci/libcomet.so
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-source-formatting
+          path: formatting.patch
   spark:
     needs: native
     runs-on: ubuntu-24.04
@@ -80,6 +89,7 @@ jobs:
           path: native/target/release
       - name: Celeborn and both shuffle implementations
         run: |
+          ./mvnw -B -P${{ matrix.profile }} spotless:apply
           SPARK_HOME="$PWD" ./mvnw -B -P${{ matrix.profile }} -Prelease test \
             -Dtest=none -Dsuites=org.apache.comet.shuffle.CelebornShufflePartitionPusherSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornNativeShuffleWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleReaderSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManagerSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleFallbackSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShufflePlanningSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornConcurrentMaterializationSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleStatisticsSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornLocalFetchFailureSuite,org.apache.comet.exec.CometNativeShuffleSuite,org.apache.comet.exec.CometColumnarShuffleSuite
       - uses: actions/upload-artifact@v4
@@ -90,3 +100,120 @@ jobs:
             **/target/surefire-reports/**
             **/target/test-reports/**
             **/target/*.txt
+  integration:
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-library
+          path: native/target/release
+      - name: Build Comet and install Spark 3.5.9 runtime
+        run: |
+          python -m pip install pyspark==3.5.9
+          SPARK_HOME=$(python -c 'import os, pyspark; print(os.path.dirname(pyspark.__file__))')
+          echo "SPARK_HOME=$SPARK_HOME" >> "$GITHUB_ENV"
+          ./mvnw -B -ntp -Pspark-3.5,scala-2.12 spotless:apply
+          ./mvnw -B -ntp -Pspark-3.5,scala-2.12 -Prelease package -DskipTests
+          COMET_JAR=$(find "$PWD/spark/target" -maxdepth 1 -name 'comet-spark-spark3.5_2.12-*.jar' ! -name '*tests*' ! -name '*sources*' | head -1)
+          echo "COMET_JAR=$COMET_JAR" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          repository: unikdahal/celeborn
+          ref: c108191d0699f089b989a656c54977a57937b292
+          path: celeborn
+      - name: Build Celeborn master, worker and matching client
+        run: |
+          cd celeborn
+          build/make-distribution.sh -Pspark-3.5
+          CELEBORN_JAR=$(find "$PWD/dist/spark" -name 'celeborn-client-spark-3-shaded_2.12-*.jar' | head -1)
+          echo "CELEBORN_JAR=$CELEBORN_JAR" >> "$GITHUB_ENV"
+      - name: Start real master and worker
+        run: |
+          mkdir -p /tmp/celeborn-worker /tmp/shuffle-results
+          cat > celeborn/dist/conf/celeborn-defaults.conf <<'EOF'
+          celeborn.master.host 127.0.0.1
+          celeborn.master.port 9097
+          celeborn.master.endpoints 127.0.0.1:9097
+          celeborn.metrics.enabled false
+          celeborn.worker.storage.dirs /tmp/celeborn-worker:disktype=SSD
+          celeborn.worker.monitor.disk.enabled false
+          EOF
+          celeborn/dist/sbin/start-master.sh
+          celeborn/dist/sbin/start-worker.sh
+          for attempt in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/9097) >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          (echo > /dev/tcp/127.0.0.1/9097) >/dev/null 2>&1
+          sleep 5
+      - name: Prepare deterministic data and Spark baseline
+        run: |
+          "$SPARK_HOME/bin/spark-submit" --master 'local[4]' \
+            dev/ci/celeborn_buffer_integration.py --mode prepare --data /tmp/shuffle-data --output /tmp/unused
+          "$SPARK_HOME/bin/spark-submit" --master 'local[4]' \
+            --conf spark.sql.adaptive.enabled=false --conf spark.sql.autoBroadcastJoinThreshold=-1 \
+            dev/ci/celeborn_buffer_integration.py --mode baseline --data /tmp/shuffle-data --output /tmp/shuffle-results/baseline.json
+      - name: Compare native heap and native direct modes
+        run: |
+          for mode in heap direct; do
+            direct=false
+            if [ "$mode" = direct ]; then direct=true; fi
+            /usr/bin/time -v -o "/tmp/shuffle-results/$mode.resources.txt" \
+            "$SPARK_HOME/bin/spark-submit" --master 'local[4]' \
+              --jars "$COMET_JAR,$CELEBORN_JAR" --driver-class-path "$COMET_JAR:$CELEBORN_JAR" \
+              --conf "spark.executor.extraClassPath=$COMET_JAR:$CELEBORN_JAR" \
+              --conf spark.plugins=org.apache.spark.CometPlugin \
+              --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManager \
+              --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+              --conf spark.celeborn.master.endpoints=127.0.0.1:9097 \
+              --conf spark.celeborn.client.spark.stageRerun.enabled=true \
+              --conf spark.celeborn.client.spark.shuffle.fallback.policy=NEVER \
+              --conf spark.celeborn.shuffle.integrity.check.enabled=true \
+              --conf spark.shuffle.service.enabled=false \
+              --conf spark.comet.exec.enabled=true --conf spark.comet.shuffle.enabled=true \
+              --conf spark.comet.shuffle.mode=native \
+              --conf "spark.comet.shuffle.celeborn.directBuffer.enabled=$direct" \
+              --conf spark.comet.shuffle.rss.maxFrameBytes=8m \
+              --conf spark.comet.shuffle.rss.maxInFlightBytes=64m \
+              --conf spark.memory.offHeap.enabled=true --conf spark.memory.offHeap.size=1g \
+              --conf spark.sql.adaptive.enabled=false --conf spark.sql.autoBroadcastJoinThreshold=-1 \
+              dev/ci/celeborn_buffer_integration.py --mode "$mode" --data /tmp/shuffle-data \
+                --output "/tmp/shuffle-results/$mode.json" 2>&1 | tee "/tmp/shuffle-results/$mode.log"
+          done
+      - name: Prove parity and service storage
+        run: |
+          python - <<'EOF'
+          import json
+          root = '/tmp/shuffle-results/'
+          results = {mode: json.load(open(root+mode+'.json')) for mode in ['baseline','heap','direct']}
+          for name, reference in results['baseline'].items():
+              for mode in ['heap','direct']:
+                  actual=results[mode][name]
+                  assert actual['sha256'] == reference['sha256'] and actual['rows'] == reference['rows'], (mode,name)
+          print('PARITY_OK', json.dumps(results, sort_keys=True))
+          EOF
+          ! rg 'Fallback to vanilla Spark SortShuffleManager|requires the public caller-owned' /tmp/shuffle-results/heap.log /tmp/shuffle-results/direct.log
+          find /tmp/celeborn-worker -type f -printf '%p %s bytes\n' > /tmp/shuffle-results/worker-files.txt
+          test -s /tmp/shuffle-results/worker-files.txt
+          git rev-parse HEAD > /tmp/shuffle-results/comet-sha.txt
+          git -C celeborn rev-parse HEAD > /tmp/shuffle-results/celeborn-sha.txt
+      - name: Stop services
+        if: always()
+        run: |
+          celeborn/dist/sbin/stop-worker.sh || true
+          celeborn/dist/sbin/stop-master.sh || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-cluster-parity-and-measurements
+          path: |
+            /tmp/shuffle-results/**
+            celeborn/dist/logs/**

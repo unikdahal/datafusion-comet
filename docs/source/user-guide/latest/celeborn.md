@@ -25,8 +25,27 @@ remote storage for shuffle data.
 ## Support Status
 
 Comet's [native shuffle](tuning/shuffle.md#native-shuffle) through Celeborn is unavailable
-with the currently released Celeborn 0.6.x and 0.7.x clients.
-Setting `spark.comet.shuffle.mode=native` does not change that.
+with the released Celeborn 0.6.x and 0.7.x clients, which do not expose the public
+caller-owned buffer completion contract. Setting `spark.comet.shuffle.mode=native`
+with those clients selects their existing Spark shuffle integration.
+
+A client implementing `ShuffleClient.supportsBufferPush()` and `pushDataAsync(...)`
+can run the native writer and reader. Completion must cover every retry, callback,
+and transport buffer owner, including failed and cancelled pushes. Comet checks public
+methods; it does not replace private transport fields. Use the same compatible client
+build on the driver and every executor.
+
+To enable native shuffle with such a client, set `spark.comet.shuffle.mode=native`
+and `spark.celeborn.client.spark.stageRerun.enabled=true`. Native shuffle requires
+`spark.io.encryption.enabled=false`. Encryption stays enabled when the ordinary
+Spark/Celeborn integration is selected.
+
+The default native push path makes one JNI copy into a heap buffer, then adds a separate
+16-byte Celeborn batch header. Set `spark.comet.shuffle.celeborn.directBuffer.enabled=true`
+to borrow the native encoded frame directly. This mode eliminates both post-encoding
+payload copies, but waits for each push to retire all owners before reusing native memory.
+Measure throughput for your workload before enabling it; network latency can make an
+asynchronous heap push faster. Neither mode claims to eliminate TLS or kernel copies.
 
 You can still use Comet to accelerate supported scans, filters, and other query operators.
 Shuffle is handled by Celeborn's existing Spark integration.

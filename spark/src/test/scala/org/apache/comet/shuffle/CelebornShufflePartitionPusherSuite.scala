@@ -33,10 +33,122 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.SparkConf
 
 class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
+  private val encodedAttemptId = 7
+  private def clientArguments: Array[AnyRef] = Array[AnyRef](
+    "native-celeborn-application",
+    "localhost",
+    Int.box(9097),
+    new RecordingCelebornClientConf,
+    new RecordingCelebornUserIdentifier,
+    Array[Byte](1, 2, 3))
+
   private def frame(): Array[Byte] = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN)
     .putLong(16L).putLong(1L).putLong(2L).array()
   private def pusher(client: AnyRef, limit: Int = 512): CelebornShufflePartitionPusher =
     new CelebornShufflePartitionPusher(client, 19, 3, 7, 12, 9, 128, limit)
+
+  test("Spark IO encryption is rejected before creating a native task pusher") {
+    val client = new RecordingCelebornPushClient
+    val conf = new SparkConf(false).set("spark.io.encryption.enabled", "true")
+    val failure = intercept[IllegalArgumentException] {
+      CelebornShufflePusherFactory.create(conf, client, 19, 12, 9, null)
+    }
+    assert(failure.getMessage.contains("Encrypted native Celeborn shuffle is not supported"))
+    assert(client.pushCount == 0)
+  }
+
+  test("crypto-aware client acquisition preserves encryption for ordinary Spark shuffle") {
+    val conf = new SparkConf(false).set("spark.io.encryption.enabled", "true")
+    val cryptoHandler = new RecordingCelebornCryptoHandler
+    val bytes = frame()
+    RecordingCryptoAwareCelebornClientFactory.reset()
+    var observedConf: SparkConf = null
+
+    val client = CelebornShufflePusherFactory
+      .resolveClient(
+        conf,
+        classOf[RecordingCryptoAwareCelebornClientFactory],
+        classOf[RecordingCelebornClientConf],
+        classOf[RecordingCelebornUserIdentifier],
+        clientArguments,
+        sparkConf => {
+          observedConf = sparkConf
+          Optional.of(cryptoHandler)
+        })
+      .asInstanceOf[RecordingCelebornPushClient]
+
+    // The shared application client must keep its real crypto handler even though native RSS
+    // cannot currently bound that handler's extra allocations and retained high-water buffer.
+    client.pushOrMergeData(19, 3, encodedAttemptId, 6, bytes, 0, bytes.length, 12, 9, true, true)
+
+    assert(observedConf eq conf)
+    assert(RecordingCryptoAwareCelebornClientFactory.cryptoAwareCalls.get() == 1)
+    assert(RecordingCryptoAwareCelebornClientFactory.legacyCalls.get() == 0)
+    assert(cryptoHandler.encryptionCount == 1)
+    assert(cryptoHandler.plaintext.sameElements(bytes))
+    assert(cryptoHandler.encryptedLength == bytes.length + 20)
+  }
+
+  test("older Celeborn clients retain their six-argument client acquisition API") {
+    val conf = new SparkConf(false)
+    var cryptoHandlerResolved = false
+    RecordingLegacyCelebornClientFactory.calls.set(0)
+
+    val client = CelebornShufflePusherFactory.resolveClient(
+      conf,
+      classOf[RecordingLegacyCelebornClientFactory],
+      classOf[RecordingCelebornClientConf],
+      classOf[RecordingCelebornUserIdentifier],
+      clientArguments,
+      _ => {
+        cryptoHandlerResolved = true
+        Optional.empty[AnyRef]()
+      })
+
+    assert(client.isInstanceOf[RecordingCelebornPushClient])
+    assert(RecordingLegacyCelebornClientFactory.calls.get() == 1)
+    assert(!cryptoHandlerResolved)
+  }
+
+  test("crypto-handler failures never fall back to an unencrypted Celeborn client") {
+    val conf = new SparkConf(false).set("spark.io.encryption.enabled", "true")
+    val expected = new IllegalStateException("Spark shuffle encryption key was unavailable")
+    RecordingCryptoAwareCelebornClientFactory.reset()
+
+    val actual = intercept[IllegalStateException] {
+      CelebornShufflePusherFactory.resolveClient(
+        conf,
+        classOf[RecordingCryptoAwareCelebornClientFactory],
+        classOf[RecordingCelebornClientConf],
+        classOf[RecordingCelebornUserIdentifier],
+        clientArguments,
+        _ => throw expected)
+    }
+
+    assert(actual eq expected)
+    assert(RecordingCryptoAwareCelebornClientFactory.cryptoAwareCalls.get() == 0)
+    assert(RecordingCryptoAwareCelebornClientFactory.legacyCalls.get() == 0)
+  }
+
+  test(
+    "encryption enabled after binding is rejected before reservation or integrity accounting") {
+    val client = new RecordingCelebornPushClient
+    val cryptoHandler = new RecordingCelebornCryptoHandler
+    val bytes = frame()
+    val adapter = pusher(client)
+    client.cryptoHandler = Optional.of(cryptoHandler)
+
+    intercept[UnsupportedOperationException] {
+      adapter.reservePartitionData(3 * bytes.length)
+    }
+    intercept[UnsupportedOperationException] {
+      adapter.pushPartitionData(4, bytes, bytes.length)
+    }
+
+    assert(cryptoHandler.encryptionCount == 0)
+    assert(client.pushCount == 0)
+    assert(client.cryptoHandler.get() eq cryptoHandler)
+  }
 
   test("public buffer push preserves task identity, complete frame and partition lengths") {
     val client = new RecordingCelebornPushClient
@@ -287,392 +399,6 @@ class RecordingCelebornPushClient {
   }
 }
 
-/** Mirrors stock Celeborn's private request tracker without requiring its optional dependency. */
-final class RecordingCelebornInFlightTracker {
-  val totalInflightReqs: LongAdder = new LongAdder()
-}
-
-/** Mirrors the public PushState failure slot and its stock private tracker member. */
-final class RecordingCelebornPushState {
-  val inFlightRequestTracker: RecordingCelebornInFlightTracker =
-    new RecordingCelebornInFlightTracker()
-  val exception: AtomicReference[IOException] = new AtomicReference[IOException]()
-}
-
-/** Exposes the same lifecycle and completion state as the public Apache Celeborn client. */
-class AsyncRecordingCelebornPushClient extends RecordingCelebornPushClient {
-  val pushStates: ConcurrentHashMap[String, RecordingCelebornPushState] =
-    new ConcurrentHashMap[String, RecordingCelebornPushState]()
-
-  def getPushState(mapKey: String): RecordingCelebornPushState =
-    pushStates.computeIfAbsent(mapKey, _ => new RecordingCelebornPushState())
-
-  def currentState(shuffleId: Int, mapId: Int, attemptId: Int): RecordingCelebornPushState =
-    pushStates.get(s"$shuffleId-$mapId-$attemptId")
-
-  def complete(state: RecordingCelebornPushState): Unit = state.synchronized {
-    state.inFlightRequestTracker.totalInflightReqs.decrement()
-    state.notifyAll()
-  }
-
-  def failWithoutRemovingRequest(state: RecordingCelebornPushState, failure: IOException): Unit =
-    state.synchronized {
-      state.exception.compareAndSet(null, failure)
-      state.notifyAll()
-    }
-
-  @throws[IOException]
-  override def pushOrMergeData(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      partitionId: Int,
-      bytes: Array[Byte],
-      offset: Int,
-      length: Int,
-      numMappers: Int,
-      numPartitions: Int,
-      doPush: Boolean,
-      skipCompress: Boolean): Int = {
-    val state = getPushState(s"$shuffleId-$mapId-$attemptId")
-    state.inFlightRequestTracker.totalInflightReqs.increment()
-    super.pushOrMergeData(
-      shuffleId,
-      mapId,
-      attemptId,
-      partitionId,
-      bytes,
-      offset,
-      length,
-      numMappers,
-      numPartitions,
-      doPush,
-      skipCompress)
-  }
-
-  @throws[IOException]
-  override def mapperEnd(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      numMappers: Int,
-      numPartitions: Int): Unit = {
-    super.mapperEnd(shuffleId, mapId, attemptId, numMappers, numPartitions)
-    val key = s"$shuffleId-$mapId-$attemptId"
-    val state = pushStates.get(key)
-    if (state != null) {
-      state.synchronized {
-        while (state.exception.get() == null &&
-          state.inFlightRequestTracker.totalInflightReqs.sum() > 0) {
-          state.wait(25)
-        }
-        val failure = state.exception.get()
-        if (failure != null) {
-          throw failure
-        }
-      }
-      pushStates.remove(key, state)
-    }
-  }
-
-  @throws[IOException]
-  override def cleanup(shuffleId: Int, mapId: Int, attemptId: Int): Unit = {
-    super.cleanup(shuffleId, mapId, attemptId)
-    val removed = pushStates.remove(s"$shuffleId-$mapId-$attemptId")
-    if (removed != null) {
-      removed.synchronized {
-        removed.exception.compareAndSet(null, new IOException("Cleaned Up"))
-        removed.notifyAll()
-      }
-    }
-  }
-}
-
-/** Models the final references in released clients without starting Celeborn network services. */
-final class FinalFieldsRecordingCelebornPushClient extends RecordingCelebornPushClient {
-  val factory = new FinalFieldsRecordingCelebornFactory
-  val pushDataRetryPool: ExecutorService = new RecordingCelebornRetryExecutor
-  val factoryCalls = new AtomicInteger()
-
-  def getDataClientFactory: FinalFieldsRecordingCelebornFactory = {
-    factoryCalls.incrementAndGet()
-    factory
-  }
-}
-
-final class FinalFieldsRecordingCelebornFactory {
-  val clientBootstraps: JList[RecordingCelebornTransportClientBootstrap] =
-    new JArrayList[RecordingCelebornTransportClientBootstrap]()
-}
-
-/** Models completion boundaries with safely published hooks, unlike stock Celeborn 0.6/0.7. */
-final class TransportRecordingCelebornPushClient extends AsyncRecordingCelebornPushClient {
-  val dataClientFactory: RecordingCelebornTransportClientFactory =
-    new RecordingCelebornTransportClientFactory
-  val retryExecutor = new RecordingCelebornRetryExecutor
-  @volatile var pushDataRetryPool: ExecutorService = retryExecutor
-
-  def getDataClientFactory: RecordingCelebornTransportClientFactory = dataClientFactory
-
-  var openConnectionBeforePush: Boolean = false
-  var openUninstrumentableConnectionBeforePush: Boolean = false
-  var beforePushBegins: () => Unit = () => ()
-  var beforePushReturns: RecordingCelebornPushState => Unit = (_: RecordingCelebornPushState) =>
-    ()
-  var retriesBeforeFailure: Int = 0
-  var retryCallback: RecordingCelebornTransportCallbackApi => Unit =
-    callback => callback.onFailure(new IOException("revive failed"))
-
-  @throws[IOException]
-  override def pushOrMergeData(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      partitionId: Int,
-      bytes: Array[Byte],
-      offset: Int,
-      length: Int,
-      numMappers: Int,
-      numPartitions: Int,
-      doPush: Boolean,
-      skipCompress: Boolean): Int = {
-    beforePushBegins()
-    val accepted = super.pushOrMergeData(
-      shuffleId,
-      mapId,
-      attemptId,
-      partitionId,
-      bytes,
-      offset,
-      length,
-      numMappers,
-      numPartitions,
-      doPush,
-      skipCompress)
-    if (openConnectionBeforePush) {
-      openConnectionBeforePush = false
-      dataClientFactory.openConnection()
-    }
-    if (openUninstrumentableConnectionBeforePush) {
-      openUninstrumentableConnectionBeforePush = false
-      dataClientFactory.openUninstrumentableConnection()
-    }
-    val state = currentState(shuffleId, mapId, attemptId)
-    dataClientFactory.handler.add(
-      state,
-      new RecordingCelebornTransportCallback(
-        state,
-        retriesBeforeFailure,
-        callback => {
-          pushDataRetryPool.submit(new Runnable {
-            override def run(): Unit = retryCallback(callback)
-          })
-          ()
-        }))
-    beforePushReturns(state)
-    accepted
-  }
-
-  override def complete(state: RecordingCelebornPushState): Unit = {
-    dataClientFactory.handler.remove(state).callback.onSuccess(ByteBuffer.allocate(0))
-  }
-
-  def failTransport(state: RecordingCelebornPushState, failure: IOException): Unit = {
-    val request = dataClientFactory.handler.remove(state)
-    request.callback.onFailure(failure)
-  }
-}
-
-final class RecordingCelebornRetryExecutor extends AbstractExecutorService {
-  private val pending = new LinkedBlockingQueue[Runnable]()
-  @volatile private var stopped = false
-
-  def pendingCount: Int = pending.size()
-
-  def runNext(): Unit = {
-    val task = pending.poll(5, TimeUnit.SECONDS)
-    require(task != null, "Expected a queued Celeborn retry")
-    task.run()
-  }
-
-  override def execute(command: Runnable): Unit = {
-    if (stopped) {
-      throw new RejectedExecutionException("Celeborn retry executor is stopped")
-    }
-    pending.add(command)
-  }
-
-  override def shutdown(): Unit = stopped = true
-
-  override def shutdownNow(): JList[Runnable] = {
-    stopped = true
-    val tasks = new JArrayList[Runnable]()
-    pending.drainTo(tasks)
-    tasks
-  }
-
-  override def isShutdown: Boolean = stopped
-
-  override def isTerminated: Boolean = stopped && pending.isEmpty
-
-  override def awaitTermination(timeout: Long, unit: TimeUnit): Boolean = isTerminated
-}
-
-final class RecordingCelebornTransportClientFactory {
-  var handler: RecordingCelebornTransportResponseHandler =
-    new RecordingCelebornTransportResponseHandler
-  @volatile var clientBootstraps: JList[RecordingCelebornTransportClientBootstrap] =
-    new JArrayList[RecordingCelebornTransportClientBootstrap]()
-  val connectionPool: ConcurrentHashMap[String, RecordingCelebornTransportClientPool] =
-    new ConcurrentHashMap[String, RecordingCelebornTransportClientPool]()
-  connectionPool.put("worker", new RecordingCelebornTransportClientPool(handler))
-
-  def openConnection(): Unit = {
-    openConnection(new io.netty.channel.embedded.EmbeddedChannel())
-  }
-
-  def openUninstrumentableConnection(): Unit = {
-    openConnection(null)
-  }
-
-  private def openConnection(channel: io.netty.channel.Channel): Unit = {
-    handler = new RecordingCelebornTransportResponseHandler
-    val pool = new RecordingCelebornTransportClientPool(handler, channel)
-    val bootstraps = clientBootstraps.iterator()
-    while (bootstraps.hasNext) {
-      bootstraps.next().doBootstrap(pool.clients(0))
-    }
-    connectionPool.put("worker", pool)
-  }
-}
-
-trait RecordingCelebornTransportClientBootstrap {
-  def doBootstrap(client: RecordingCelebornTransportClient): Unit
-}
-
-final class RecordingCelebornTransportClientPool(
-    handler: RecordingCelebornTransportResponseHandler,
-    channel: io.netty.channel.Channel = new io.netty.channel.embedded.EmbeddedChannel()) {
-  val clients: Array[RecordingCelebornTransportClient] =
-    Array(new RecordingCelebornTransportClient(handler, channel))
-  val locks: Array[Object] = Array(new Object)
-}
-
-final class RecordingCelebornTransportClient(
-    handler: RecordingCelebornTransportResponseHandler,
-    @volatile var channel: io.netty.channel.Channel) {
-  def getChannel: io.netty.channel.Channel = channel
-  def getHandler: RecordingCelebornTransportResponseHandler = handler
-}
-
-final class RecordingCelebornTransportResponseHandler {
-  private val nextRequestId = new AtomicLong()
-  @volatile var outstandingPushes
-      : ConcurrentHashMap[java.lang.Long, RecordingCelebornTransportRequest] =
-    new ConcurrentHashMap[java.lang.Long, RecordingCelebornTransportRequest]()
-
-  def add(pushState: RecordingCelebornPushState): Unit =
-    add(pushState, new RecordingCelebornTransportCallback(pushState))
-
-  def add(
-      pushState: RecordingCelebornPushState,
-      callback: RecordingCelebornTransportCallbackApi): Unit = {
-    outstandingPushes.put(
-      Long.box(nextRequestId.incrementAndGet()),
-      new RecordingCelebornTransportRequest(pushState, callback))
-  }
-
-  def remove(pushState: RecordingCelebornPushState): RecordingCelebornTransportRequest = {
-    val entries = outstandingPushes.entrySet().iterator()
-    while (entries.hasNext) {
-      val entry = entries.next()
-      if (entry.getValue.pushState eq pushState) {
-        val removed = outstandingPushes.remove(entry.getKey)
-        if (removed != null) {
-          return removed
-        }
-      }
-    }
-    throw new IllegalStateException("Celeborn transport request is no longer outstanding")
-  }
-}
-
-final class RecordingCelebornTransportRequest(
-    val pushState: RecordingCelebornPushState,
-    var callback: RecordingCelebornTransportCallbackApi)
-
-trait RecordingCelebornTransportCallbackApi {
-  def onSuccess(response: ByteBuffer): Unit
-  def onFailure(failure: Throwable): Unit
-}
-
-final class RecordingCelebornTransportCallback(
-    val pushState: RecordingCelebornPushState,
-    private var retriesRemaining: Int = 0,
-    submitRetry: RecordingCelebornTransportCallbackApi => Unit = _ => ())
-    extends RecordingCelebornTransportCallbackApi {
-  override def onSuccess(response: ByteBuffer): Unit = pushState.synchronized {
-    pushState.inFlightRequestTracker.totalInflightReqs.decrement()
-    pushState.notifyAll()
-  }
-
-  override def onFailure(failure: Throwable): Unit = {
-    if (pushState.exception.get() == null) {
-      if (retriesRemaining > 0) {
-        retriesRemaining -= 1
-        submitRetry(this)
-      } else {
-        val reportedFailure = failure match {
-          case io: IOException => io
-          case _ => new IOException(failure)
-        }
-        pushState.exception.compareAndSet(null, reportedFailure)
-      }
-    }
-  }
-}
-
-/** Implements the older public Celeborn 0.6 four-argument mapper-completion API. */
-final class LegacyMapperEndCelebornPushClient {
-  private val delegate = new RecordingCelebornPushClient
-  val mapperEndCalls: AtomicInteger = new AtomicInteger()
-  @volatile var lastMapperEnd: (Int, Int, Int, Int) = _
-
-  @throws[IOException]
-  def pushOrMergeData(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      partitionId: Int,
-      bytes: Array[Byte],
-      offset: Int,
-      length: Int,
-      numMappers: Int,
-      numPartitions: Int,
-      doPush: Boolean,
-      skipCompress: Boolean): Int =
-    delegate.pushOrMergeData(
-      shuffleId,
-      mapId,
-      attemptId,
-      partitionId,
-      bytes,
-      offset,
-      length,
-      numMappers,
-      numPartitions,
-      doPush,
-      skipCompress)
-
-  def mapperEnd(shuffleId: Int, mapId: Int, attemptId: Int, numMappers: Int): Unit = {
-    mapperEndCalls.incrementAndGet()
-    lastMapperEnd = (shuffleId, mapId, attemptId, numMappers)
-  }
-
-  def cleanup(shuffleId: Int, mapId: Int, attemptId: Int): Unit = ()
-}
-
-/** Models the Spark crypto wire format's minimum 4-byte length plus 16-byte IV overhead. */
 final class RecordingCelebornCryptoHandler {
 
   @volatile var encryptionCount: Int = 0
@@ -688,114 +414,3 @@ final class RecordingCelebornCryptoHandler {
 }
 
 /** Mirrors Celeborn 0.7 integrity accounting without depending on its optional client classes. */
-final class IntegrityCheckingCelebornPushClient extends RecordingCelebornPushClient {
-
-  @volatile var integrityFailure: Throwable = _
-  val accountedFrames: mutable.ArrayBuffer[RecordedCelebornAccounting] =
-    mutable.ArrayBuffer.empty
-  val recordedPushes: mutable.ArrayBuffer[RecordedCelebornPush] = mutable.ArrayBuffer.empty
-  val invocationOrder: mutable.ArrayBuffer[String] = mutable.ArrayBuffer.empty
-  private val checksums = mutable.HashMap.empty[Int, Long]
-  private val byteTotals = mutable.HashMap.empty[Int, Long]
-
-  def partitionCrc(partitionId: Int): Long = checksums(partitionId)
-
-  def partitionBytes(partitionId: Int): Long = byteTotals(partitionId)
-
-  @throws[IOException]
-  def computeBatchCRC(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      partitionId: Int,
-      bytes: Array[Byte],
-      offset: Int,
-      length: Int): Unit = {
-    invocationOrder += s"crc:$partitionId"
-    if (integrityFailure != null) {
-      throw integrityFailure
-    }
-
-    accountedFrames +=
-      RecordedCelebornAccounting(shuffleId, mapId, attemptId, partitionId, bytes, offset, length)
-    val batchChecksum = new CRC32
-    batchChecksum.update(bytes, offset, length)
-    val previous = checksums.getOrElse(partitionId, 0L)
-    val combined = (0 until java.lang.Integer.BYTES).foldLeft(0L) { (result, index) =>
-      val shift = index * java.lang.Byte.SIZE
-      val next = ((previous >>> shift) & 0xffL) + ((batchChecksum.getValue >>> shift) & 0xffL)
-      result | ((next & 0xffL) << shift)
-    }
-    checksums.update(partitionId, combined)
-    byteTotals.update(partitionId, byteTotals.getOrElse(partitionId, 0L) + length)
-  }
-
-  @throws[IOException]
-  override def pushOrMergeData(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      partitionId: Int,
-      bytes: Array[Byte],
-      offset: Int,
-      length: Int,
-      numMappers: Int,
-      numPartitions: Int,
-      doPush: Boolean,
-      skipCompress: Boolean): Int = {
-    invocationOrder += s"push:$partitionId"
-    val accepted = super.pushOrMergeData(
-      shuffleId,
-      mapId,
-      attemptId,
-      partitionId,
-      bytes,
-      offset,
-      length,
-      numMappers,
-      numPartitions,
-      doPush,
-      skipCompress)
-    recordedPushes += lastPush
-    accepted
-  }
-}
-
-final case class RecordedCelebornAccounting(
-    shuffleId: Int,
-    mapId: Int,
-    attemptId: Int,
-    partitionId: Int,
-    bytes: Array[Byte],
-    offset: Int,
-    length: Int)
-
-final case class RecordedCelebornPush(
-    shuffleId: Int,
-    mapId: Int,
-    attemptId: Int,
-    partitionId: Int,
-    bytes: Array[Byte],
-    offset: Int,
-    length: Int,
-    numMappers: Int,
-    numPartitions: Int,
-    doPush: Boolean,
-    skipCompress: Boolean)
-
-/** Mimics an incompatible optional client whose raw-push method does not return an int. */
-final class WrongReturnTypeCelebornPushClient {
-
-  def pushOrMergeData(
-      shuffleId: Int,
-      mapId: Int,
-      attemptId: Int,
-      partitionId: Int,
-      bytes: Array[Byte],
-      offset: Int,
-      length: Int,
-      numMappers: Int,
-      numPartitions: Int,
-      doPush: Boolean,
-      skipCompress: Boolean): Long = length.toLong
-}

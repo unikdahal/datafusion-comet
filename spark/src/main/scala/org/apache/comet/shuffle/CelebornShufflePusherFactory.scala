@@ -81,7 +81,8 @@ object CelebornShufflePusherFactory {
       numMappers,
       numPartitions,
       maxFrameBytes.toInt,
-      maxInFlightBytes.toInt)
+      maxInFlightBytes.toInt,
+      conf.getBoolean(CometConf.COMET_CELEBORN_SHUFFLE_DIRECT_BUFFER_ENABLED.key, false))
   }
 
   /**
