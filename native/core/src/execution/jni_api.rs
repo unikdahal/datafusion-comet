@@ -1762,6 +1762,25 @@ impl RemoteShuffleDecoder {
     }
 }
 
+
+#[no_mangle]
+/// Reclaim a native shuffle frame after the JVM transport has released every direct-buffer owner.
+///
+/// # Safety
+/// The handle must have been produced by the JNI shuffle pusher and must be released at most once.
+pub unsafe extern "system" fn Java_org_apache_comet_shuffle_CelebornShufflePartitionPusher_releaseNativeShuffleFrame(
+    e: EnvUnowned,
+    _class: JClass,
+    frame_handle: jlong,
+) {
+    try_unwrap_or_throw(&e, |_| {
+        unsafe {
+            crate::jvm_bridge::release_native_shuffle_frame(frame_handle);
+        }
+        Ok(())
+    })
+}
+
 #[no_mangle]
 /// Release a remote shuffle iterator's decoder.
 ///
