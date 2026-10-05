@@ -62,8 +62,8 @@ public interface ShufflePartitionPusher {
   }
 
   /**
-   * Borrows immutable native memory for this invocation. Must not mutate it, and must retire
-   * every reader before returning or throwing.
+   * Borrows immutable native memory for this invocation. Must not mutate it, and must retire every
+   * reader before returning or throwing.
    */
   default void pushPartitionDataDirect(int partitionId, ByteBuffer data, int length)
       throws IOException {

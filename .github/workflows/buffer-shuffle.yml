@@ -33,6 +33,7 @@ jobs:
           (cd native && cargo fmt --all)
           ./mvnw -B -Pspark-3.5,scala-2.12 spotless:apply
           git diff > formatting.patch
+          git diff --exit-code
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -61,6 +62,7 @@ jobs:
           (cd native && cargo fmt --all)
           ./mvnw -B -ntp spotless:apply
           git diff > formatting.patch
+          git diff --exit-code
           ./mvnw -B -ntp -DskipTests compile
       - name: Native shuffle and JNI contract tests
         run: |
@@ -103,6 +105,7 @@ jobs:
       - name: Build production native library
         run: |
           ./mvnw -B -ntp spotless:apply
+          git diff --exit-code
           ./mvnw -B -ntp -DskipTests compile
           cd native
           cargo build --release -j 2
@@ -138,7 +141,7 @@ jobs:
         run: |
           ./mvnw -B -P${{ matrix.profile }} spotless:apply
           SPARK_HOME="$PWD" ./mvnw -B -P${{ matrix.profile }} -Prelease test \
-            -Dtest=none -Dsuites=org.apache.comet.shuffle.CelebornShufflePartitionPusherSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornNativeShuffleWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleReaderSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManagerSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleFallbackSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShufflePlanningSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornConcurrentMaterializationSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleStatisticsSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornLocalFetchFailureSuite,org.apache.comet.exec.CometNativeShuffleSuite,org.apache.comet.exec.CometColumnarShuffleSuite
+            -Dtest=none -Dsuites=org.apache.comet.shuffle.CelebornShufflePartitionPusherSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornNativeShuffleWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleReaderSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManagerSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleFallbackSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShufflePlanningSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornConcurrentMaterializationSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleStatisticsSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornLocalFetchFailureSuite,org.apache.comet.exec.CometNativeShuffleSuite,org.apache.comet.exec.CometShuffleSuite,org.apache.comet.exec.DisableAQECometShuffleSuite,org.apache.comet.exec.CometShuffleEncryptionSuite,org.apache.comet.exec.CometShuffleManagerSuite
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -147,6 +150,8 @@ jobs:
             **/target/surefire-reports/**
             **/target/test-reports/**
             **/target/*.txt
+            **/target/unit-tests.log
+            **/hs_err_pid*.log
   released-client:
     needs: native
     runs-on: ubuntu-24.04

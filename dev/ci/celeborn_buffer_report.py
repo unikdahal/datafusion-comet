@@ -19,6 +19,7 @@
 # 
 import argparse
 import json
+import re
 import statistics
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -42,6 +43,9 @@ def main():
                    for mode in ["baseline", "heap", "direct"]}
         cluster = {"comet_sha": (directory / "comet-sha.txt").read_text().strip(),
                    "celeborn_sha": (directory / "celeborn-sha.txt").read_text().strip(), "queries": {}}
+        manifest = (directory / "native-build.txt").read_text().splitlines()
+        assert manifest[0] == cluster["comet_sha"], "Native library must match the tested Comet commit"
+        cluster["native_build"] = manifest
         lines.extend(["## " + directory.name, "", "Comet: `" + cluster["comet_sha"] + "`",
                       "Celeborn: `" + cluster["celeborn_sha"] + "`", "",
                       "| Query | Rows | Heap median seconds | Direct median seconds | Direct / heap |",
@@ -77,7 +81,10 @@ def main():
         lines.append("")
         report["clusters"][directory.name] = cluster
     assert len(report["clusters"]) == 2, "Both replication settings must have evidence"
-    for artifact in args.artifacts.iterdir():
+    lines.extend(["## Automated regression checks", "",
+                  "| Artifact | Tests | Failures | Errors | Skipped |",
+                  "| --- | ---: | ---: | ---: | ---: |"])
+    for artifact in sorted(args.artifacts.iterdir()):
         counts = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
         for file in artifact.rglob("*.xml"):
             if not file.name.startswith("TEST-"):
@@ -90,6 +97,12 @@ def main():
         if counts["tests"]:
             report["test_reports"][artifact.name] = counts
             assert counts["failures"] == 0 and counts["errors"] == 0, (artifact, counts)
+            lines.append(f"| {artifact.name} | {counts['tests']} | 0 | 0 | {counts['skipped']} |")
+    native_log = (args.artifacts / "native-contract-and-formatting" / "native-tests.log").read_text()
+    native_counts = re.findall(r"test result: ok\. (\d+) passed; 0 failed", native_log)
+    assert len(native_counts) >= 2, "Native shuffle and JNI test results must be present"
+    report["native_tests_passed"] = sum(int(count) for count in native_counts)
+    lines.extend(["", f"Native shuffle and JNI: {report['native_tests_passed']} tests passed. Clippy checks all targets with warnings denied.", ""])
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "evidence.json").write_text(json.dumps(report, indent=2))
     (args.output / "evidence.md").write_text("\n".join(lines) + "\n")
