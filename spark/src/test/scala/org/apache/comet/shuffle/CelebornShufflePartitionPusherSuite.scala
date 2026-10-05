@@ -802,6 +802,25 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     }
   }
 
+  test("strict transport ownership rejects downgrade for native-backed frames") {
+    val client = new TransportRecordingCelebornPushClient
+    val tracker = CelebornTransportCallbackTracker.tryCreate(client)
+    assert(tracker.ensureTransportOwnership())
+
+    val push = tracker.beginStrictPush()
+    assert(push != null)
+    try {
+      val failure = intercept[IllegalStateException] {
+        client.dataClientFactory.openUninstrumentableConnection()
+      }
+      assert(failure.getMessage.contains("direct native shuffle frame"))
+      assert(push.usesTransportOwnership())
+    } finally {
+      push.close()
+      tracker.close()
+    }
+  }
+
   test("failed bootstrap instrumentation falls back to push-state completion") {
     val client = new TransportRecordingCelebornPushClient
     client.openUninstrumentableConnectionBeforePush = true
