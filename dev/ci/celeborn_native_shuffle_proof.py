@@ -70,6 +70,34 @@ def verify_loaded_celeborn(spark):
     print("CELEBORN_CODE_SOURCE=" + source)
     assert "celeborn-client-spark-3-shaded_2.12-0.7.0" in source, source
 
+    byte_buffer = jvm.java.lang.Class.forName("java.nio.ByteBuffer", False, loader)
+    int_type = jvm.java.lang.Integer.TYPE
+    direct_push = client.getMethod(
+        "pushDataDirect",
+        int_type,
+        int_type,
+        int_type,
+        int_type,
+        byte_buffer,
+        int_type,
+        int_type,
+        int_type,
+    )
+    direct_crc = client.getMethod(
+        "computeBatchCRCDirect",
+        int_type,
+        int_type,
+        int_type,
+        int_type,
+        byte_buffer,
+        int_type,
+    )
+    assert direct_push.getReturnType() == int_type
+    assert direct_crc.getReturnType() == jvm.java.lang.Void.TYPE
+    assert not modifier.isStatic(direct_push.getModifiers())
+    assert not modifier.isStatic(direct_crc.getModifiers())
+    print("CELEBORN_DIRECT_PUSH_CONTRACT_OK")
+
 
 def run_query(spark, root, mode, output):
     root = Path(root)
