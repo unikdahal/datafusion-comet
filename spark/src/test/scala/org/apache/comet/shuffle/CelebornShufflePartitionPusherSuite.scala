@@ -1257,9 +1257,9 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
 
   test("cancelled successful transport does not release another live transport twice") {
     val client = new TransportRecordingCelebornPushClient
-    // The complete reservations are 112 + 64 bytes. Neither individual completion can admit
-    // the next map's 160-byte reservation, regardless of transport callback ordering.
-    val first = new CelebornShufflePartitionPusher(client, 19, 3, encodedAttemptId, 12, 9, 176)
+    // The complete reservations are 80 + 48 bytes. Neither individual completion can admit
+    // the next map's 112-byte reservation, regardless of transport callback ordering.
+    val first = new CelebornShufflePartitionPusher(client, 19, 3, encodedAttemptId, 12, 9, 144)
     val large = frame(24)
     val small = frame()
     val retryBytes = frame(40)
@@ -1270,7 +1270,7 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     assert(cancelledState.inFlightRequestTracker.totalInflightReqs.sum() == 2)
 
     val retry =
-      new CelebornShufflePartitionPusher(client, 19, 3, encodedAttemptId + 1, 12, 9, 176)
+      new CelebornShufflePartitionPusher(client, 19, 3, encodedAttemptId + 1, 12, 9, 144)
     val failure = new AtomicReference[Throwable]()
     val worker = new Thread(() => {
       try retry.pushPartitionData(2, retryBytes, retryBytes.length)
