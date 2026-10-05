@@ -51,6 +51,11 @@ pub trait ShufflePartitionPusher: Send + Sync {
         usize::MAX
     }
 
+    /// Whether an owned native frame can cross JNI without materializing a JVM byte array.
+    fn supports_direct_buffer(&self) -> bool {
+        false
+    }
+
     /// Sends one complete, length-prefixed Arrow IPC shuffle block.
     fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()>;
 
@@ -299,6 +304,10 @@ impl ShufflePartitionPusher for JavaShufflePartitionPusher {
 
     fn max_reservation_size(&self) -> usize {
         self.max_reservation_size
+    }
+
+    fn supports_direct_buffer(&self) -> bool {
+        self.direct_push_method.is_some()
     }
 
     fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()> {
