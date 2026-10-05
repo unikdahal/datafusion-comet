@@ -100,7 +100,8 @@ def main():
             lines.append(f"| {artifact.name} | {counts['tests']} | 0 | 0 | {counts['skipped']} |")
     native_log = (args.artifacts / "native-contract-and-formatting" / "native-tests.log").read_text()
     native_counts = re.findall(r"test result: ok\. (\d+) passed; 0 failed", native_log)
-    assert len(native_counts) >= 2, "Native shuffle and JNI test results must be present"
+    assert "test result: FAILED." not in native_log, "Every native test suite must pass"
+    assert len(native_counts) >= 2 and all(int(count) > 0 for count in native_counts[:2]), "Native shuffle and JNI test results must be present"
     report["native_tests_passed"] = sum(int(count) for count in native_counts)
     lines.extend(["", f"Native shuffle and JNI: {report['native_tests_passed']} tests passed. Clippy checks all targets with warnings denied.", ""])
     args.output.mkdir(parents=True, exist_ok=True)
