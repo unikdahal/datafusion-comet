@@ -27,7 +27,7 @@ under the License.
 | off     | this branch                             | disabled                                   |
 | on      | this branch                             | enabled                                    |
 
-Main versus off isolates dependency changes (iceberg-rust revision and the Parquet backport);
+Main versus off isolates dependency changes (the iceberg-rust revision);
 off versus on isolates the runtime pruning itself. Both sides are built with the same commands
 (`cargo build --release` and `mvnw install -Prelease -Pspark-3.5`) and no CPU-specific flags.
 

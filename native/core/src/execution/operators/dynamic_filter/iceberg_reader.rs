@@ -436,17 +436,18 @@ mod tests {
         let provider = IcebergRuntimePredicateProvider::new(Arc::clone(&dynamic), 0, "id".into());
         let initial_generation = dynamic.snapshot_generation();
         assert_eq!(provider.generation(), initial_generation);
-        assert!(provider.snapshot().unwrap().predicate().is_none());
+        assert!(provider.snapshot().unwrap().into_predicate().is_none());
         dynamic
             .update(Arc::new(BinaryExpr::new(key, Operator::LtEq, lit(42_i64))))
             .unwrap();
         assert_eq!(provider.generation(), initial_generation + 1);
         let snapshot = provider.snapshot().unwrap();
+        let generation = snapshot.generation();
         assert_eq!(
-            snapshot.predicate(),
-            Some(&Reference::new("id").less_than_or_equal_to(Datum::long(42)))
+            snapshot.into_predicate(),
+            Some(Reference::new("id").less_than_or_equal_to(Datum::long(42)))
         );
-        assert_eq!(snapshot.generation(), dynamic.snapshot_generation());
+        assert_eq!(generation, dynamic.snapshot_generation());
     }
 
     #[test]
@@ -474,13 +475,14 @@ mod tests {
             // A continuously changing publication may fail open. Every
             // successful snapshot must carry its expression's generation.
             if let Ok(snapshot) = provider.snapshot() {
-                if snapshot.generation() == initial_generation {
-                    assert!(snapshot.predicate().is_none());
+                let generation = snapshot.generation();
+                if generation == initial_generation {
+                    assert!(snapshot.into_predicate().is_none());
                 } else {
                     assert_eq!(
-                        snapshot.predicate(),
-                        Some(&Reference::new("id").less_than_or_equal_to(Datum::long(
-                            (snapshot.generation() - initial_generation) as i64
+                        snapshot.into_predicate(),
+                        Some(Reference::new("id").less_than_or_equal_to(Datum::long(
+                            (generation - initial_generation) as i64
                         )))
                     );
                 }
@@ -490,8 +492,8 @@ mod tests {
         let snapshot = provider.snapshot().unwrap();
         assert_eq!(snapshot.generation(), initial_generation + 1000);
         assert_eq!(
-            snapshot.predicate(),
-            Some(&Reference::new("id").less_than_or_equal_to(Datum::long(1000)))
+            snapshot.into_predicate(),
+            Some(Reference::new("id").less_than_or_equal_to(Datum::long(1000)))
         );
     }
 
@@ -557,9 +559,9 @@ mod tests {
             .contains("hash_lookup"));
         let provider = IcebergRuntimePredicateProvider::new(dynamic, 0, "id".into());
         assert_eq!(
-            provider.snapshot().unwrap().predicate(),
+            provider.snapshot().unwrap().into_predicate(),
             Some(
-                &Reference::new("id")
+                Reference::new("id")
                     .greater_than_or_equal_to(Datum::int(100))
                     .and(Reference::new("id").less_than_or_equal_to(Datum::int(103)))
             )
