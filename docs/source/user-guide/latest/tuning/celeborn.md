@@ -29,9 +29,10 @@ implementation.
 | `spark.comet.shuffle.rss.maxFrameBytes`    | 64 MiB  | Maximum size of one complete encoded frame. The admission budget can reduce the effective limit.    |
 | `spark.comet.shuffle.rss.maxInFlightBytes` | 512 MiB | Shared memory admission budget for map attempts using the same executor-side remote shuffle client. |
 
-Admission includes Arrow encoding workspace and overlapping native, JNI, and client frame
-copies. An ordinary uncompressed frame needs roughly seven times its size plus schema and
-codec overhead. The default 512 MiB budget accommodates ordinary frames up to the default
+Admission includes Arrow encoding workspace and two overlapping frame-sized representations:
+native plus JNI at the first copy boundary, then JNI plus the client request at the second.
+An ordinary uncompressed frame needs roughly six times its size plus schema and codec overhead.
+The default 512 MiB budget accommodates ordinary frames up to the default
 64 MiB frame limit. Compression reduces transmitted bytes but still needs workspace for the
 uncompressed data. This budget bounds shuffle-write admission, not total executor memory.
 
