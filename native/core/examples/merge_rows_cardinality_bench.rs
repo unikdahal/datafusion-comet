@@ -242,7 +242,7 @@ fn roaring_run(layout: Layout) -> (Duration, usize, usize) {
             + ids.capacity() * std::mem::size_of::<u64>();
         peak_admitted = peak_admitted.max(admitted);
 
-        let batch_seen = RoaringTreemap::from_sorted_iter(ids.into_iter()).unwrap();
+        let batch_seen = RoaringTreemap::from_sorted_iter(ids).unwrap();
         seen |= &batch_seen;
         drop(batch_seen);
 
