@@ -113,15 +113,22 @@ final class CelebornTransportCallbackTracker {
     }
   }
 
-  synchronized Push beginPush() throws IOException {
+  synchronized boolean ensureTransportOwnership() {
     if (closed) {
-      return null;
+      return false;
     }
     if (!initialized) {
       initialized = true;
       factoryHook = installFactoryHook();
     }
-    return factoryHook == null ? null : factoryHook.beginPush();
+    return factoryHook != null && factoryHook.acceptsTransportOwnership();
+  }
+
+  synchronized Push beginPush() throws IOException {
+    if (!ensureTransportOwnership()) {
+      return null;
+    }
+    return factoryHook.beginPush();
   }
 
   synchronized void close() {
