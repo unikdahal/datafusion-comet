@@ -430,6 +430,8 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
         counted = true;
       }
       final Reservation owned = reservation;
+      // Allocate the observer before the client may publish borrowed native memory.
+      CompletableFuture<Integer> result = new CompletableFuture<>();
       final CompletionStage<Integer> stage;
       synchronized (submissionLock) {
         synchronized (lock) {
@@ -453,8 +455,8 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
         }
         transferred = true;
       }
-      CompletableFuture<Integer> result = new CompletableFuture<>();
-      stage.whenComplete(
+      try {
+        stage.whenComplete(
           (accepted, cause) -> {
             IOException error =
                 cause == null && accepted != null && accepted == length + HEADER_BYTES
@@ -477,6 +479,28 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
               result.completeExceptionally(error);
             }
           });
+      } catch (RuntimeException | Error observerFailure) {
+        boolean interrupted = false;
+        try {
+          CompletableFuture<Integer> lifetime = stage.toCompletableFuture();
+          for (;;) {
+            try { lifetime.get(); break; }
+            catch (InterruptedException ignored) { interrupted = true; }
+            catch (ExecutionException retiredFailure) { break; }
+          }
+        } finally {
+          synchronized (lock) {
+            if (!owned.transportReleased) {
+              owned.transportReleased = true;
+              pending--;
+              lock.notifyAll();
+            }
+          }
+          releaseIfRetired(owned);
+          if (interrupted) { Thread.currentThread().interrupt(); }
+        }
+        throw observerFailure;
+      }
       return result;
     } catch (InvocationTargetException cause) {
       IOException error = asIOException("Celeborn buffer submission failed", cause.getCause());
@@ -583,11 +607,12 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       abortWithSuppression(error);
       throw error;
     } catch (ReflectiveOperationException cause) {
-      IOException error = asIOException(
-          "Celeborn mapperEnd failed",
-          cause instanceof InvocationTargetException
-              ? ((InvocationTargetException) cause).getCause()
-              : cause);
+      IOException error =
+          asIOException(
+              "Celeborn mapperEnd failed",
+              cause instanceof InvocationTargetException
+                  ? ((InvocationTargetException) cause).getCause()
+                  : cause);
       abortWithSuppression(error);
       throw error;
     } catch (IOException cause) {
@@ -597,9 +622,12 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   }
 
   private void abortWithSuppression(IOException original) {
-    try { abort(); }
-    catch (IOException cancellation) {
-      if (cancellation != original) { original.addSuppressed(cancellation); }
+    try {
+      abort();
+    } catch (IOException cancellation) {
+      if (cancellation != original) {
+        original.addSuppressed(cancellation);
+      }
     }
   }
 

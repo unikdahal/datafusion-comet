@@ -306,7 +306,9 @@ pub(crate) mod tests {
     }
 
     impl ShufflePartitionPusher for ReservationRecordingPusher {
-        fn frame_copies(&self) -> usize { self.frame_copies.unwrap_or(3) }
+        fn frame_copies(&self) -> usize {
+            self.frame_copies.unwrap_or(3)
+        }
 
         fn max_reservation_size(&self) -> usize {
             self.max_reservation.unwrap_or(usize::MAX)
@@ -1099,8 +1101,12 @@ pub(crate) mod tests {
     fn negotiated_copy_counts_preserve_frames_and_bounded_admission_for_every_codec() {
         let batch = sample_batch(0, 4_096);
         for copies in 1..=3 {
-            for codec in [CompressionCodec::None, CompressionCodec::Lz4Frame,
-                CompressionCodec::Snappy, CompressionCodec::Zstd(1)] {
+            for codec in [
+                CompressionCodec::None,
+                CompressionCodec::Lz4Frame,
+                CompressionCodec::Snappy,
+                CompressionCodec::Zstd(1),
+            ] {
                 let pusher = Arc::new(ReservationRecordingPusher {
                     max_reservation: Some(512 * 1024),
                     capacity: Some(512 * 1024),
@@ -1110,15 +1116,23 @@ pub(crate) mod tests {
                 let mut writer = writer(&batch, codec, pusher.clone(), 1, 64 * 1024);
                 // Direct callbacks execute in a blocking region of the multi-thread runtime.
                 // The callback must still run on the reservation-owning thread.
-                let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2)
-                    .build().unwrap();
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .build()
+                    .unwrap();
                 runtime.block_on(async {
                     write_batches(&mut writer, 0, vec![batch.clone()], &metrics()).unwrap();
                 });
                 let frames = pusher.frames.lock().unwrap();
                 assert!(!frames.is_empty());
-                let decoded = frames.iter().map(|(_, frame)| decode_frame(frame)).collect::<Vec<_>>();
-                assert_eq!(arrow::compute::concat_batches(&batch.schema(), &decoded).unwrap(), batch);
+                let decoded = frames
+                    .iter()
+                    .map(|(_, frame)| decode_frame(frame))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    arrow::compute::concat_batches(&batch.schema(), &decoded).unwrap(),
+                    batch
+                );
                 assert!(frames.iter().all(|(_, frame)| frame.len() <= 64 * 1024));
                 let reservations = pusher.reservations.lock().unwrap();
                 assert!(reservations.iter().all(|bytes| *bytes <= 512 * 1024));

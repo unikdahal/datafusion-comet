@@ -68,9 +68,9 @@ public interface ShufflePartitionPusher {
   }
 
   /**
-   * Pushes one complete, length-prefixed Arrow IPC block for the given output partition.
-   * The JNI bridge supplies a dedicated array; implementations may retain it asynchronously.
-   * Callers must not modify or reuse its contents after submission.
+   * Pushes one complete, length-prefixed Arrow IPC block for the given output partition. The JNI
+   * bridge supplies a dedicated array; implementations may retain it asynchronously. Callers must
+   * not modify or reuse its contents after submission.
    */
   void pushPartitionData(int partitionId, byte[] data, int length) throws IOException;
 }
