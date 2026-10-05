@@ -21,12 +21,9 @@ package org.apache.comet.shuffle
 
 import java.io.IOException
 import java.nio.{ByteBuffer, ByteOrder}
-import java.util.{ArrayList => JArrayList, Arrays, List => JList, Optional}
-import java.util.concurrent.{AbstractExecutorService, ConcurrentHashMap, CountDownLatch, ExecutorService, LinkedBlockingQueue, RejectedExecutionException, TimeUnit}
-import java.util.concurrent.atomic.{AtomicInteger, AtomicLong, AtomicReference, LongAdder}
-import java.util.zip.CRC32
-
-import scala.collection.mutable
+import java.util.Optional
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
 
 import org.scalatest.funsuite.AnyFunSuite
 
@@ -42,8 +39,13 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     new RecordingCelebornUserIdentifier,
     Array[Byte](1, 2, 3))
 
-  private def frame(): Array[Byte] = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN)
-    .putLong(16L).putLong(1L).putLong(2L).array()
+  private def frame(): Array[Byte] = ByteBuffer
+    .allocate(24)
+    .order(ByteOrder.LITTLE_ENDIAN)
+    .putLong(16L)
+    .putLong(1L)
+    .putLong(2L)
+    .array()
   private def pusher(client: AnyRef, limit: Int = 512): CelebornShufflePartitionPusher =
     new CelebornShufflePartitionPusher(client, 19, 3, 7, 12, 9, 128, limit)
 
@@ -165,10 +167,13 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     assert(push.finish()(6) == 24)
   }
   test("missing public contract falls back without modifying private transport state") {
-    assert(CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(classOf[Object]) != null)
+    assert(
+      CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(
+        classOf[Object]) != null)
     intercept[UnsupportedOperationException](pusher(new Object))
-    assert(CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(
-      classOf[RecordingCelebornPushClient]) == null)
+    assert(
+      CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(
+        classOf[RecordingCelebornPushClient]) == null)
   }
   test("encryption fails before acquiring or submitting a frame") {
     val client = new RecordingCelebornPushClient
@@ -230,8 +235,11 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     val push = pusher(client)
     push.pushPartitionData(0, frame(), 24)
     val finished = new CountDownLatch(1)
-    val worker = new Thread(() => { try push.finish() catch { case _: IOException => () }
-      finally finished.countDown() })
+    val worker = new Thread(() => {
+      try push.finish()
+      catch { case _: IOException => () }
+      finally finished.countDown()
+    })
     worker.start()
     assert(!finished.await(100, TimeUnit.MILLISECONDS))
     assert(client.mapperEndCalls.get() == 0)
@@ -246,8 +254,14 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
 class BufferCompletionTestClient extends RecordingCelebornPushClient {
   val done = new java.util.concurrent.CompletableFuture[Integer]()
   val submitted = new CountDownLatch(1)
-  override def pushDataAsync(shuffleId: Int, mapId: Int, attemptId: Int, partitionId: Int,
-      data: ByteBuffer, numMappers: Int, numPartitions: Int): java.util.concurrent.CompletionStage[Integer] = {
+  override def pushDataAsync(
+      shuffleId: Int,
+      mapId: Int,
+      attemptId: Int,
+      partitionId: Int,
+      data: ByteBuffer,
+      numMappers: Int,
+      numPartitions: Int): java.util.concurrent.CompletionStage[Integer] = {
     submitted.countDown(); done
   }
 }
@@ -318,14 +332,31 @@ object RecordingLegacyCelebornClientFactory {
 /** Public so the adapter can resolve and invoke the optional client's API using reflection. */
 class RecordingCelebornPushClient {
   def supportsBufferPush(): Boolean = !cryptoHandler.isPresent
-  def pushDataAsync(shuffleId: Int, mapId: Int, attemptId: Int, partitionId: Int,
-      data: ByteBuffer, numMappers: Int, numPartitions: Int): java.util.concurrent.CompletionStage[Integer] = {
+  def pushDataAsync(
+      shuffleId: Int,
+      mapId: Int,
+      attemptId: Int,
+      partitionId: Int,
+      data: ByteBuffer,
+      numMappers: Int,
+      numPartitions: Int): java.util.concurrent.CompletionStage[Integer] = {
     val bytes = new Array[Byte](data.remaining())
     data.duplicate().get(bytes)
-    java.util.concurrent.CompletableFuture.completedFuture(Int.box(pushOrMergeData(shuffleId,
-      mapId, attemptId, partitionId, bytes, 0, bytes.length, numMappers, numPartitions, true, true)))
+    java.util.concurrent.CompletableFuture.completedFuture(
+      Int.box(
+        pushOrMergeData(
+          shuffleId,
+          mapId,
+          attemptId,
+          partitionId,
+          bytes,
+          0,
+          bytes.length,
+          numMappers,
+          numPartitions,
+          true,
+          true)))
   }
-
 
   val mapperEndCalls: AtomicInteger = new AtomicInteger()
   val cleanupCalls: AtomicInteger = new AtomicInteger()

@@ -52,10 +52,14 @@ public interface ShufflePartitionPusher {
   }
 
   /** Number of overlapping payload representations to reserve before encoding. */
-  default int frameCopies() { return 3; }
+  default int frameCopies() {
+    return 3;
+  }
 
   /** Whether this callback can borrow a direct frame for one synchronous invocation. */
-  default boolean supportsDirectPush() { return false; }
+  default boolean supportsDirectPush() {
+    return false;
+  }
 
   /** Must retire every user of native memory before returning or throwing. */
   default void pushPartitionDataDirect(int partitionId, ByteBuffer data, int length)

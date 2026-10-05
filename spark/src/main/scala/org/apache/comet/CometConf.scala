@@ -881,9 +881,10 @@ object CometConf extends ShimCometConf {
   val COMET_CELEBORN_SHUFFLE_DIRECT_BUFFER_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.shuffle.celeborn.directBuffer.enabled")
       .category(CATEGORY_SHUFFLE)
-      .doc("Borrow native encoded frames through direct buffers for Celeborn shuffle. " +
-        "Avoids the JNI payload copy and waits for each push's retry and transport owners " +
-        "before returning. The default uses asynchronous heap buffer pushes with one JNI copy.")
+      .doc(
+        "Borrow native encoded frames through direct buffers for Celeborn shuffle. " +
+          "Avoids the JNI payload copy and waits for each push's retry and transport owners " +
+          "before returning. The default uses asynchronous heap buffer pushes with one JNI copy.")
       .booleanConf
       .createWithDefault(false)
 

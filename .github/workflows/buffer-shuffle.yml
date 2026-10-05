@@ -127,7 +127,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: unikdahal/celeborn
-          ref: c108191d0699f089b989a656c54977a57937b292
+          ref: 0264bf2442c653659bd4909cdf88828c93b515f6
           path: celeborn
       - name: Build Celeborn master, worker and matching client
         run: |
@@ -176,7 +176,7 @@ jobs:
               --conf spark.celeborn.master.endpoints=127.0.0.1:9097 \
               --conf spark.celeborn.client.spark.stageRerun.enabled=true \
               --conf spark.celeborn.client.spark.shuffle.fallback.policy=NEVER \
-              --conf spark.celeborn.shuffle.integrity.check.enabled=true \
+              --conf spark.celeborn.client.shuffle.integrityCheck.enabled=true \
               --conf spark.shuffle.service.enabled=false \
               --conf spark.comet.exec.enabled=true --conf spark.comet.shuffle.enabled=true \
               --conf spark.comet.shuffle.mode=native \

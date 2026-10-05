@@ -166,7 +166,7 @@ impl RssPartitionWriter {
         let reservation_limit = self.pusher.max_reservation_size();
         let minimum_reservation = metadata_scratch
             .saturating_add(codec_workspace)
-            .saturating_add(60);
+            .saturating_add(20usize.saturating_mul(self.pusher.frame_copies()));
         if minimum_reservation > reservation_limit {
             // Neither schema descriptors nor codec workspace gets smaller when rows are split.
             return Err(Self::size_limit_error(format!(
@@ -213,8 +213,9 @@ impl RssPartitionWriter {
                         .to_string(),
                 )
             })?;
-        let admitted_frame_limit =
-            (reservation_limit.saturating_sub(ipc_scratch) / self.pusher.frame_copies()).min(self.max_frame_size);
+        let admitted_frame_limit = (reservation_limit.saturating_sub(ipc_scratch)
+            / self.pusher.frame_copies())
+        .min(self.max_frame_size);
         if admitted_frame_limit < 20 {
             if batch.num_rows() > 1 {
                 return self.push_split_batch(partition_id, batch, metrics);
@@ -306,8 +307,9 @@ impl RssPartitionWriter {
                     continue;
                 }
                 if batch.num_rows() <= 1 {
-                    let minimum_reservation =
-                        ipc_scratch.saturating_add(minimum_frame_size.saturating_mul(self.pusher.frame_copies()));
+                    let minimum_reservation = ipc_scratch.saturating_add(
+                        minimum_frame_size.saturating_mul(self.pusher.frame_copies()),
+                    );
                     let reason = if admitted_frame_limit < self.max_frame_size {
                         format!(
                             "only {admitted_frame_limit} encoded bytes fit alongside the \
@@ -347,7 +349,16 @@ impl RssPartitionWriter {
                 return Ok(());
             }
             let mut timer = metrics.write_time.timer();
-            let result = self.pusher.push_partition_data(partition_id, frame);
+            // A direct push waits for network/retry retirement. Hand this worker's other
+            // tasks back to Tokio while the native allocation is synchronously borrowed.
+            let direct_on_runtime = self.pusher.frame_copies() == 1
+                && tokio::runtime::Handle::try_current()
+                    .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+            let result = if direct_on_runtime {
+                tokio::task::block_in_place(|| self.pusher.push_partition_data(partition_id, frame))
+            } else {
+                self.pusher.push_partition_data(partition_id, frame)
+            };
             timer.stop();
             // The JNI bridge has popped its local frame on return. Drop the native capacity
             // before acknowledging completion even when the callback failed or completed inline.

@@ -21,9 +21,12 @@ package org.apache.comet.shuffle
 
 import org.scalatest.funsuite.AnyFunSuite
 
-/** Released clients remain safe delegated clients until they implement the public lifetime API. */
+/**
+ * Released clients remain safe delegated clients until they implement the public lifetime API.
+ */
 class CelebornReflectionCompatibilitySuite extends AnyFunSuite {
-  test("released clients cannot enter caller-owned native shuffle without a public lifetime contract") {
+  test(
+    "released clients cannot enter caller-owned native shuffle without a public lifetime contract") {
     val client = Class.forName("org.apache.celeborn.client.ShuffleClientImpl")
     assert(CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(client) != null)
     assert(client.getMethod("cleanup", Integer.TYPE, Integer.TYPE, Integer.TYPE) != null)

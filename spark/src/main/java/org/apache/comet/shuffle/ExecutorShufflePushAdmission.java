@@ -66,9 +66,13 @@ final class ExecutorShufflePushAdmission {
     }
   }
 
-  private synchronized void close() { closed = true; }
+  private synchronized void close() {
+    closed = true;
+  }
 
-  private synchronized boolean isClosed() { return closed; }
+  private synchronized boolean isClosed() {
+    return closed;
+  }
 
   void acquire(int bytes, BooleanSupplier cancelled) throws IOException {
     if (bytes <= 0 || bytes > limit) {
