@@ -126,11 +126,10 @@ its `IcebergCommit` collects the same eight semantic action counters and forward
 summary-aware `BatchWrite.commit` contract. Spark 4.2 uses last-attempt metrics for these counters,
 matching Spark's retry-aware summary semantics.
 
-**Cardinality validation memory use can exceed Spark's:** native MERGE cardinality validation
-currently stores matched target row IDs in an unspillable hash set. For MERGEs with many matched
-rows per task, this can use more memory than Spark's compressed bitmap and may reach the native
-memory limit earlier than Spark. See
-[#6608](https://github.com/apache/datafusion-comet/issues/6608).
+**Cardinality validation memory cannot spill:** native MERGE cardinality validation keeps the
+matched target row IDs in roaring bitmaps, as Spark does, and reserves native memory for each
+input batch before adding its IDs. This state cannot spill, so a MERGE with very many matched rows
+per task can still reach the native memory limit.
 
 **Undeclared physical output order can differ from Spark:** native execution is set-at-a-time. Within
 an input batch it emits rows grouped by the MERGE instruction that produced them, and it processes

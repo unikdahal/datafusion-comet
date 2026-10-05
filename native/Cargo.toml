@@ -66,6 +66,7 @@ datasketches = { version = "=0.3.0", features = ["hll"] }
 futures = "0.3.32"
 num = "0.4"
 rand = "0.10"
+roaring = "0.11"
 # Before upgrading `regex`, complete the Java-parity fixture gate tracked in
 # https://github.com/apache/datafusion-comet/issues/5813.
 regex = "1.12.3"
