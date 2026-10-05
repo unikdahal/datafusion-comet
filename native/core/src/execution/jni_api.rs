@@ -33,7 +33,9 @@ use crate::{
         metrics::utils::update_comet_metric, planner::PhysicalPlanner, serde::to_arrow_datatype,
         shuffle::spark_unsafe::row::process_sorted_row_partition, sort::RdxSort,
     },
-    jvm_bridge::{JVMClasses, JavaShufflePartitionPusher, ShufflePartitionPusher},
+    jvm_bridge::{
+        release_native_shuffle_frame, JVMClasses, JavaShufflePartitionPusher, ShufflePartitionPusher,
+    },
 };
 use std::collections::HashSet;
 
@@ -783,6 +785,18 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_createPlan(
 ///
 /// Keeping callback registration separate preserves the existing `createPlan` JNI ABI for
 /// all local shuffle and non-shuffle callers.
+#[no_mangle]
+pub unsafe extern "system" fn Java_org_apache_comet_shuffle_CelebornShufflePartitionPusher_releaseNativeShuffleFrame(
+    e: EnvUnowned,
+    _class: JClass,
+    handle: jlong,
+) {
+    try_unwrap_or_throw(&e, |_| {
+        unsafe { release_native_shuffle_frame(handle) };
+        Ok(())
+    })
+}
+
 #[no_mangle]
 pub extern "system" fn Java_org_apache_comet_Native_setShufflePartitionPusher(
     e: EnvUnowned,
