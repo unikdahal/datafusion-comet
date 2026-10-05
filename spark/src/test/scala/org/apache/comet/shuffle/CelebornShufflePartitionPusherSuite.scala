@@ -21,7 +21,7 @@ package org.apache.comet.shuffle
 
 import java.io.IOException
 import java.nio.{ByteBuffer, ByteOrder}
-import java.util.Optional
+import java.util.{Arrays, Optional}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -403,6 +403,19 @@ object RecordingLegacyCelebornClientFactory {
     new RecordingCelebornPushClient
   }
 }
+
+final case class RecordedCelebornPush(
+    shuffleId: Int,
+    mapId: Int,
+    attemptId: Int,
+    partitionId: Int,
+    bytes: Array[Byte],
+    offset: Int,
+    length: Int,
+    numMappers: Int,
+    numPartitions: Int,
+    doPush: Boolean,
+    skipCompress: Boolean)
 
 /** Public so the adapter can resolve and invoke the optional client's API using reflection. */
 class RecordingCelebornPushClient {
