@@ -837,6 +837,10 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       int accepted;
       try (CelebornTransportCallbackTracker.Push transportPush =
           transportCallbacks == null ? null : transportCallbacks.beginPush()) {
+        if (transportPush == null || !transportPush.usesTransportOwnership()) {
+          throw new IOException(
+              "Celeborn direct shuffle requires exact transport ownership tracking");
+        }
         synchronized (lifecycleLock) {
           reservation.transportPush = transportPush;
           if (state == State.ABORTED) {
@@ -1539,7 +1543,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
 
   @Override
   public boolean supportsDirectBuffer() {
-    return pushDirectData != null;
+    return pushDirectData != null
+        && transportCallbacks != null
+        && transportCallbacks.ensureTransportOwnership();
   }
 
   @Override
