@@ -840,7 +840,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
 
       int accepted;
       try (CelebornTransportCallbackTracker.Push transportPush =
-          transportCallbacks == null ? null : transportCallbacks.beginPush()) {
+          transportCallbacks == null ? null : transportCallbacks.beginStrictPush()) {
         if (transportPush == null || !transportPush.usesTransportOwnership()) {
           throw new IOException(
               "Celeborn direct shuffle requires exact transport ownership tracking");
