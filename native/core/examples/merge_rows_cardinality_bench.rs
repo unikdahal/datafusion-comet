@@ -220,7 +220,9 @@ fn baseline_run(layout: Layout) -> (Duration, usize) {
 fn roaring_run(layout: Layout) -> (Duration, usize, usize) {
     let start = Instant::now();
     let mut seen = RoaringTreemap::new();
-    let mut retained = 0usize;
+    // Mirror the operator's cached retained-memory accounting: after each successful batch,
+    // retained is the exact estimate used for the next admission instead of rescanning first.
+    let mut retained = roaring_reserved_bytes(&seen);
     let mut peak_admitted = 0usize;
 
     for batch_start in (0..IDS).step_by(BATCH_ROWS) {
@@ -234,15 +236,15 @@ fn roaring_run(layout: Layout) -> (Duration, usize, usize) {
         assert!(ids.windows(2).all(|pair| pair[0] != pair[1]));
         assert!(!seen_contains_any_sorted(&seen, &ids));
 
-        let current = roaring_reserved_bytes(&seen);
-        let admitted = current
+        let admitted = retained
             + roaring_batch_headroom(&seen, &ids)
             + batch_roaring_peak(&ids)
             + ids.capacity() * std::mem::size_of::<u64>();
         peak_admitted = peak_admitted.max(admitted);
 
         let batch_seen = RoaringTreemap::from_sorted_iter(ids.into_iter()).unwrap();
-        seen |= batch_seen;
+        seen |= &batch_seen;
+        drop(batch_seen);
 
         retained = roaring_reserved_bytes(&seen);
         assert!(
