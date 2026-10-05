@@ -457,36 +457,41 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       }
       try {
         stage.whenComplete(
-          (accepted, cause) -> {
-            IOException error =
-                cause == null && accepted != null && accepted == length + HEADER_BYTES
-                    ? null
-                    : asIOException("Celeborn did not accept the complete framed push", cause);
-            synchronized (lock) {
-              if (error == null) {
-                partitionLengths.addAndGet(partition, length);
-              } else if (failure == null && state != State.ABORTED) {
-                failure = error;
+            (accepted, cause) -> {
+              IOException error =
+                  cause == null && accepted != null && accepted == length + HEADER_BYTES
+                      ? null
+                      : asIOException("Celeborn did not accept the complete framed push", cause);
+              synchronized (lock) {
+                if (error == null) {
+                  partitionLengths.addAndGet(partition, length);
+                } else if (failure == null && state != State.ABORTED) {
+                  failure = error;
+                }
+                owned.transportReleased = true;
+                pending--;
+                lock.notifyAll();
               }
-              owned.transportReleased = true;
-              pending--;
-              lock.notifyAll();
-            }
-            releaseIfRetired(owned);
-            if (error == null) {
-              result.complete(accepted);
-            } else {
-              result.completeExceptionally(error);
-            }
-          });
+              releaseIfRetired(owned);
+              if (error == null) {
+                result.complete(accepted);
+              } else {
+                result.completeExceptionally(error);
+              }
+            });
       } catch (RuntimeException | Error observerFailure) {
         boolean interrupted = false;
         try {
           CompletableFuture<Integer> lifetime = stage.toCompletableFuture();
-          for (;;) {
-            try { lifetime.get(); break; }
-            catch (InterruptedException ignored) { interrupted = true; }
-            catch (ExecutionException retiredFailure) { break; }
+          for (; ; ) {
+            try {
+              lifetime.get();
+              break;
+            } catch (InterruptedException ignored) {
+              interrupted = true;
+            } catch (ExecutionException retiredFailure) {
+              break;
+            }
           }
           synchronized (lock) {
             if (!owned.transportReleased) {
@@ -497,7 +502,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
           }
           releaseIfRetired(owned);
         } finally {
-          if (interrupted) { Thread.currentThread().interrupt(); }
+          if (interrupted) {
+            Thread.currentThread().interrupt();
+          }
         }
         throw observerFailure;
       }

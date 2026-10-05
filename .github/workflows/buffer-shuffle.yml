@@ -66,7 +66,7 @@ jobs:
         run: |
           export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:${LD_LIBRARY_PATH:-}"
           cd native
-          cargo test --profile ci -p datafusion-comet-shuffle -p datafusion-comet-jni-bridge
+          cargo test --profile ci -p datafusion-comet-shuffle -p datafusion-comet-jni-bridge 2>&1 | tee ../native-tests.log
           cargo build --profile ci
           cargo clippy --profile ci -p datafusion-comet-shuffle -p datafusion-comet-jni-bridge --all-targets -- -D warnings
       - uses: actions/upload-artifact@v4
@@ -76,8 +76,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-source-formatting
-          path: formatting.patch
+          name: native-contract-and-formatting
+          path: |
+            formatting.patch
+            native-tests.log
   native-release:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -104,10 +106,15 @@ jobs:
           ./mvnw -B -ntp -DskipTests compile
           cd native
           cargo build --release -j 2
+          git rev-parse HEAD > target/release/native-build.txt
+          cargo --version >> target/release/native-build.txt
+          sha256sum target/release/libcomet.so >> target/release/native-build.txt
       - uses: actions/upload-artifact@v4
         with:
           name: native-release-library
-          path: native/target/release/libcomet.so
+          path: |
+            native/target/release/libcomet.so
+            native/target/release/native-build.txt
   spark:
     needs: native
     runs-on: ubuntu-24.04
@@ -195,6 +202,7 @@ jobs:
       - name: Record benchmark environment
         run: |
           mkdir -p /tmp/shuffle-results
+          cp native/target/release/native-build.txt /tmp/shuffle-results/native-build.txt
           lscpu > /tmp/shuffle-results/hardware.txt
           java -version 2> /tmp/shuffle-results/java.txt
       - name: Build Comet and install Spark 3.5.9 runtime

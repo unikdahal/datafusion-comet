@@ -57,10 +57,24 @@ def main():
             lines.append(f"| {name} | {baseline['rows']} | {heap:.3f} | {direct:.3f} | {direct / heap:.3f} |")
             cluster["queries"][name] = query
         lines.extend(["", "Process CPU time and peak resident memory are in the accompanying `.resources.txt` files.", "Stored frame samples and executed plans accompany each result digest.", ""])
+        lines.extend(["| Mode | Process user CPU seconds | Process system CPU seconds | Peak resident MiB |",
+                      "| --- | ---: | ---: | ---: |"])
         for mode in ["heap", "direct"]:
+            resources = {}
+            for line in (directory / (mode + ".resources.txt")).read_text().splitlines():
+                if ": " in line:
+                    key, value = line.strip().rsplit(": ", 1)
+                    resources[key] = value
+            user = float(resources["User time (seconds)"])
+            system = float(resources["System time (seconds)"])
+            rss = int(resources["Maximum resident set size (kbytes)"])
+            cluster[mode + "_resources"] = {"user_cpu_seconds": user,
+                "system_cpu_seconds": system, "peak_resident_kib": rss}
+            lines.append(f"| {mode} | {user:.2f} | {system:.2f} | {rss / 1024:.1f} |")
             samples = json.loads((directory / (mode + ".json.worker-native-frames.json")).read_text())
             assert samples
             cluster[mode + "_stored_frame_samples"] = len(samples)
+        lines.append("")
         report["clusters"][directory.name] = cluster
     assert len(report["clusters"]) == 2, "Both replication settings must have evidence"
     for artifact in args.artifacts.iterdir():

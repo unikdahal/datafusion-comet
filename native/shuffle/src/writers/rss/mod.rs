@@ -1108,8 +1108,8 @@ pub(crate) mod tests {
                 CompressionCodec::Zstd(1),
             ] {
                 let pusher = Arc::new(ReservationRecordingPusher {
-                    max_reservation: Some(512 * 1024),
-                    capacity: Some(512 * 1024),
+                    max_reservation: Some(4 * 1024 * 1024),
+                    capacity: Some(4 * 1024 * 1024),
                     frame_copies: Some(copies),
                     ..ReservationRecordingPusher::default()
                 });
@@ -1135,7 +1135,7 @@ pub(crate) mod tests {
                 );
                 assert!(frames.iter().all(|(_, frame)| frame.len() <= 64 * 1024));
                 let reservations = pusher.reservations.lock().unwrap();
-                assert!(reservations.iter().all(|bytes| *bytes <= 512 * 1024));
+                assert!(reservations.iter().all(|bytes| *bytes <= 4 * 1024 * 1024));
                 assert_eq!(reservations.len(), pusher.releases.load(Ordering::Relaxed));
                 assert!(pusher.outstanding.lock().unwrap().is_none());
             }

@@ -82,6 +82,8 @@ def main():
         if args.mode != "baseline":
             samples = []
             for file in Path("/tmp/celeborn-worker").rglob("*"):
+                if spark.sparkContext.applicationId not in str(file):
+                    continue
                 if not file.is_file() or file.stat().st_size < 32:
                     continue
                 with file.open("rb") as stream:
@@ -92,7 +94,9 @@ def main():
                     samples.append({"path": str(file), "file_bytes": file.stat().st_size,
                         "payload_bytes": payload_bytes, "field_count": fields,
                         "map_id": map_id, "attempt": attempt, "batch_id": batch_id})
-            assert samples, "No complete Comet frames found in live Celeborn worker storage"
+            assert samples, "No complete Comet frames found in this application's live worker storage"
+            if spark.sparkContext.getConf().get("spark.celeborn.client.push.replicate.enabled") == "true":
+                assert any(Path(sample["path"]).name.split(".")[0].endswith("-1") for sample in samples), "No native replica files found"
             Path(args.output + ".worker-native-frames.json").write_text(json.dumps(samples, indent=2))
             print("STORED_NATIVE_FRAMES=" + str(len(samples)))
         Path(args.output).write_text(json.dumps(records, indent=2))
