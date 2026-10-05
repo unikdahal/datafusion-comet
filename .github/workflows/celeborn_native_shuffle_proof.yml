@@ -11,7 +11,9 @@ on:
       - "native/jni-bridge/src/shuffle_partition_pusher.rs"
       - "native/shuffle/src/writers/rss/**"
       - "spark/src/main/java/org/apache/comet/shuffle/**"
+      - "spark/src/main/scala/org/apache/comet/CometConf.scala"
       - "spark/src/main/scala/org/apache/comet/shuffle/**"
+      - "docs/source/user-guide/latest/tuning/celeborn.md"
       - "spark/src/test/celeborn-reflection-compatibility/**"
       - "spark/src/test/scala/org/apache/comet/shuffle/**"
 
