@@ -488,7 +488,6 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
             catch (InterruptedException ignored) { interrupted = true; }
             catch (ExecutionException retiredFailure) { break; }
           }
-        } finally {
           synchronized (lock) {
             if (!owned.transportReleased) {
               owned.transportReleased = true;
@@ -497,6 +496,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
             }
           }
           releaseIfRetired(owned);
+        } finally {
           if (interrupted) { Thread.currentThread().interrupt(); }
         }
         throw observerFailure;
