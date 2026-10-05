@@ -48,6 +48,8 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   private static final int DEFAULT_MAX_IN_FLIGHT_BYTES = 512 * 1024 * 1024;
   private static final long RECONCILIATION_INTERVAL_MILLIS = 10;
 
+  private static native void releaseNativeShuffleFrame(long handle);
+
   // This daemon never owns client state: reconciliations are cancelled and removed once the
   // associated task's transport requests complete.
   private static final ScheduledThreadPoolExecutor COMPLETION_RECONCILER =
@@ -113,6 +115,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     private boolean transportComplete;
     private boolean released;
     private boolean pushStateFallback;
+    private long nativeFrameHandle;
 
     private PushReservation(int bytes, boolean nativeOwned) {
       this.bytes = bytes;
@@ -752,7 +755,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   }
 
   private PushReservation claimEncodingReservation(int frameBytes) throws IOException {
-    int required = Math.addExact(Math.multiplyExact(frameBytes, 3), CELEBORN_BATCH_HEADER_BYTES);
+    int required = Math.addExact(frameBytes, CELEBORN_BATCH_HEADER_BYTES);
     PushReservation reservation = encodingReservation.get();
     if (reservation != null) {
       if (required > reservation.bytes) {
@@ -764,9 +767,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
         }
         reservation.claimed = true;
       }
-      // The native Vec and JNI array still exist after this method and the Java push return.
-      // Keep the entire bound until native explicitly acknowledges their retirement. In
-      // particular, a fast network callback must not free bytes still owned by the encoder.
+      // The native frame is transferred to the direct-buffer request. Admission remains held
+      // until the encoder has retired its reservation and the asynchronous transport/retry owners
+      // have completed.
       return reservation;
     }
     admission.acquire(required, this::isAborted);
@@ -881,9 +884,15 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
 
   private void completeTransport(PushReservation reservation) {
     int released;
+    long nativeFrameHandle;
     synchronized (lifecycleLock) {
       reservation.transportComplete = true;
+      nativeFrameHandle = reservation.nativeFrameHandle;
+      reservation.nativeFrameHandle = 0;
       released = releasableBytes(reservation);
+    }
+    if (nativeFrameHandle != 0) {
+      releaseNativeShuffleFrame(nativeFrameHandle);
     }
     admission.release(released);
   }
@@ -1275,10 +1284,15 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     return numPartitions;
   }
 
-  /** Largest configured frame whose native, JNI, and Celeborn copies fit shared admission. */
+  /** Largest configured frame that fits shared admission. */
   @Override
   public int maxFrameBytes() {
     return maxFrameBytes;
+  }
+
+  @Override
+  public boolean supportsDirectBuffer() {
+    return pushDirectData != null;
   }
 
   @Override
