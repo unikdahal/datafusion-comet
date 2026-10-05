@@ -1058,7 +1058,7 @@ class CometIcebergNativeSuite
         CometConf.COMET_EXEC_ENABLED.key -> "true",
         CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
         val table = "test_cat.db.runtime_file_pruning"
-        spark.sql(s"""CREATE TABLE $table (id INT, payload STRING) USING iceberg
+        spark.sql(s"""CREATE TABLE $table (id INT, extra INT, payload STRING) USING iceberg
           TBLPROPERTIES ('format-version'='2', 'write.distribution-mode'='none',
             'read.split.adaptive-size.enabled'='false', 'read.split.open-file-cost'='1',
             'write.delete.mode'='merge-on-read', 'write.merge.mode'='merge-on-read',
@@ -1069,7 +1069,10 @@ class CometIcebergNativeSuite
             .range(32768)
             .repartitionByRange(8, col("id"))
             .sortWithinPartitions("id")
-            .selectExpr("CAST(id AS INT) AS id", "sha2(cast(id AS STRING), 256) AS payload")
+            .selectExpr(
+              "CAST(id AS INT) AS id",
+              "CAST(id % 97 AS INT) AS extra",
+              "sha2(cast(id AS STRING), 256) AS payload")
             .write
             .format("iceberg")
             .mode("append")
@@ -1095,7 +1098,7 @@ class CometIcebergNativeSuite
           .asInstanceOf[org.apache.iceberg.spark.source.SparkTable]
           .table()
         val initialSnapshot = icebergTable.currentSnapshot().snapshotId()
-        val query = """SELECT /*+ BROADCAST(d) */ sum(length(f.payload))
+        val query = """SELECT /*+ BROADCAST(d) */ sum(length(f.payload) + f.extra * 0)
           FROM file_pruning_fact f JOIN file_pruning_dim d ON f.id = d.id"""
         def checkMode(expectedRows: Long): Unit = {
           spark.read
@@ -1124,6 +1127,23 @@ class CometIcebergNativeSuite
                   s"too few tasks rejected before footer I/O: $pruned; " +
                     s"metrics=${scans.map(_.metrics.map { case (k, v) => k -> v.value })}; " +
                     s"plan=${df.queryExecution.executedPlan}")
+                val idFieldId = icebergTable.schema().findField("id").fieldId()
+                scans.foreach { scan =>
+                  val common = OperatorOuterClass.IcebergScanCommon.parseFrom(scan.commonData)
+                  assert(common.getFileMetricsPoolCount > 0)
+                  common.getFileMetricsPoolList.asScala.foreach { metrics =>
+                    val serializedFieldIds =
+                      metrics.getValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
+                        metrics.getNullValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
+                        metrics.getNanValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
+                        metrics.getLowerBoundsMap.keySet().asScala.map(_.intValue()).toSet ++
+                        metrics.getUpperBoundsMap.keySet().asScala.map(_.intValue()).toSet
+                    assert(
+                      serializedFieldIds == Set(idFieldId),
+                      s"runtime file statistics should contain only join key id=$idFieldId, " +
+                        s"got $serializedFieldIds")
+                  }
+                }
               } else { assert(pruned == 0) }
             }
             bytes
