@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: celeborn-native-shuffle-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CELEBORN_REPO: unikdahal/celeborn
   CELEBORN_REF: feat/comet-native-shuffle-client
