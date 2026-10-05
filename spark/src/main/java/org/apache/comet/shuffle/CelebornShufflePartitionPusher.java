@@ -309,7 +309,8 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     } catch (NoSuchMethodException missing) {
       // Compatibility with an unpatched client keeps the established byte-array path.
     } catch (SecurityException failure) {
-      throw new IllegalArgumentException("Cannot resolve the optional Celeborn direct-push API", failure);
+      throw new IllegalArgumentException(
+          "Cannot resolve the optional Celeborn direct-push API", failure);
     }
 
     Method integrityMethod = null;
@@ -752,7 +753,6 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     }
   }
 
-
   /**
    * Sends one native-owned frame through a direct ByteBuffer.
    *
@@ -950,7 +950,8 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       throw new IOException("Celeborn shuffle frame and transport header exceed the byte limit");
     }
     if (length < MINIMUM_COMET_FRAME_BYTES || length > data.capacity()) {
-      throw new IOException("Celeborn direct shuffle frame length must describe one complete frame");
+      throw new IOException(
+          "Celeborn direct shuffle frame length must describe one complete frame");
     }
     if (length > maxFrameBytes) {
       throw new IOException("Celeborn shuffle frame exceeds its configured maximum frame size");
@@ -998,8 +999,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       throws IOException {
     int frameCopies = direct ? 1 : 3;
     int required =
-        Math.addExact(
-            Math.multiplyExact(frameBytes, frameCopies), CELEBORN_BATCH_HEADER_BYTES);
+        Math.addExact(Math.multiplyExact(frameBytes, frameCopies), CELEBORN_BATCH_HEADER_BYTES);
     PushReservation reservation = encodingReservation.get();
     if (reservation != null) {
       if (required > reservation.bytes) {
