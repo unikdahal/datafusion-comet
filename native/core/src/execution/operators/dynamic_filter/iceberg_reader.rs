@@ -497,6 +497,7 @@ mod tests {
         );
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn extracts_bounds_from_real_hash_membership_filter() {
         use arrow::array::{Int32Array, RecordBatch};

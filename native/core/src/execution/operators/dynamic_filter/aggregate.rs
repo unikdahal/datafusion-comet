@@ -125,6 +125,8 @@ impl IcebergMinMaxFilterExec {
         ))
     }
 
+    // DataFusion offers no replacement: the runtime wiring bypasses its child pushdown.
+    #[allow(deprecated)]
     fn build_runtime_aggregate(&self) -> Result<AggregateExec> {
         let aggregate = Self::fresh_aggregate(&self.template, Arc::clone(self.template.input()))?;
         let predicate = Self::producer(&aggregate);

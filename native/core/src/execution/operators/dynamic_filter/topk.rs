@@ -106,6 +106,8 @@ impl TopKReaderFilterExec {
         )?;
         let reader_filter_attached = reader.is_some();
         let input = reader.unwrap_or_else(|| Arc::clone(self.template.input()));
+        // DataFusion offers no replacement: the runtime wiring bypasses its child pushdown.
+        #[allow(deprecated)]
         let sort = Self::fresh_sort(&self.template, input).with_dynamic_filter_expr(predicate)?;
         Ok(RuntimeTopK {
             sort,

@@ -75,8 +75,9 @@ fn sanitizing_statistics_preserves_cached_metadata_and_indexes() {
         filtered.row_group(0).column(1),
         cached.row_group(0).column(1)
     );
-    assert!(filtered.column_index().is_some());
-    assert_eq!(filtered.column_index(), cached.column_index());
-    assert!(filtered.offset_index().is_some());
-    assert_eq!(filtered.offset_index(), cached.offset_index());
+    assert!(filtered.page_index().is_some());
+    assert!(Arc::ptr_eq(
+        filtered.page_index().unwrap(),
+        cached.page_index().unwrap()
+    ));
 }
