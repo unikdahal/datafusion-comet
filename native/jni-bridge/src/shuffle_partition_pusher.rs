@@ -351,10 +351,9 @@ impl ShufflePartitionPusher for JavaShufflePartitionPusher {
 
         JVMClasses::with_env(move |env| {
             let mut frame = Box::new(NativeShuffleFrame { data });
-            let payload: JByteBuffer = unsafe {
-                env.new_direct_byte_buffer(frame.data.as_mut_ptr(), frame.data.len())
-            }
-            .map_err(CometError::from)?;
+            let payload: JByteBuffer =
+                unsafe { env.new_direct_byte_buffer(frame.data.as_mut_ptr(), frame.data.len()) }
+                    .map_err(CometError::from)?;
             let handle = Box::into_raw(frame) as i64;
             let result = unsafe {
                 env.call_method_unchecked(
