@@ -55,7 +55,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
 
   private final Object shuffleClient;
   private final Method pushOrMergeData;
+  private final Method pushDirectData;
   private final Method computeBatchCRC;
+  private final Method computeBatchCRCDirect;
   private final Method mapperEnd;
   private final Method cleanup;
   private final Method getPushState;
@@ -229,9 +231,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     if (configuredMaxFrameBytes < MINIMUM_COMET_FRAME_BYTES) {
       throw new IllegalArgumentException("Celeborn maximum frame size must fit one Comet frame");
     }
-    if (maxInFlightBytes < 3 * MINIMUM_COMET_FRAME_BYTES + CELEBORN_BATCH_HEADER_BYTES) {
+    if (maxInFlightBytes < MINIMUM_COMET_FRAME_BYTES + CELEBORN_BATCH_HEADER_BYTES) {
       throw new IllegalArgumentException(
-          "Celeborn in-flight byte limit must fit all copies of one Comet frame");
+          "Celeborn in-flight byte limit must fit one Comet frame and its transport header");
     }
 
     String unavailable = nativePushCompletionUnavailableReason(shuffleClient.getClass());
@@ -267,6 +269,32 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     if (pushMethod.getReturnType() != int.class || Modifier.isStatic(pushMethod.getModifiers())) {
       throw new IllegalArgumentException(
           "Celeborn raw-push API must be an instance method returning an int");
+    }
+
+    Method directPushMethod = null;
+    try {
+      directPushMethod =
+          shuffleClient
+              .getClass()
+              .getMethod(
+                  "pushDataDirect",
+                  int.class,
+                  int.class,
+                  int.class,
+                  int.class,
+                  ByteBuffer.class,
+                  int.class,
+                  int.class,
+                  int.class);
+      if (directPushMethod.getReturnType() != int.class
+          || Modifier.isStatic(directPushMethod.getModifiers())) {
+        throw new IllegalArgumentException(
+            "Celeborn direct-push API must be an instance method returning an int");
+      }
+    } catch (NoSuchMethodException missing) {
+      // Compatibility with an unpatched client keeps the established byte-array path.
+    } catch (SecurityException failure) {
+      throw new IllegalArgumentException("Cannot resolve the optional Celeborn direct-push API", failure);
     }
 
     Method integrityMethod = null;
@@ -306,6 +334,35 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
             || Modifier.isStatic(integrityMethod.getModifiers()))) {
       throw new IllegalArgumentException(
           "Celeborn integrity-accounting API must be an instance method returning void");
+    }
+
+    Method directIntegrityMethod = null;
+    if (directPushMethod != null) {
+      try {
+        directIntegrityMethod =
+            shuffleClient
+                .getClass()
+                .getMethod(
+                    "computeBatchCRCDirect",
+                    int.class,
+                    int.class,
+                    int.class,
+                    int.class,
+                    ByteBuffer.class,
+                    int.class);
+        if (directIntegrityMethod.getReturnType() != void.class
+            || Modifier.isStatic(directIntegrityMethod.getModifiers())) {
+          throw new IllegalArgumentException(
+              "Celeborn direct integrity-accounting API must be an instance method returning void");
+        }
+      } catch (NoSuchMethodException missing) {
+        if (integrityMethod != null) {
+          directPushMethod = null;
+        }
+      } catch (SecurityException failure) {
+        throw new IllegalArgumentException(
+            "Cannot resolve the optional Celeborn direct integrity-accounting API", failure);
+      }
     }
 
     Method mapperEndMethod =
@@ -367,7 +424,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
 
     this.shuffleClient = shuffleClient;
     this.pushOrMergeData = pushMethod;
+    this.pushDirectData = directPushMethod;
     this.computeBatchCRC = integrityMethod;
+    this.computeBatchCRCDirect = directIntegrityMethod;
     this.mapperEnd = mapperEndMethod;
     this.cleanup = cleanupMethod;
     this.getPushState = pushStateMethod;
@@ -387,7 +446,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     this.numPartitions = numPartitions;
     this.maxReservationBytes = maxInFlightBytes - CELEBORN_BATCH_HEADER_BYTES;
     this.maxFrameBytes =
-        Math.min(Math.min(configuredMaxFrameBytes, MAX_JVM_ARRAY_BYTES), maxReservationBytes / 3);
+        Math.min(Math.min(configuredMaxFrameBytes, MAX_JVM_ARRAY_BYTES), maxReservationBytes);
     this.partitionLengths = new AtomicLongArray(numPartitions);
   }
 
