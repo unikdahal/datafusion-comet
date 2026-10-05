@@ -246,9 +246,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     if (configuredMaxFrameBytes < MINIMUM_COMET_FRAME_BYTES) {
       throw new IllegalArgumentException("Celeborn maximum frame size must fit one Comet frame");
     }
-    if (maxInFlightBytes < MINIMUM_COMET_FRAME_BYTES + CELEBORN_BATCH_HEADER_BYTES) {
+    if (maxInFlightBytes <= CELEBORN_BATCH_HEADER_BYTES) {
       throw new IllegalArgumentException(
-          "Celeborn in-flight byte limit must fit one Comet frame and its transport header");
+          "Celeborn in-flight byte limit must exceed its transport header");
     }
 
     String unavailable = nativePushCompletionUnavailableReason(shuffleClient.getClass());
@@ -459,9 +459,22 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     this.encodedAttemptId = encodedAttemptId;
     this.numMappers = numMappers;
     this.numPartitions = numPartitions;
+    int frameCopies = directPushMethod == null ? 3 : 1;
+    int minimumRequestBytes =
+        Math.addExact(
+            Math.multiplyExact(frameCopies, MINIMUM_COMET_FRAME_BYTES),
+            CELEBORN_BATCH_HEADER_BYTES);
+    if (maxInFlightBytes < minimumRequestBytes) {
+      throw new IllegalArgumentException(
+          "Celeborn in-flight byte limit must fit "
+              + frameCopies
+              + " complete frame allocation(s) and its transport header");
+    }
     this.maxReservationBytes = maxInFlightBytes - CELEBORN_BATCH_HEADER_BYTES;
     this.maxFrameBytes =
-        Math.min(Math.min(configuredMaxFrameBytes, MAX_JVM_ARRAY_BYTES), maxReservationBytes);
+        Math.min(
+            Math.min(configuredMaxFrameBytes, MAX_JVM_ARRAY_BYTES),
+            maxReservationBytes / frameCopies);
     this.partitionLengths = new AtomicLongArray(numPartitions);
   }
 
