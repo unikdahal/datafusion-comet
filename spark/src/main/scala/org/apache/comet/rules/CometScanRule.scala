@@ -1263,14 +1263,14 @@ object CometScanRule extends Logging {
           }
           probe.foreach { case (input, expression) =>
             directIntegerAttribute(expression)
-              .foreach(readerInput(input, _, allowNullFilters = true))
+              .foreach(key => readerInput(input, key, allowNullFilters = true))
           }
 
         case limit: TakeOrderedAndProjectExec
             if topK && limit.limit > 0 && limit.sortOrder.size == 1 &&
               !SortOrder.orderingSatisfies(limit.child.outputOrdering, limit.sortOrder) =>
           directIntegerAttribute(limit.sortOrder.head.child)
-            .foreach(readerInput(limit.child, _, allowNullFilters = false))
+            .foreach(key => readerInput(limit.child, key, allowNullFilters = false))
 
         case aggregate: BaseAggregateExec
             if minMax && aggregate.groupingExpressions.isEmpty &&
@@ -1281,7 +1281,7 @@ object CometScanRule extends Logging {
             (function.isInstanceOf[Min] || function.isInstanceOf[Max])) {
             function.children.headOption
               .flatMap(directIntegerAttribute)
-              .foreach(readerInput(aggregate.child, _, allowNullFilters = true))
+              .foreach(key => readerInput(aggregate.child, key, allowNullFilters = true))
           }
 
         case _ =>
