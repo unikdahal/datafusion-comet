@@ -315,13 +315,18 @@ jobs:
           WORKER_INSTANCE=1 celeborn/dist/sbin/stop-worker.sh || true
           WORKER_INSTANCE=2 celeborn/dist/sbin/stop-worker.sh || true
           celeborn/dist/sbin/stop-master.sh || true
+      - name: Collect service diagnostics
+        if: always()
+        run: |
+          mkdir -p /tmp/shuffle-results
+          if [ -d celeborn/dist/logs ]; then
+            cp -r celeborn/dist/logs /tmp/shuffle-results/celeborn-logs
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: real-cluster-replicate-${{ matrix.replicate }}
-          path: |
-            /tmp/shuffle-results/**
-            celeborn/dist/logs/**
+          path: /tmp/shuffle-results/**
   evidence:
     needs: [format, native, native-release, spark, released-client, integration]
     runs-on: ubuntu-24.04
