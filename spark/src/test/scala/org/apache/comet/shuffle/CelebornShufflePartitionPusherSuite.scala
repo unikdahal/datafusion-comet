@@ -174,6 +174,9 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     assert(
       CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(
         classOf[RecordingCelebornPushClient]) == null)
+    assert(
+      CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(
+        classOf[BufferCompletionTestClient]) == null)
   }
   test("encryption fails before acquiring or submitting a frame") {
     val client = new RecordingCelebornPushClient
@@ -336,7 +339,7 @@ class BufferCompletionTestClient extends RecordingCelebornPushClient {
       partitionId: Int,
       data: ByteBuffer,
       numMappers: Int,
-      numPartitions: Int): java.util.concurrent.CompletionStage[Integer] = {
+      numPartitions: Int): java.util.concurrent.CompletableFuture[Integer] = {
     submitted.countDown(); done
   }
 }

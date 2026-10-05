@@ -205,7 +205,8 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       Class<?> owner, String name, Class<?> result, Class<?>... arguments) {
     try {
       Method method = owner.getMethod(name, arguments);
-      if (Modifier.isStatic(method.getModifiers()) || method.getReturnType() != result) {
+      if (Modifier.isStatic(method.getModifiers())
+          || !result.isAssignableFrom(method.getReturnType())) {
         throw new IllegalArgumentException("Incompatible public Celeborn " + name + " API");
       }
       return method;
