@@ -599,7 +599,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     try {
       // Admission can wait for an older request's completion. Never hold the submission lock
       // while waiting; callbacks and retries must remain able to make progress.
-      reservation = claimEncodingReservation(length);
+      reservation = claimEncodingReservation(length, false);
     } catch (IOException | RuntimeException | Error failure) {
       abortAndSuppress(failure);
       try {
@@ -777,7 +777,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
 
       PushReservation reservation;
       try {
-        reservation = claimEncodingReservation(length);
+        reservation = claimEncodingReservation(length, true);
       } catch (IOException | RuntimeException | Error failure) {
         abortAndSuppress(failure);
         try {
@@ -994,8 +994,12 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     }
   }
 
-  private PushReservation claimEncodingReservation(int frameBytes) throws IOException {
-    int required = Math.addExact(frameBytes, CELEBORN_BATCH_HEADER_BYTES);
+  private PushReservation claimEncodingReservation(int frameBytes, boolean direct)
+      throws IOException {
+    int frameCopies = direct ? 1 : 3;
+    int required =
+        Math.addExact(
+            Math.multiplyExact(frameBytes, frameCopies), CELEBORN_BATCH_HEADER_BYTES);
     PushReservation reservation = encodingReservation.get();
     if (reservation != null) {
       if (required > reservation.bytes) {
