@@ -32,7 +32,7 @@ def queries(spark, root):
     right = spark.read.parquet(str(Path(root) / "right"))
     joined = left.repartition(16, "k").join(right.repartition(16, "k"), "k")
     yield "join-aggregate", joined.groupBy("k").agg(
-        F.count("*").alias("n"), F.sum("v").alias("v"), F.sum("w").alias("w")
+        F.count("*").alias("n"), F.sum("v").alias("v"), F.sum("w").alias("w"))
     yield "range", left.repartitionByRange(16, "k").groupBy("k").agg(F.sum("v"))
     yield "single", left.repartition(1).agg(F.sum("v"), F.count("*"))
     yield "empty", left.filter("id < 0").repartition(16, "k").groupBy("k").count()

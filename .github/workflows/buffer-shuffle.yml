@@ -30,6 +30,7 @@ jobs:
           java-version: '17'
           cache: maven
       - run: |
+          python -m py_compile dev/ci/celeborn_buffer_integration.py dev/ci/celeborn_buffer_report.py
           (cd native && cargo fmt --all)
           ./mvnw -B -Pspark-3.5,scala-2.12 spotless:apply
           git diff > formatting.patch
