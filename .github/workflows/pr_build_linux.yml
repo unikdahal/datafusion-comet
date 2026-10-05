@@ -321,7 +321,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-java-maven-
 
-      - name: Verify reflected Celeborn internals
+      - name: Verify public Celeborn client compatibility
         env:
           SPARK_LOCAL_HOSTNAME: localhost
           SPARK_LOCAL_IP: 127.0.0.1
