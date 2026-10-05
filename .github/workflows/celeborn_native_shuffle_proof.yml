@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - proof/celeborn-native-shuffle
+      - experiment/celeborn-native-integration
     paths:
       - ".github/workflows/celeborn_native_shuffle_proof.yml"
       - "dev/ci/celeborn_native_shuffle_proof.py"
@@ -15,7 +15,7 @@ permissions:
 
 env:
   CELEBORN_REPO: unikdahal/celeborn
-  CELEBORN_REF: debug/6523-v0.7.0-volatile-completion-fields
+  CELEBORN_REF: feat/comet-native-shuffle-client
   CELEBORN_VERSION: "0.7.0"
   SPARK_VERSION: "3.5.8"
 
