@@ -672,8 +672,9 @@ fn check_cardinality(
     }
 
     // Reserve the retained-set growth plus the temporary sorted-id buffer and batch-local roaring
-    // state before constructing that state. The owned union then moves whole bitmap partitions
-    // where possible instead of repeating a treemap lookup for every row.
+    // state before constructing that state. Keep the batch treemap borrowed during union: the owned
+    // RoaringTreemap union compares full cardinalities before choosing a merge direction, which
+    // adds an avoidable whole-state traversal for highly partitioned Spark row ids.
     let ids_capacity = ids.capacity();
     reserve_seen_batch(seen, &ids, ids_capacity, reservation)?;
     let batch_seen = RoaringTreemap::from_sorted_iter(ids).map_err(|_| {
@@ -682,7 +683,8 @@ fn check_cardinality(
                 .to_string(),
         )
     })?;
-    *seen |= batch_seen;
+    *seen |= &batch_seen;
+    drop(batch_seen);
     sync_seen_reservation(seen, reservation)
 }
 
