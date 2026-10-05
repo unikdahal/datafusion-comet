@@ -229,9 +229,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     if (configuredMaxFrameBytes < MINIMUM_COMET_FRAME_BYTES) {
       throw new IllegalArgumentException("Celeborn maximum frame size must fit one Comet frame");
     }
-    if (maxInFlightBytes < 3 * MINIMUM_COMET_FRAME_BYTES + CELEBORN_BATCH_HEADER_BYTES) {
+    if (maxInFlightBytes < 2 * MINIMUM_COMET_FRAME_BYTES + CELEBORN_BATCH_HEADER_BYTES) {
       throw new IllegalArgumentException(
-          "Celeborn in-flight byte limit must fit all copies of one Comet frame");
+          "Celeborn in-flight byte limit must fit two overlapping Comet frame representations");
     }
 
     String unavailable = nativePushCompletionUnavailableReason(shuffleClient.getClass());
@@ -387,7 +387,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     this.numPartitions = numPartitions;
     this.maxReservationBytes = maxInFlightBytes - CELEBORN_BATCH_HEADER_BYTES;
     this.maxFrameBytes =
-        Math.min(Math.min(configuredMaxFrameBytes, MAX_JVM_ARRAY_BYTES), maxReservationBytes / 3);
+        Math.min(Math.min(configuredMaxFrameBytes, MAX_JVM_ARRAY_BYTES), maxReservationBytes / 2);
     this.partitionLengths = new AtomicLongArray(numPartitions);
   }
 
@@ -693,7 +693,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   }
 
   private PushReservation claimEncodingReservation(int frameBytes) throws IOException {
-    int required = Math.addExact(Math.multiplyExact(frameBytes, 3), CELEBORN_BATCH_HEADER_BYTES);
+    int required = Math.addExact(Math.multiplyExact(frameBytes, 2), CELEBORN_BATCH_HEADER_BYTES);
     PushReservation reservation = encodingReservation.get();
     if (reservation != null) {
       if (required > reservation.bytes) {
@@ -705,9 +705,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
         }
         reservation.claimed = true;
       }
-      // The native Vec and JNI array still exist after this method and the Java push return.
-      // Keep the entire bound until native explicitly acknowledges their retirement. In
-      // particular, a fast network callback must not free bytes still owned by the encoder.
+      // Admission covers the native/JNI overlap and the JNI/Celeborn overlap. The JNI bridge
+      // drops the native Vec before entering this Java push, but the reservation remains held
+      // until native acknowledges the handoff and transport ownership has completed.
       return reservation;
     }
     admission.acquire(required, this::isAborted);
@@ -1216,7 +1216,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     return numPartitions;
   }
 
-  /** Largest configured frame whose native, JNI, and Celeborn copies fit shared admission. */
+  /** Largest configured frame whose two overlapping representations fit shared admission. */
   @Override
   public int maxFrameBytes() {
     return maxFrameBytes;
