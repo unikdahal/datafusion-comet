@@ -34,7 +34,8 @@ use crate::{
         shuffle::spark_unsafe::row::process_sorted_row_partition, sort::RdxSort,
     },
     jvm_bridge::{
-        release_native_shuffle_frame, JVMClasses, JavaShufflePartitionPusher, ShufflePartitionPusher,
+        release_native_shuffle_frame, JVMClasses, JavaShufflePartitionPusher,
+        ShufflePartitionPusher,
     },
 };
 use std::collections::HashSet;
@@ -785,18 +786,6 @@ pub unsafe extern "system" fn Java_org_apache_comet_Native_createPlan(
 ///
 /// Keeping callback registration separate preserves the existing `createPlan` JNI ABI for
 /// all local shuffle and non-shuffle callers.
-#[no_mangle]
-pub unsafe extern "system" fn Java_org_apache_comet_shuffle_CelebornShufflePartitionPusher_releaseNativeShuffleFrame(
-    e: EnvUnowned,
-    _class: JClass,
-    handle: jlong,
-) {
-    try_unwrap_or_throw(&e, |_| {
-        unsafe { release_native_shuffle_frame(handle) };
-        Ok(())
-    })
-}
-
 #[no_mangle]
 pub extern "system" fn Java_org_apache_comet_Native_setShufflePartitionPusher(
     e: EnvUnowned,
@@ -1762,7 +1751,6 @@ impl RemoteShuffleDecoder {
     }
 }
 
-
 #[no_mangle]
 /// Reclaim a native shuffle frame after the JVM transport has released every direct-buffer owner.
 ///
@@ -1775,7 +1763,7 @@ pub unsafe extern "system" fn Java_org_apache_comet_shuffle_CelebornShuffleParti
 ) {
     try_unwrap_or_throw(&e, |_| {
         unsafe {
-            crate::jvm_bridge::release_native_shuffle_frame(frame_handle);
+            release_native_shuffle_frame(frame_handle);
         }
         Ok(())
     })
