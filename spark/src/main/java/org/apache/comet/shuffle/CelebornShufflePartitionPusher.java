@@ -739,6 +739,221 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     }
   }
 
+
+  /**
+   * Sends one native-owned frame through a direct ByteBuffer.
+   *
+   * <p>The native handle is adopted before Celeborn can retain the buffer and is reclaimed only
+   * after both the JNI caller has retired its encoding reservation and all transport/retry owners
+   * have completed.
+   */
+  public void pushPartitionDataDirect(
+      int partitionId, ByteBuffer data, long nativeFrameHandle, int length) throws IOException {
+    if (nativeFrameHandle == 0) {
+      throw new IOException("Celeborn direct shuffle frame requires a native ownership handle");
+    }
+
+    boolean adopted = false;
+    try {
+      requireUnencryptedClient();
+      if (pushDirectData == null) {
+        throw new IOException("Celeborn client does not provide the direct-push API");
+      }
+      validateDirectFrame(partitionId, data, length);
+      beginPush();
+
+      PushReservation reservation;
+      try {
+        reservation = claimEncodingReservation(length);
+      } catch (IOException | RuntimeException | Error failure) {
+        abortAndSuppress(failure);
+        try {
+          endPush();
+        } catch (IOException cleanupFailure) {
+          if (cleanupFailure != failure) {
+            failure.addSuppressed(cleanupFailure);
+          }
+        }
+        throw failure;
+      }
+
+      synchronized (lifecycleLock) {
+        reservation.nativeFrameHandle = nativeFrameHandle;
+        adopted = true;
+      }
+      synchronized (submissionLock) {
+        pushClaimedPartitionDataDirect(partitionId, data, length, reservation);
+      }
+    } catch (IOException | RuntimeException | Error failure) {
+      if (!adopted) {
+        releaseNativeShuffleFrame(nativeFrameHandle);
+      }
+      throw failure;
+    }
+  }
+
+  private void pushClaimedPartitionDataDirect(
+      int partitionId, ByteBuffer data, int length, PushReservation reservation)
+      throws IOException {
+    boolean registered = false;
+    boolean submitted = false;
+    boolean insideClient = false;
+    Throwable failure = null;
+    try {
+      beginClientPush();
+      insideClient = true;
+      awaitPushStateFallbackSlot();
+
+      if (computeBatchCRCDirect != null) {
+        computeBatchCRCDirect.invoke(
+            shuffleClient, shuffleId, mapId, encodedAttemptId, partitionId, data, length);
+      }
+
+      Object pushState = null;
+      ObservedPushState observed = null;
+      if (getPushState != null) {
+        pushState = getPushState.invoke(shuffleClient, mapKey());
+        if (pushState == null) {
+          throw new IOException("Celeborn returned a null push state for this map attempt");
+        }
+        observed = observePushState(pushState);
+        registerPendingPush(reservation, pushState, observed);
+        registered = true;
+      }
+
+      int accepted;
+      try (CelebornTransportCallbackTracker.Push transportPush =
+          transportCallbacks == null ? null : transportCallbacks.beginPush()) {
+        synchronized (lifecycleLock) {
+          reservation.transportPush = transportPush;
+          if (state == State.ABORTED) {
+            throw new IOException(
+                "Celeborn shuffle map attempt was aborted before its client invocation");
+          }
+        }
+        accepted =
+            (int)
+                pushDirectData.invoke(
+                    shuffleClient,
+                    shuffleId,
+                    mapId,
+                    encodedAttemptId,
+                    partitionId,
+                    data,
+                    length,
+                    numMappers,
+                    numPartitions);
+      }
+
+      submitted = accepted > 0;
+      if (submitted && observed != null) {
+        if (clientPushStates != null) {
+          Object current = ((Map<?, ?>) clientPushStates.get(shuffleClient)).get(mapKey());
+          if (current != null && current != pushState) {
+            pushState = current;
+            observed = observePushState(current);
+          }
+        }
+        markSubmitted(reservation, pushState, observed);
+      }
+
+      int minimumAccepted = length + CELEBORN_BATCH_HEADER_BYTES;
+      if (accepted < minimumAccepted) {
+        throw new IOException(
+            "Celeborn direct shuffle push accepted "
+                + accepted
+                + " bytes; expected at least "
+                + minimumAccepted
+                + " including its transport header");
+      }
+      if (accepted > reservation.bytes) {
+        throw new IOException(
+            "Celeborn direct shuffle request exceeds its reserved in-flight byte limit");
+      }
+      throwIfAsyncFailure();
+      if (isAborted()) {
+        throw new IOException("Celeborn shuffle map attempt was aborted during its push");
+      }
+      partitionLengths.addAndGet(partitionId, length);
+    } catch (IllegalAccessException cause) {
+      failure = new IOException("Cannot invoke the public Celeborn direct-push API", cause);
+      abortAndSuppress(failure);
+      throw (IOException) failure;
+    } catch (InvocationTargetException cause) {
+      failure = unwrapFailure("Celeborn direct shuffle push failed", cause);
+      abortAndSuppress(failure);
+      throwFailure(failure);
+      throw new AssertionError("unreachable");
+    } catch (IOException | RuntimeException | Error cause) {
+      failure = cause;
+      abortAndSuppress(cause);
+      throw cause;
+    } finally {
+      if (insideClient) {
+        endClientPush();
+      }
+      IOException deferredCleanupFailure = null;
+      try {
+        if (registered && !submitted) {
+          releaseUnsubmittedPush(reservation);
+        } else if (!registered) {
+          completeTransport(reservation);
+        }
+      } catch (IOException cleanupFailure) {
+        if (failure == null) {
+          deferredCleanupFailure = cleanupFailure;
+        } else if (cleanupFailure != failure) {
+          failure.addSuppressed(cleanupFailure);
+        }
+      }
+      try {
+        endPush();
+      } catch (IOException cleanupFailure) {
+        if (failure == null) {
+          if (deferredCleanupFailure == null) {
+            deferredCleanupFailure = cleanupFailure;
+          } else if (cleanupFailure != deferredCleanupFailure) {
+            deferredCleanupFailure.addSuppressed(cleanupFailure);
+          }
+        } else if (cleanupFailure != failure) {
+          failure.addSuppressed(cleanupFailure);
+        }
+      }
+      if (deferredCleanupFailure != null) {
+        throw deferredCleanupFailure;
+      }
+    }
+  }
+
+  private void validateDirectFrame(int partitionId, ByteBuffer data, int length)
+      throws IOException {
+    if (partitionId < 0 || partitionId >= numPartitions) {
+      throw new IOException("Celeborn output partition is outside this task's partition count");
+    }
+    if (data == null || !data.isDirect()) {
+      throw new IOException("Celeborn direct shuffle frame must use a direct ByteBuffer");
+    }
+    if (length > Integer.MAX_VALUE - CELEBORN_BATCH_HEADER_BYTES) {
+      throw new IOException("Celeborn shuffle frame and transport header exceed the byte limit");
+    }
+    if (length < MINIMUM_COMET_FRAME_BYTES || length > data.capacity()) {
+      throw new IOException("Celeborn direct shuffle frame length must describe one complete frame");
+    }
+    if (length > maxFrameBytes) {
+      throw new IOException("Celeborn shuffle frame exceeds its configured maximum frame size");
+    }
+
+    ByteBuffer frame = data.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+    long declaredBodyLength = frame.getLong(0);
+    if (declaredBodyLength != (long) length - Long.BYTES) {
+      throw new IOException(
+          "Celeborn shuffle frame declares "
+              + declaredBodyLength
+              + " body bytes, but contains "
+              + (length - Long.BYTES));
+    }
+  }
+
   private void validateFrame(int partitionId, byte[] data, int length) throws IOException {
     if (partitionId < 0 || partitionId >= numPartitions) {
       throw new IOException("Celeborn output partition is outside this task's partition count");
