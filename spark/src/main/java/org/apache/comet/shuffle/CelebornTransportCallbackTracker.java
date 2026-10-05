@@ -128,7 +128,14 @@ final class CelebornTransportCallbackTracker {
     if (!ensureTransportOwnership()) {
       return null;
     }
-    return factoryHook.beginPush();
+    return factoryHook.beginPush(false);
+  }
+
+  synchronized Push beginStrictPush() throws IOException {
+    if (!ensureTransportOwnership()) {
+      return null;
+    }
+    return factoryHook.beginPush(true);
   }
 
   synchronized void close() {
@@ -323,6 +330,7 @@ final class CelebornTransportCallbackTracker {
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ConcurrentLinkedQueue<WriteOwnership> writes = new ConcurrentLinkedQueue<>();
     private final Set<OwnedRetry> ownedRetries = ConcurrentHashMap.newKeySet();
+    private final boolean strictTransportOwnership;
     private OwnershipMode ownershipMode = OwnershipMode.TRANSPORT_OWNED;
     private int activeDelegates;
 
@@ -332,8 +340,9 @@ final class CelebornTransportCallbackTracker {
       CANCELLATION_SEALED
     }
 
-    private Push(FactoryHook hook) {
+    private Push(FactoryHook hook, boolean strictTransportOwnership) {
       this.hook = hook;
+      this.strictTransportOwnership = strictTransportOwnership;
       this.previous = hook.current.get();
       hook.current.set(this);
     }
@@ -360,11 +369,16 @@ final class CelebornTransportCallbackTracker {
       }
     }
 
-    private void fallBackToPushState() {
+    private boolean fallBackToPushState() {
       synchronized (hook) {
-        if (ownershipMode == OwnershipMode.TRANSPORT_OWNED) {
-          ownershipMode = OwnershipMode.PUSH_STATE_FALLBACK;
+        if (ownershipMode != OwnershipMode.TRANSPORT_OWNED) {
+          return ownershipMode != OwnershipMode.PUSH_STATE_FALLBACK;
         }
+        if (strictTransportOwnership) {
+          return false;
+        }
+        ownershipMode = OwnershipMode.PUSH_STATE_FALLBACK;
+        return true;
       }
     }
 
@@ -513,11 +527,11 @@ final class CelebornTransportCallbackTracker {
       this.bootstrapsField = bootstrapsField;
     }
 
-    private synchronized Push beginPush() {
+    private synchronized Push beginPush(boolean strictTransportOwnership) {
       if (!active || !acceptingTransportOwnership.get()) {
         return null;
       }
-      Push push = new Push(this);
+      Push push = new Push(this, strictTransportOwnership);
       activePushes.add(push);
       return push;
     }
@@ -537,11 +551,17 @@ final class CelebornTransportCallbackTracker {
     }
 
     private synchronized void disableTransportOwnership(Throwable failure) {
+      boolean strictPushActive = false;
       for (Push push : activePushes) {
-        push.fallBackToPushState();
+        if (!push.fallBackToPushState()) {
+          strictPushActive = true;
+        }
       }
-      if (!acceptingTransportOwnership.compareAndSet(true, false)) {
-        return;
+      acceptingTransportOwnership.set(false);
+      if (strictPushActive) {
+        throw new IllegalStateException(
+            "Cannot downgrade transport ownership while a direct native shuffle frame is active",
+            failure);
       }
       LOG.warn(
           "Cannot instrument a Celeborn transport client; falling back to push-state completion",
@@ -747,8 +767,10 @@ final class CelebornTransportCallbackTracker {
           }
           if (!acceptingTransportOwnership.get()) {
             Push push = current.get();
-            if (push != null) {
-              push.fallBackToPushState();
+            if (push != null && !push.fallBackToPushState()) {
+              throw new IllegalStateException(
+                  "Cannot create an uninstrumented Celeborn connection while a direct native "
+                      + "shuffle frame is active");
             }
             return null;
           }
