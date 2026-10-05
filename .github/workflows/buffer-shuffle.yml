@@ -146,6 +146,10 @@ jobs:
     needs: native
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        replicate: [false, true]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -179,17 +183,23 @@ jobs:
           echo "CELEBORN_JAR=$CELEBORN_JAR" >> "$GITHUB_ENV"
       - name: Start real master and worker
         run: |
-          mkdir -p /tmp/celeborn-worker /tmp/shuffle-results
+          mkdir -p /tmp/celeborn-worker/one /tmp/celeborn-worker/two /tmp/shuffle-results
           cat > celeborn/dist/conf/celeborn-defaults.conf <<'EOF'
           celeborn.master.host 127.0.0.1
           celeborn.master.port 9097
           celeborn.master.endpoints 127.0.0.1:9097
           celeborn.metrics.enabled false
-          celeborn.worker.storage.dirs /tmp/celeborn-worker:disktype=SSD
+          celeborn.worker.storage.dirs /tmp/celeborn-worker/one:disktype=SSD
           celeborn.worker.monitor.disk.enabled false
           EOF
           celeborn/dist/sbin/start-master.sh
-          celeborn/dist/sbin/start-worker.sh
+          CELEBORN_WORKER_MEMORY=512m CELEBORN_WORKER_OFFHEAP_MEMORY=512m WORKER_INSTANCE=1 \
+            celeborn/dist/sbin/start-worker.sh
+          sed 's@/tmp/celeborn-worker/one@/tmp/celeborn-worker/two@' \
+            celeborn/dist/conf/celeborn-defaults.conf > /tmp/worker-two.conf
+          echo 'celeborn.worker.http.port 9095' >> /tmp/worker-two.conf
+          CELEBORN_WORKER_MEMORY=512m CELEBORN_WORKER_OFFHEAP_MEMORY=512m WORKER_INSTANCE=2 \
+            celeborn/dist/sbin/start-worker.sh --properties-file /tmp/worker-two.conf
           for attempt in $(seq 1 30); do
             if (echo > /dev/tcp/127.0.0.1/9097) >/dev/null 2>&1; then break; fi
             sleep 1
@@ -219,6 +229,7 @@ jobs:
               --conf spark.celeborn.client.spark.stageRerun.enabled=true \
               --conf spark.celeborn.client.spark.shuffle.fallback.policy=NEVER \
               --conf spark.celeborn.client.shuffle.integrityCheck.enabled=true \
+              --conf spark.celeborn.client.push.replicate.enabled=${{ matrix.replicate }} \
               --conf spark.shuffle.service.enabled=false \
               --conf spark.comet.exec.enabled=true --conf spark.comet.shuffle.enabled=true \
               --conf spark.comet.shuffle.mode=native \
@@ -251,12 +262,13 @@ jobs:
       - name: Stop services
         if: always()
         run: |
-          celeborn/dist/sbin/stop-worker.sh || true
+          WORKER_INSTANCE=1 celeborn/dist/sbin/stop-worker.sh || true
+          WORKER_INSTANCE=2 celeborn/dist/sbin/stop-worker.sh || true
           celeborn/dist/sbin/stop-master.sh || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: real-cluster-parity-and-measurements
+          name: real-cluster-replicate-${{ matrix.replicate }}
           path: |
             /tmp/shuffle-results/**
             celeborn/dist/logs/**

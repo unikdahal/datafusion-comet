@@ -579,18 +579,27 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       return lengths();
     } catch (InterruptedException cause) {
       Thread.currentThread().interrupt();
-      abort();
-      throw asIOException("Interrupted draining Celeborn pushes", cause);
+      IOException error = asIOException("Interrupted draining Celeborn pushes", cause);
+      abortWithSuppression(error);
+      throw error;
     } catch (ReflectiveOperationException cause) {
-      abort();
-      throw asIOException(
+      IOException error = asIOException(
           "Celeborn mapperEnd failed",
           cause instanceof InvocationTargetException
               ? ((InvocationTargetException) cause).getCause()
               : cause);
+      abortWithSuppression(error);
+      throw error;
     } catch (IOException cause) {
-      abort();
+      abortWithSuppression(cause);
       throw cause;
+    }
+  }
+
+  private void abortWithSuppression(IOException original) {
+    try { abort(); }
+    catch (IOException cancellation) {
+      if (cancellation != original) { original.addSuppressed(cancellation); }
     }
   }
 

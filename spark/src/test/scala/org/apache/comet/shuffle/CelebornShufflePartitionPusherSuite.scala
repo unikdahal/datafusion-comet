@@ -210,6 +210,81 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     first.abort(); second.abort()
     ExecutorShufflePushAdmission.releaseClient(client)
   }
+  test("abort keeps shared admission until the public lifetime completion retires") {
+    val client = new BufferCompletionTestClient
+    val first = pusher(client, 64)
+    val second = pusher(client, 64)
+    first.pushPartitionData(0, frame(), 24)
+    first.abort()
+    val admitted = new CountDownLatch(1)
+    val worker = new Thread(() => {
+      second.reservePartitionData(24)
+      admitted.countDown()
+      second.releasePartitionDataReservation()
+    })
+    worker.start()
+    assert(!admitted.await(100, TimeUnit.MILLISECONDS))
+    client.done.completeExceptionally(new IOException("cancelled after transport retirement"))
+    assert(admitted.await(5, TimeUnit.SECONDS))
+    worker.join(5000)
+    first.abort(); second.abort()
+    assert(client.cleanupCalls.get() == 2)
+    ExecutorShufflePushAdmission.releaseClient(client)
+  }
+  test("duplicate submission cannot return another live frame's reservation") {
+    val client = new BufferCompletionTestClient
+    val first = pusher(client, 64)
+    val second = pusher(client, 64)
+    first.reservePartitionData(48)
+    first.pushPartitionData(0, frame(), 24)
+    intercept[IOException](first.pushPartitionData(0, frame(), 24))
+    first.releasePartitionDataReservation()
+    val admitted = new CountDownLatch(1)
+    val worker = new Thread(() => {
+      second.reservePartitionData(24)
+      admitted.countDown()
+      second.releasePartitionDataReservation()
+    })
+    worker.start()
+    assert(!admitted.await(100, TimeUnit.MILLISECONDS))
+    client.done.completeExceptionally(new IOException("cancelled after owners retired"))
+    assert(admitted.await(5, TimeUnit.SECONDS))
+    worker.join(5000)
+    second.abort()
+    ExecutorShufflePushAdmission.releaseClient(client)
+  }
+  test("mapperEnd failure preserves its cause when cleanup also fails") {
+    val client = new RecordingCelebornPushClient
+    val expected = new IOException("mapper commit failed")
+    client.mapperEndFailure = expected
+    client.cleanupFailure = new IOException("cleanup failed")
+    val push = pusher(client)
+    push.pushPartitionData(0, frame(), 24)
+    assert(intercept[IOException](push.finish()) eq expected)
+    assert(expected.getSuppressed.length == 1)
+    assert(client.cleanupCalls.get() == 1)
+    push.abort()
+    assert(client.cleanupCalls.get() == 1)
+  }
+  test("native configuration negotiates one or two overlapping payload representations") {
+    val directClient = new RecordingCelebornPushClient
+    val direct = new CelebornShufflePartitionPusher(directClient, 19, 3, 7, 12, 9, 128, 40, true)
+    assert(direct.supportsDirectPush())
+    assert(direct.frameCopies() == 1)
+    assert(direct.maxFrameBytes() == 24)
+    direct.reservePartitionData(24)
+    val bytes = ByteBuffer.allocateDirect(24).put(frame())
+    bytes.flip()
+    direct.pushPartitionDataDirect(0, bytes, 24)
+    direct.releasePartitionDataReservation()
+    assert(direct.finish()(0) == 24)
+    val heap = pusher(new RecordingCelebornPushClient, 64)
+    assert(!heap.supportsDirectPush())
+    assert(heap.frameCopies() == 2)
+    assert(heap.maxFrameBytes() == 24)
+    heap.abort()
+    ExecutorShufflePushAdmission.releaseClient(directClient)
+  }
   test("direct JNI invocation stays borrowed until completion even after interruption") {
     val client = new BufferCompletionTestClient
     val push = pusher(client)
