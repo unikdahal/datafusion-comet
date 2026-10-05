@@ -50,6 +50,11 @@ public interface ShufflePartitionPusher {
     return Integer.MAX_VALUE - 8;
   }
 
+  /** Whether this callback can consume native-backed direct buffers without copying the payload. */
+  default boolean supportsDirectBuffer() {
+    return false;
+  }
+
   /** Pushes one complete, length-prefixed Arrow IPC block for the given output partition. */
   void pushPartitionData(int partitionId, byte[] data, int length) throws IOException;
 }
