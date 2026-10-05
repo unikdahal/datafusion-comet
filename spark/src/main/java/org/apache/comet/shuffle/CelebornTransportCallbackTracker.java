@@ -372,7 +372,7 @@ final class CelebornTransportCallbackTracker {
     private boolean fallBackToPushState() {
       synchronized (hook) {
         if (ownershipMode != OwnershipMode.TRANSPORT_OWNED) {
-          return ownershipMode != OwnershipMode.PUSH_STATE_FALLBACK;
+          return true;
         }
         if (strictTransportOwnership) {
           return false;
@@ -582,12 +582,22 @@ final class CelebornTransportCallbackTracker {
         if (registrations != 0) {
           return;
         }
-        installed = false;
         synchronized (this) {
-          active = false;
+          boolean strictPushActive = false;
           for (Push push : activePushes) {
-            push.fallBackToPushState();
+            if (!push.fallBackToPushState()) {
+              strictPushActive = true;
+            }
           }
+          if (strictPushActive) {
+            // The application is shutting down while a direct native frame is still owned by
+            // Netty or a retry. Keep the instrumentation installed so that frame can retire
+            // safely. The owning client is itself being released, so leaving the hook attached is
+            // bounded by that client's lifetime.
+            return;
+          }
+          installed = false;
+          active = false;
         }
         try {
           Object value = bootstrapsField.get(factory);
