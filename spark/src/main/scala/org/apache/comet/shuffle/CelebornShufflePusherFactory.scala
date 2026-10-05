@@ -70,8 +70,8 @@ object CelebornShufflePusherFactory {
     val maxInFlightBytes =
       conf.getSizeAsBytes(limitEntry.key, limitEntry.defaultValue.get.toString)
     require(
-      maxInFlightBytes >= 76 && maxInFlightBytes <= Int.MaxValue,
-      "Celeborn executor in-flight bytes must fit three complete frames and a request header")
+      maxInFlightBytes >= 36 && maxInFlightBytes <= Int.MaxValue,
+      "Celeborn executor in-flight bytes must fit one complete frame and a request header")
 
     new CelebornShufflePartitionPusher(
       client,
