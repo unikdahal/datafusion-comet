@@ -149,7 +149,17 @@ class CometCelebornNativeShuffleWriterSuite extends CometTestBase {
       1,
       1,
       context)
-    assert(limitedAdmission.maxFrameBytes() == 32)
+    assert(limitedAdmission.maxFrameBytes() == 48)
+    val direct = CelebornShufflePusherFactory.create(
+      constrained.clone().set(CometConf.COMET_CELEBORN_SHUFFLE_DIRECT_BUFFER_ENABLED.key, "true"),
+      new RecordingCelebornPushClient,
+      91,
+      1,
+      1,
+      context)
+    assert(direct.supportsDirectPush())
+    assert(direct.maxFrameBytes() == 96)
+    direct.abort()
     limitedFrame.abort()
     limitedAdmission.abort()
   }
