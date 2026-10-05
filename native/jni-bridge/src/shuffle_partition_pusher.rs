@@ -17,7 +17,7 @@
 
 use crate::{check_exception, errors::CometError, JVMClasses};
 use datafusion::common::{DataFusionError, Result};
-use jni::objects::{Global, JMethodID, JObject, JValue};
+use jni::objects::{Global, JByteBuffer, JMethodID, JObject, JValue};
 use jni::signature::{Primitive, ReturnType};
 use jni::Env;
 
@@ -53,6 +53,23 @@ pub trait ShufflePartitionPusher: Send + Sync {
 
     /// Sends one complete, length-prefixed Arrow IPC shuffle block.
     fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()>;
+
+    /// Transfers ownership of an encoded frame when the callback has an asynchronous direct path.
+    fn push_partition_data_owned(&self, partition_id: i32, data: Vec<u8>) -> Result<()> {
+        self.push_partition_data(partition_id, &data)
+    }
+}
+
+pub struct NativeShuffleFrame {
+    data: Vec<u8>,
+}
+
+/// # Safety
+/// The handle must be live, nonzero or zero, and released at most once after Java is done with it.
+pub unsafe fn release_native_shuffle_frame(handle: i64) {
+    if handle != 0 {
+        drop(unsafe { Box::from_raw(handle as *mut NativeShuffleFrame) });
+    }
 }
 
 /// Invokes a task-owned JVM shuffle callback from any native execution thread.
@@ -63,6 +80,7 @@ pub trait ShufflePartitionPusher: Send + Sync {
 pub struct JavaShufflePartitionPusher {
     callback: Global<JObject<'static>>,
     push_method: JMethodID,
+    direct_push_method: Option<JMethodID>,
     reserve_method: JMethodID,
     release_method: JMethodID,
     max_frame_size: usize,
@@ -92,6 +110,40 @@ impl JavaShufflePartitionPusher {
                 jni::jni_sig!("(I[BI)V"),
             )
             .map_err(CometError::from)?;
+        let supports_direct_method = env
+            .get_method_id(
+                &callback_class,
+                jni::jni_str!("supportsDirectBuffer"),
+                jni::jni_sig!("()Z"),
+            )
+            .map_err(CometError::from)?;
+        let supports_direct = unsafe {
+            env.call_method_unchecked(
+                callback,
+                supports_direct_method,
+                ReturnType::Primitive(Primitive::Boolean),
+                &[],
+            )
+        };
+        if let Some(exception) = check_exception(env)? {
+            return Err(exception.into());
+        }
+        let supports_direct = supports_direct
+            .map_err(CometError::from)?
+            .z()
+            .map_err(CometError::from)?;
+        let direct_push_method = if supports_direct {
+            Some(
+                env.get_method_id(
+                    &callback_class,
+                    jni::jni_str!("pushPartitionDataDirect"),
+                    jni::jni_sig!("(ILjava/nio/ByteBuffer;JI)V"),
+                )
+                .map_err(CometError::from)?,
+            )
+        } else {
+            None
+        };
         let reserve_method = env
             .get_method_id(
                 &callback_class,
@@ -167,6 +219,7 @@ impl JavaShufflePartitionPusher {
         Ok(Self {
             callback,
             push_method,
+            direct_push_method,
             reserve_method,
             release_method,
             max_frame_size: configured_maximum as usize,
@@ -278,6 +331,45 @@ impl ShufflePartitionPusher for JavaShufflePartitionPusher {
 
             result.map_err(CometError::from)?;
             Ok(())
+        })
+    }
+
+    fn push_partition_data_owned(&self, partition_id: i32, data: Vec<u8>) -> Result<()> {
+        let Some(direct_push_method) = self.direct_push_method else {
+            return self.push_partition_data(partition_id, &data);
+        };
+        let payload_length = Self::checked_payload_length(partition_id, data.len())?;
+
+        JVMClasses::with_env(move |env| {
+            let mut frame = Box::new(NativeShuffleFrame { data });
+            let payload: JByteBuffer = unsafe {
+                env.new_direct_byte_buffer(frame.data.as_mut_ptr(), frame.data.len())
+            }
+            .map_err(CometError::from)?;
+            let handle = Box::into_raw(frame) as i64;
+            let result = unsafe {
+                env.call_method_unchecked(
+                    self.callback.as_obj(),
+                    direct_push_method,
+                    ReturnType::Primitive(Primitive::Void),
+                    &[
+                        JValue::Int(partition_id).as_jni(),
+                        JValue::Object(payload.as_ref()).as_jni(),
+                        JValue::Long(handle).as_jni(),
+                        JValue::Int(payload_length).as_jni(),
+                    ],
+                )
+            };
+            if let Some(exception) = check_exception(env)? {
+                return Err(exception.into());
+            }
+            match result {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    unsafe { release_native_shuffle_frame(handle) };
+                    Err(CometError::from(error).into())
+                }
+            }
         })
     }
 }
