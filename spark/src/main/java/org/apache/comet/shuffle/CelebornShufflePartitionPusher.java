@@ -460,7 +460,11 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     this.encodedAttemptId = encodedAttemptId;
     this.numMappers = numMappers;
     this.numPartitions = numPartitions;
-    int frameCopies = directPushMethod == null ? 3 : 1;
+    boolean directBuffersAvailable =
+        directPushMethod != null
+            && transportCallbacks != null
+            && transportCallbacks.ensureTransportOwnership();
+    int frameCopies = directBuffersAvailable ? 1 : 3;
     int minimumRequestBytes =
         Math.addExact(
             Math.multiplyExact(frameCopies, MINIMUM_COMET_FRAME_BYTES),
