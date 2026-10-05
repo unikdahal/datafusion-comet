@@ -511,9 +511,17 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
       }
       return result;
     } catch (InvocationTargetException cause) {
-      IOException error = asIOException("Celeborn buffer submission failed", cause.getCause());
+      Throwable original = cause.getCause();
+      submissionFailure = original;
+      failSubmission(original);
+      if (original instanceof RuntimeException) {
+        throw (RuntimeException) original;
+      }
+      if (original instanceof Error) {
+        throw (Error) original;
+      }
+      IOException error = asIOException("Celeborn buffer submission failed", original);
       submissionFailure = error;
-      failSubmission(error);
       throw error;
     } catch (IllegalAccessException cause) {
       IOException error = asIOException("Cannot invoke public Celeborn buffer API", cause);

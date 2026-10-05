@@ -166,6 +166,15 @@ class CelebornShufflePartitionPusherSuite extends AnyFunSuite {
     assert(client.mapperEndCalls.get() == 1)
     assert(push.finish()(6) == 24)
   }
+  test("public submission preserves unchecked failures and cleans up its map attempt") {
+    val client = new RecordingCelebornPushClient
+    val expected = new IllegalStateException("submission rejected")
+    client.failure = expected
+    val push = pusher(client)
+    val bytes = frame()
+    assert(intercept[IllegalStateException](push.pushPartitionData(0, bytes, bytes.length)) eq expected)
+    assert(client.cleanupCalls.get() == 1)
+  }
   test("missing public contract falls back without modifying private transport state") {
     assert(
       CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(
