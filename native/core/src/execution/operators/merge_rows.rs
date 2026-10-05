@@ -585,7 +585,14 @@ fn reserve_seen_batch(
         return Ok(());
     }
 
-    let current_bytes = estimate_seen_memory_size(seen)?;
+    // sync_seen_reservation leaves the reservation equal to the retained roaring estimate after
+    // every successful batch. Reuse that cached value instead of rescanning the entire treemap
+    // before every admission. Only the first batch needs to size the empty state explicitly.
+    let current_bytes = if reservation.size() == 0 {
+        estimate_seen_memory_size(seen)?
+    } else {
+        reservation.size()
+    };
     let growth_headroom = estimate_seen_batch_headroom(seen, ids)?;
     let batch_roaring_peak = estimate_batch_roaring_peak(ids)?;
     let ids_bytes = ids_capacity
