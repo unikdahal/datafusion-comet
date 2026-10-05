@@ -53,6 +53,14 @@ pub trait ShufflePartitionPusher: Send + Sync {
 
     /// Sends one complete, length-prefixed Arrow IPC shuffle block.
     fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()>;
+
+    /// Transfers ownership of one encoded frame to the callback.
+    ///
+    /// The default preserves compatibility with synchronous/test pushers. JVM-backed pushers can
+    /// use the ownership boundary to retire native capacity before creating a second transport copy.
+    fn push_partition_data_owned(&self, partition_id: i32, data: Vec<u8>) -> Result<()> {
+        self.push_partition_data(partition_id, &data)
+    }
 }
 
 /// Invokes a task-owned JVM shuffle callback from any native execution thread.
@@ -272,6 +280,38 @@ impl ShufflePartitionPusher for JavaShufflePartitionPusher {
 
             // Inspect the pending exception before consuming the JNI result so
             // its original throwable survives the DataFusion error boundary.
+            if let Some(exception) = check_exception(env)? {
+                return Err(exception.into());
+            }
+
+            result.map_err(CometError::from)?;
+            Ok(())
+        })
+    }
+
+    fn push_partition_data_owned(&self, partition_id: i32, data: Vec<u8>) -> Result<()> {
+        let payload_length = Self::checked_payload_length(partition_id, data.len())?;
+
+        JVMClasses::with_env(move |env| {
+            let payload = env.byte_array_from_slice(&data).map_err(CometError::from)?;
+            // The JVM array now owns a complete copy. Retire the native frame before Celeborn
+            // allocates and fills its framed request body, so all three representations never
+            // overlap at once.
+            drop(data);
+
+            let result = unsafe {
+                env.call_method_unchecked(
+                    self.callback.as_obj(),
+                    self.push_method,
+                    ReturnType::Primitive(Primitive::Void),
+                    &[
+                        JValue::Int(partition_id).as_jni(),
+                        JValue::Object(&payload).as_jni(),
+                        JValue::Int(payload_length).as_jni(),
+                    ],
+                )
+            };
+
             if let Some(exception) = check_exception(env)? {
                 return Err(exception.into());
             }
