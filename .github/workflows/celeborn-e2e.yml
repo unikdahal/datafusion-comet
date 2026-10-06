@@ -120,7 +120,7 @@ jobs:
           jar = next(Path('bundle').glob('*.jar'))
           native = Path('native/target/release/libcomet.so').read_bytes()
           with zipfile.ZipFile(jar) as archive:
-              embedded = archive.read('org/apache/comet/linux/x86_64/libcomet.so')
+              embedded = archive.read('org/apache/comet/linux/amd64/libcomet.so')
           assert embedded == native
           manifest = {'sha': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
                       'jar_sha256': hashlib.sha256(jar.read_bytes()).hexdigest(),
@@ -129,7 +129,7 @@ jobs:
           Path('bundle/manifest.json').write_text(json.dumps(manifest,indent=2))
           EOF
       - uses: actions/cache/save@v4
-        if: matrix.version == 'original'
+        if: ${{ always() && matrix.version == 'original' }}
         with:
           path: |
             ~/.cargo/registry
@@ -137,6 +137,7 @@ jobs:
             native/target
           key: ${{ runner.os }}-cargo-e2e-original-${{ hashFiles('native/**/Cargo.lock', 'native/**/Cargo.toml') }}
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: comet-${{ matrix.version }}
           path: bundle/**
