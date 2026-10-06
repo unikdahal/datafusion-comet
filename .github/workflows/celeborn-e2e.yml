@@ -205,6 +205,12 @@ jobs:
           run-id: ${{ inputs.binary_run || github.run_id }}
           pattern: celeborn-*
           path: artifacts
+      - name: Compile public JVM allocation helper
+        run: |
+          mkdir -p allocation-classes
+          javac -d allocation-classes dev/ci/CelebornJvmAllocation.java
+          jar cf allocation-metrics.jar -C allocation-classes .
+          echo "ALLOCATION_JAR=$PWD/allocation-metrics.jar" >> "$GITHUB_ENV"
       - name: Free runner disk for replicated wide shuffles
         run: |
           sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet

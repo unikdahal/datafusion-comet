@@ -127,6 +127,9 @@ def main():
                      ["seconds", "cpu_seconds", "driver_rss_bytes", "service_rss_bytes", "combined_rss_bytes", "gc_ms", "gc_count"]},
                      "task_metrics": {key: median([s["task_metrics"][key] for s in samples]) for key in samples[0]["task_metrics"]},
                      "fork_median_seconds": [median([s["seconds"] for s in fork[query_name]["samples"] if not s["warmup"]]) for fork in entries[mode]]}
+                if "jvm_allocated_bytes" in samples[0]:
+                    query_summary[mode]["jvm_allocated_bytes"] = median([s["jvm_allocated_bytes"] for s in samples])
+                    query_summary[mode]["allocation_threads_ended"] = max(s["allocation_threads_ended"] for s in samples)
             for ref, candidate in [("original", "heap"), ("original", "direct"), ("heap", "direct")]:
                 query_summary[candidate + "_vs_" + ref] = comparison(query_summary[ref]["fork_median_seconds"], query_summary[candidate]["fork_median_seconds"])
             original, heap, direct = [query_summary[mode] for mode in entries]

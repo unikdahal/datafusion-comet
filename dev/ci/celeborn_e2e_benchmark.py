@@ -158,6 +158,7 @@ def main():
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--service-pids", default="")
+    parser.add_argument("--allocation", action="store_true")
     args = parser.parse_args()
     spark = SparkSession.builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -192,6 +193,7 @@ def main():
                 group = f"{name}-{repeat}"
                 spark.sparkContext.setJobGroup(group, group)
                 before_gc = gc_stats(spark)
+                allocation_before = json.loads(spark._jvm.org.apache.comet.benchmark.CelebornJvmAllocation.snapshot()) if args.allocation else {}
                 before_cpu = process_stats(pid)[1]
                 before_service_cpu = sum(process_stats(service)[1] for service in services)
                 with MemorySampler(pid, services) as memory:
@@ -200,6 +202,7 @@ def main():
                     elapsed = time.perf_counter() - start
                 after_cpu = process_stats(pid)[1]
                 after_service_cpu = sum(process_stats(service)[1] for service in services)
+                allocation_after = json.loads(spark._jvm.org.apache.comet.benchmark.CelebornJvmAllocation.snapshot()) if args.allocation else {}
                 after_gc = gc_stats(spark)
                 heap = spark._jvm.java.lang.management.ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()
                 stable = sorted((list(row) for row in rows), key=lambda row: json.dumps(row))
@@ -217,6 +220,10 @@ def main():
                           **memory.peak, "rss_sample_count": memory.samples,
                           **{key: after_gc[key] - before_gc[key] for key in before_gc},
                           "sql_metrics": plan_metrics(executed)}
+                if args.allocation:
+                    sample["jvm_allocated_bytes"] = sum(value - allocation_before.get(thread, 0) for thread, value in allocation_after.items())
+                    sample["allocation_threads_ended"] = len(allocation_before.keys() - allocation_after.keys())
+                    sample["allocation_threads_started"] = len(allocation_after.keys() - allocation_before.keys())
                 record["samples"].append(sample)
                 Path(args.output + "." + name + ".plan.txt").write_text(plan)
                 # Checkpoint every query so failures retain the successful measurements too.

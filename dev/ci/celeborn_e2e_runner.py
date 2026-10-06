@@ -151,6 +151,8 @@ def main():
             dist = (args.artifacts / ("celeborn-" + version) / "dist").resolve()
             comet = next((args.artifacts / ("comet-" + version)).glob("*.jar")).resolve()
             client = next((dist / "spark").glob("celeborn-client-spark-3-shaded_2.12-*.jar"))
+            extra = [str(Path(os.environ["ALLOCATION_JAR"]).resolve())] if scenario.get("allocation") else []
+            jars = [str(comet), str(client), *extra]
             shutil.copy(args.artifacts / ("comet-" + version) / "manifest.json", target / "comet-manifest.json")
             shutil.copy(args.artifacts / ("celeborn-" + version) / "manifest.json", target / "celeborn-manifest.json")
             env, pids = start_services(dist, target)
@@ -177,16 +179,16 @@ def main():
                 "spark.memory.offHeap.enabled": "true", "spark.memory.offHeap.size": "1g",
                 "spark.eventLog.enabled": "true", "spark.eventLog.compress": "false",
                 "spark.eventLog.dir": "file:" + str(event_dir.resolve()),
-                "spark.executor.extraClassPath": str(comet) + ":" + str(client),
+                "spark.executor.extraClassPath": ":".join(jars),
             }
             (target / "spark-conf.json").write_text(json.dumps(conf, indent=2))
             conf_args = [item for key, value in conf.items() for item in ["--conf", key + "=" + value]]
             try:
                 run(["/usr/bin/time", "-v", "-o", target / "process-resources.txt", *common,
-                     "--jars", str(comet) + "," + str(client), "--driver-class-path", str(comet) + ":" + str(client),
+                     "--jars", ",".join(jars), "--driver-class-path", ":".join(jars),
                      *conf_args, driver, "--mode", mode, *data_args, "--warmups", args.warmups,
                      "--samples", args.samples, "--service-pids", ",".join(map(str, pids)),
-                     "--output", target / "queries.json"], target / "spark.log", env)
+                     "--output", target / "queries.json", *(["--allocation"] if scenario.get("allocation") else [])], target / "spark.log", env)
                 record = json.loads((target / "queries.json").read_text())
                 if mode != "original":
                     frames = json.loads((target / "queries.json.native-frames.json").read_text())
