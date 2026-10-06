@@ -26,6 +26,7 @@ use datafusion::common::Result;
 use datafusion::datasource::physical_plan::{FileSource, ParquetSource};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::physical_expr::expressions::DynamicFilterPhysicalExpr;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ExecutionPlan;
 
 use super::super::parquet_reader::{
