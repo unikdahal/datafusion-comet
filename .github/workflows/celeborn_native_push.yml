@@ -1,0 +1,306 @@
+name: Celeborn native push validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      passes:
+        description: 'Benchmark passes per mode'
+        default: '5'
+      modes:
+        description: 'Space-separated modes to run (empty: all)'
+        default: ''
+  push:
+    branches:
+      - ci/celeborn-native-push
+
+permissions:
+  contents: read
+
+concurrency:
+  group: celeborn-native-push-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CELEBORN_REPO: unikdahal/celeborn
+  CELEBORN_REF: feat/caller-owned-push
+  CELEBORN_PATCHED_VERSION: 0.7.1-SNAPSHOT
+  CELEBORN_STOCK_VERSION: 0.7.0
+  SPARK_VERSION: 3.5.8
+  RUST_VERSION: stable
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: ${{ env.RUST_VERSION }}
+          jdk-version: "17"
+      - name: Format and report any change
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd native && cargo fmt --all && cd ..
+          ./mvnw -B -q spotless:apply -Pspark-3.5 -Pscala-2.12
+          apt-get install -y -q nodejs npm >/dev/null && npm install -g -q prettier >/dev/null
+          npx prettier "docs/**/*.md" --write >/dev/null
+          git diff > format.patch
+          cat format.patch
+          test ! -s format.patch
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: format-patch
+          path: format.patch
+
+  rust:
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: ${{ env.RUST_VERSION }}
+          jdk-version: "17"
+      - name: Shuffle and JNI bridge tests
+        run: |
+          ./mvnw -B -q compile -pl common -DskipTests -Pspark-3.5
+          cd native
+          cargo test -p datafusion-comet-shuffle rss
+          cargo test -p datafusion-comet-jni-bridge
+          cargo clippy -p datafusion-comet-shuffle -p datafusion-comet-jni-bridge -p datafusion-comet --all-targets -- -D warnings
+
+  jvm:
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+      env:
+        JAVA_TOOL_OPTIONS: '--add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED'
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - name: spark-3.5
+            maven_opts: "-Pspark-3.5 -Pscala-2.12"
+          - name: spark-4.0
+            maven_opts: "-Pspark-4.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: ${{ env.RUST_VERSION }}
+          jdk-version: "17"
+      - uses: ./.github/actions/java-test
+        with:
+          artifact_name: celeborn-${{ matrix.profile.name }}
+          maven_opts: ${{ matrix.profile.maven_opts }}
+          suites: |
+            org.apache.comet.shuffle.CelebornRawPushPartitionPusherSuite
+            org.apache.comet.shuffle.CelebornShufflePartitionPusherSuite
+            org.apache.spark.sql.comet.execution.shuffle.CometCelebornNativeShuffleWriterSuite
+            org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManagerSuite
+            org.apache.spark.sql.comet.execution.shuffle.CometCelebornShufflePlanningSuite
+            org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleFallbackSuite
+            org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleReaderSuite
+            org.apache.spark.sql.comet.execution.shuffle.CometCelebornConcurrentMaterializationSuite
+            org.apache.spark.sql.comet.execution.shuffle.CometCelebornLocalFetchFailureSuite
+            org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleStatisticsSuite
+
+  compat:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [stock, patched]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Build and install the patched Celeborn client
+        if: matrix.client == 'patched'
+        run: |
+          git clone -q --depth 1 -b "$CELEBORN_REF" "https://github.com/$CELEBORN_REPO.git" "$RUNNER_TEMP/celeborn"
+          cd "$RUNNER_TEMP/celeborn"
+          git log --oneline -1
+          ./build/mvn -B -q -Dspotless.check.skip=true -Pspark-3.5 -pl :celeborn-client-spark-3-shaded_2.12 -am install -DskipTests
+          echo "CELEBORN_VERSION=$CELEBORN_PATCHED_VERSION" >> "$GITHUB_ENV"
+          # A local build has no release manifest; check only the API contract against it.
+          echo "COMPAT_SUITES=org.apache.comet.shuffle.CelebornReflectionCompatibilitySuite @admit native shuffle only for clients that push caller-owned buffers" >> "$GITHUB_ENV"
+      - if: matrix.client == 'stock'
+        run: |
+          echo "CELEBORN_VERSION=$CELEBORN_STOCK_VERSION" >> "$GITHUB_ENV"
+          echo "COMPAT_SUITES=org.apache.comet.shuffle.CelebornReflectionCompatibilitySuite" >> "$GITHUB_ENV"
+      - name: Reflection compatibility against the actual client JAR
+        env:
+          SPARK_LOCAL_HOSTNAME: localhost
+          SPARK_LOCAL_IP: 127.0.0.1
+        run: |
+          SPARK_HOME="$GITHUB_WORKSPACE" ./mvnw -B clean test \
+            -Pspark-3.5,scala-2.12,celeborn-reflection-compatibility \
+            -Dceleborn.version="$CELEBORN_VERSION" \
+            -Dtest=none \
+            -Dsuites="$COMPAT_SUITES" \
+            -DfailIfNoTests=false
+
+  e2e:
+    name: Spark 3.5 + real Celeborn cluster (correctness and performance)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install tools
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+          python -m pip install -q "pyspark==${SPARK_VERSION}" tpchgen-cli
+          SPARK_HOME=$(python -c 'import os, pyspark; print(os.path.dirname(pyspark.__file__))')
+          echo "SPARK_HOME=$SPARK_HOME" >> "$GITHUB_ENV"
+          sudo mkdir -p /mnt/work && sudo chown "$USER" /mnt/work
+          nproc; free -g; df -h /mnt
+      - name: Build Comet
+        run: |
+          make release-nogit PROFILES="-Pspark-3.5 -Pscala-2.12 -Dspark.version=${SPARK_VERSION}"
+          COMET_JAR=$(ls spark/target/comet-spark-spark3.5_2.12-*.jar | grep -v -e sources -e tests | tail -1)
+          echo "COMET_JAR=$GITHUB_WORKSPACE/$COMET_JAR" >> "$GITHUB_ENV"
+      - name: Build the patched Celeborn client and fetch stock Celeborn
+        run: |
+          cd /mnt/work
+          git clone -q -b "$CELEBORN_REF" "https://github.com/$CELEBORN_REPO.git" celeborn
+          (cd celeborn && echo "CELEBORN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV" && \
+            ./build/mvn -B -q -Dspotless.check.skip=true -Pspark-3.5 -pl :celeborn-client-spark-3-shaded_2.12 -am package -DskipTests)
+          PATCHED=$(ls celeborn/client-spark/spark-3-shaded/target/celeborn-client-spark-3-shaded_2.12-${CELEBORN_PATCHED_VERSION}.jar)
+          echo "PATCHED_CLIENT=/mnt/work/$PATCHED" >> "$GITHUB_ENV"
+          curl -sSfLO "https://repo1.maven.org/maven2/org/apache/celeborn/celeborn-client-spark-3-shaded_2.12/${CELEBORN_STOCK_VERSION}/celeborn-client-spark-3-shaded_2.12-${CELEBORN_STOCK_VERSION}.jar"
+          echo "STOCK_CLIENT=/mnt/work/celeborn-client-spark-3-shaded_2.12-${CELEBORN_STOCK_VERSION}.jar" >> "$GITHUB_ENV"
+          TGZ="apache-celeborn-${CELEBORN_STOCK_VERSION}-bin.tgz"
+          curl -sSfL --retry 3 --max-time 900 -o "$TGZ" "https://dlcdn.apache.org/celeborn/celeborn-${CELEBORN_STOCK_VERSION}/$TGZ" || \
+            curl -sSfL --retry 3 --max-time 1800 -o "$TGZ" "https://archive.apache.org/dist/celeborn/celeborn-${CELEBORN_STOCK_VERSION}/$TGZ"
+          tar xzf "$TGZ"
+          echo "CELEBORN_SERVER=/mnt/work/apache-celeborn-${CELEBORN_STOCK_VERSION}-bin" >> "$GITHUB_ENV"
+      - name: Start a stock Celeborn master and worker
+        run: |
+          mkdir -p /mnt/work/celeborn-data
+          cat > "$CELEBORN_SERVER/conf/celeborn-defaults.conf" <<'CONF'
+          celeborn.master.host 127.0.0.1
+          celeborn.master.port 9097
+          celeborn.master.endpoints 127.0.0.1:9097
+          celeborn.metrics.enabled false
+          celeborn.worker.storage.dirs /mnt/work/celeborn-data:disktype=SSD
+          celeborn.worker.monitor.disk.enabled false
+          celeborn.worker.flusher.buffer.size 256k
+          CONF
+          cat > "$CELEBORN_SERVER/conf/celeborn-env.sh" <<'CONF'
+          CELEBORN_MASTER_MEMORY=1g
+          CELEBORN_WORKER_MEMORY=1g
+          CELEBORN_WORKER_OFFHEAP_MEMORY=3g
+          CONF
+          "$CELEBORN_SERVER/sbin/start-master.sh"
+          "$CELEBORN_SERVER/sbin/start-worker.sh"
+          for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/9097) 2>/dev/null && break; sleep 1; done
+          sleep 10
+          tail -n 20 "$CELEBORN_SERVER"/logs/*worker*.out || true
+      - name: Generate TPC-H SF1
+        run: |
+          tpchgen-cli -s 1 --format parquet --output-dir /mnt/work/data/tpch
+          ls -la /mnt/work/data/tpch
+          "$SPARK_HOME/bin/spark-submit" --master 'local[4]' --driver-memory 4g dev/ci/celeborn_bench.py \
+            --mode prepare --data /mnt/work/data --queries benchmarks/tpc/queries/tpch \
+            --output /dev/null --prepare-only
+          du -sh /mnt/work/data/*
+      - name: Run all modes, interleaved
+        run: |
+          set -euo pipefail
+          PASSES="${{ github.event.inputs.passes || '5' }}"
+          mkdir -p /mnt/work/results /mnt/work/logs
+          COMMON=(--master 'local[4]' --driver-memory 6g
+            --conf spark.ui.enabled=true
+            --conf spark.sql.shuffle.partitions=32
+            --conf spark.serializer=org.apache.spark.serializer.KryoSerializer
+            --conf spark.celeborn.master.endpoints=127.0.0.1:9097
+            --conf spark.celeborn.client.spark.stageRerun.enabled=true
+            --conf spark.celeborn.client.spark.shuffle.fallback.policy=NEVER
+            --conf spark.shuffle.service.enabled=false)
+          COMET=(--conf spark.plugins=org.apache.spark.CometPlugin
+            --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometCelebornShuffleManager
+            --conf spark.comet.exec.enabled=true
+            --conf spark.comet.shuffle.enabled=true
+            --conf spark.comet.shuffle.mode=native
+            --conf spark.memory.offHeap.enabled=true
+            --conf spark.memory.offHeap.size=4g)
+          MODES="${{ github.event.inputs.modes || '' }}"
+          run_mode() {
+            local mode=$1 pass=$2 client=$3 expect=$4; shift 4
+            if [ -n "$MODES" ] && [[ " $MODES " != *" $mode "* ]]; then return 0; fi
+            local jars="$client"; [ -n "${WITH_COMET:-}" ] && jars="$COMET_JAR:$client"
+            "$SPARK_HOME/bin/spark-submit" "${COMMON[@]}" --driver-class-path "$jars" \
+              --conf "spark.driver.extraJavaOptions=-XX:+UseG1GC -Xlog:gc:file=/mnt/work/logs/${mode}-${pass}.gc.log" "$@" \
+              dev/ci/celeborn_bench.py --mode "$mode" --data /mnt/work/data \
+              --queries benchmarks/tpc/queries/tpch --expect-native "$expect" \
+              --output "/mnt/work/results/${mode}-${pass}.json" \
+              > "/mnt/work/logs/${mode}-${pass}.log" 2>&1 || { tail -n 200 "/mnt/work/logs/${mode}-${pass}.log"; exit 1; }
+            grep '^BENCH' "/mnt/work/logs/${mode}-${pass}.log" | tail -n 3
+            if grep -q "Fallback to vanilla Spark SortShuffleManager" "/mnt/work/logs/${mode}-${pass}.log"; then
+              echo "Celeborn fell back to local Spark shuffle in $mode" >&2; exit 1
+            fi
+          }
+          for pass in $(seq 1 "$PASSES"); do
+            WITH_COMET= run_mode spark "$pass" "$STOCK_CLIENT" no \
+              --conf spark.shuffle.manager=org.apache.spark.shuffle.celeborn.SparkShuffleManager
+            WITH_COMET=1 run_mode comet-stock-client "$pass" "$STOCK_CLIENT" no "${COMET[@]}"
+            WITH_COMET=1 run_mode comet-native-jvm-copy "$pass" "$PATCHED_CLIENT" yes "${COMET[@]}" \
+              --conf spark.comet.shuffle.rss.nativeFrames.enabled=false
+            WITH_COMET=1 run_mode comet-native-zero-copy "$pass" "$PATCHED_CLIENT" yes "${COMET[@]}"
+            # Peak RSS with a smaller off-heap pool, with and without Celeborn.
+            WITH_COMET=1 run_mode comet-native-zero-copy-offheap2g "$pass" "$PATCHED_CLIENT" yes "${COMET[@]}" \
+              --conf spark.memory.offHeap.size=2g
+            WITH_COMET=1 run_mode comet-native-local-disk-offheap2g "$pass" "$STOCK_CLIENT" yes "${COMET[@]}" \
+              --conf spark.memory.offHeap.size=2g \
+              --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
+            # Comet native shuffle to local disk, without Celeborn: attributes native memory use.
+            WITH_COMET=1 run_mode comet-native-local-disk "$pass" "$STOCK_CLIENT" yes "${COMET[@]}" \
+              --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
+            # Same bytes in flight as the copy mode, which admits each frame twice.
+            WITH_COMET=1 run_mode comet-native-zero-copy-256m "$pass" "$PATCHED_CLIENT" yes "${COMET[@]}" \
+              --conf spark.comet.shuffle.rss.maxInFlightBytes=256m
+          done
+          grep -h "Native Celeborn shuffle requires" /mnt/work/logs/comet-stock-client-1.log | head -3 || true
+      - name: Report
+        run: |
+          {
+            echo "# Native Comet shuffle through a real Celeborn cluster"
+            echo
+            echo "Spark ${SPARK_VERSION} local[4], TPC-H SF1 + shuffle-heavy query; stock Celeborn ${CELEBORN_STOCK_VERSION} master/worker."
+            echo "Patched client: ${CELEBORN_REPO}@${CELEBORN_SHA}; Comet: ${GITHUB_SHA}."
+            echo
+            echo "Modes: \`spark\` = vanilla Spark + Celeborn; \`comet-stock-client\` = Comet with the released ${CELEBORN_STOCK_VERSION} client (native shuffle falls back to Spark/Celeborn shuffle);"
+            echo "\`comet-native-jvm-copy\` = native shuffle via pushRawData with JVM array copies; \`comet-native-zero-copy\` = native shuffle via pushRawData from native memory; \`comet-native-zero-copy-256m\` = the same with half the in-flight budget, i.e. the same in-flight frame bytes as the copy mode; \`comet-native-local-disk\` = Comet native shuffle to local disk without Celeborn, for reference."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          python dev/ci/celeborn_bench_report.py /mnt/work/results "$(ls /mnt/work/results | head -1 | sed -E 's/-[0-9]+\.json$//')" "$GITHUB_STEP_SUMMARY" | tee /mnt/work/report.md
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: celeborn-e2e-results
+          path: |
+            /mnt/work/results
+            /mnt/work/logs
+            /mnt/work/report.md
+      - name: Celeborn logs
+        if: always()
+        run: |
+          tail -n 100 "$CELEBORN_SERVER"/logs/* || true
+          du -sh /mnt/work/celeborn-data || true

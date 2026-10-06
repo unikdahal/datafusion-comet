@@ -31,8 +31,8 @@ below apply only to Comet's native remote shuffle, which requires a Celeborn cli
 Admission includes Arrow encoding workspace and the encoded frame. Celeborn sends the frame
 from native memory, so it stays admitted, at its encoded size, until Celeborn releases it after
 the last send or retry. An ordinary uncompressed frame needs roughly five times its size plus
-schema and codec overhead while it is encoded. The default 512 MiB budget accommodates ordinary frames up to the default
-64 MiB frame limit. Compression reduces transmitted bytes but still needs workspace for the
+schema and codec overhead while it is encoded. The default 512 MiB budget accommodates
+ordinary frames up to the default 64 MiB frame limit. Compression reduces transmitted bytes but still needs workspace for the
 uncompressed data. This budget bounds shuffle-write admission, not total executor memory.
 Frames waiting for Celeborn live in native memory outside Spark's off-heap pool, so allow for
 up to `spark.comet.shuffle.rss.maxInFlightBytes` on top of `spark.memory.offHeap.size` when

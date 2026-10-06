@@ -904,8 +904,9 @@ object CometConf extends ShimCometConf {
           "scratch and overlapping native, JNI, and remote shuffle frame copies; a Celeborn " +
           "client that pushes caller-owned buffers needs only the native frame. " +
           "A frame must fit its codec and Arrow workspace as well as its encoded bytes; " +
-          "ordinary uncompressed frames need approximately seven times their size plus " +
-          "schema and transport overhead. Compressed frames also reserve workspace for " +
+          "ordinary uncompressed frames need approximately seven times their size, or five " +
+          "times with a client that pushes caller-owned buffers, plus schema and transport " +
+          "overhead. Compressed frames also reserve workspace for " +
           "their uncompressed data. Admission is acquired before encoding. " +
           "Encrypted native RSS is not supported; " +
           "use ordinary Spark shuffle when spark.io.encryption.enabled is true.")
