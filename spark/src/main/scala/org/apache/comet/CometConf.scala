@@ -901,7 +901,8 @@ object CometConf extends ShimCometConf {
       .doc(
         "Maximum shuffle bytes admitted concurrently by native Comet map attempts sharing " +
           "an executor-side remote shuffle client. Admission includes native encoding " +
-          "scratch and overlapping native, JNI, and remote shuffle frame copies. " +
+          "scratch and overlapping native, JNI, and remote shuffle frame copies; a Celeborn " +
+          "client that pushes caller-owned buffers needs only the native frame. " +
           "A frame must fit its codec and Arrow workspace as well as its encoded bytes; " +
           "ordinary uncompressed frames need approximately seven times their size plus " +
           "schema and transport overhead. Compressed frames also reserve workspace for " +
@@ -914,6 +915,18 @@ object CometConf extends ShimCometConf {
         "Remote shuffle in-flight byte limit must fit three complete frame copies and a " +
           "Celeborn request header")
       .createWithDefault(512L * 1024 * 1024)
+
+  val COMET_SHUFFLE_RSS_NATIVE_FRAMES_ENABLED: ConfigEntry[Boolean] =
+    conf("spark.comet.shuffle.rss.nativeFrames.enabled")
+      .category(CATEGORY_SHUFFLE)
+      .doc(
+        "When the Celeborn client can push caller-owned buffers, hand encoded native shuffle " +
+          "frames to it directly from native memory instead of copying them into JVM arrays. " +
+          "Each in-flight frame is then admitted once instead of once per copy. Disable only " +
+          "to compare against the copying path.")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
 
   val COMET_DEBUG_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.debug.enabled")

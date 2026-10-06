@@ -33,7 +33,9 @@ use crate::{
         metrics::utils::update_comet_metric, planner::PhysicalPlanner, serde::to_arrow_datatype,
         shuffle::spark_unsafe::row::process_sorted_row_partition, sort::RdxSort,
     },
-    jvm_bridge::{JVMClasses, JavaShufflePartitionPusher, ShufflePartitionPusher},
+    jvm_bridge::{
+        release_native_frame, JVMClasses, JavaShufflePartitionPusher, ShufflePartitionPusher,
+    },
 };
 use std::collections::HashSet;
 
@@ -816,6 +818,21 @@ pub extern "system" fn Java_org_apache_comet_Native_setShufflePartitionPusher(
         exec_context.shuffle_partition_pusher = Some(Arc::new(pusher));
         Ok(())
     })
+}
+
+/// Frees a shuffle frame lent to the JVM once its transport no longer references it.
+///
+/// # Safety
+///
+/// `handle` must come from a frame pushed through `pushNativeFrame` and must be released exactly
+/// once. The JVM guarantees both, so this never throws.
+#[no_mangle]
+pub unsafe extern "system" fn Java_org_apache_comet_shuffle_NativeShuffleFrames_release(
+    _e: EnvUnowned,
+    _class: JClass,
+    handle: jlong,
+) {
+    release_native_frame(handle);
 }
 
 /// Skipping is opt-in (`spark.comet.exec.aggregate.skipPartial.enabled`): once DataFusion's probe

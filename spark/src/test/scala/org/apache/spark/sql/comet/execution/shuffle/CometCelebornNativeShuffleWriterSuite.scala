@@ -22,6 +22,8 @@ package org.apache.spark.sql.comet.execution.shuffle
 import java.io.IOException
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
+import scala.jdk.CollectionConverters._
+
 import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 import org.apache.spark.executor.CommitDeniedException
 import org.apache.spark.shuffle.{BaseShuffleHandle, FetchFailedException, IndexShuffleBlockResolver, ShuffleBlockResolver, ShuffleHandle, ShuffleManager, ShuffleReader, ShuffleReadMetricsReporter, ShuffleWriteMetricsReporter, ShuffleWriter}
@@ -29,7 +31,7 @@ import org.apache.spark.sql.CometTestBase
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import org.apache.comet.{CometConf, CometShuffleSizeLimitException}
-import org.apache.comet.shuffle.{CelebornShufflePartitionPusher, CelebornShufflePusherFactory, RecordingCelebornPushClient}
+import org.apache.comet.shuffle.{CelebornMapOutputPusher, CelebornShufflePartitionPusher, CelebornShufflePusherFactory, RecordingCelebornPushClient, RecordingCelebornRawPushClient}
 
 /** Exercises real Spark map tasks, native RSS planning, and the Celeborn map lifecycle. */
 class CometCelebornNativeShuffleWriterSuite extends CometTestBase {
@@ -119,6 +121,42 @@ class CometCelebornNativeShuffleWriterSuite extends CometTestBase {
     assert(defaultPusher.maxReservationBytes() == configuredPusher.maxReservationBytes())
     defaultPusher.abort()
     configuredPusher.abort()
+  }
+
+  test("the factory selects the raw push API and frame handoff when available") {
+    val context = TaskContext.empty()
+    val conf = new SparkConf(false)
+    val native = CelebornShufflePusherFactory.create(
+      conf,
+      new RecordingCelebornRawPushClient,
+      31,
+      1,
+      1,
+      context)
+    assert(native.isInstanceOf[org.apache.comet.shuffle.CelebornRawPushPartitionPusher])
+    assert(native.acceptsNativeFrames())
+    assert(native.frameCopies() == 1)
+
+    val copying = CelebornShufflePusherFactory.create(
+      conf.clone().set(CometConf.COMET_SHUFFLE_RSS_NATIVE_FRAMES_ENABLED.key, "false"),
+      new RecordingCelebornRawPushClient,
+      32,
+      1,
+      1,
+      context)
+    assert(!copying.acceptsNativeFrames())
+    assert(copying.frameCopies() == 2)
+
+    val legacy =
+      CelebornShufflePusherFactory.create(
+        conf,
+        new RecordingCelebornPushClient,
+        33,
+        1,
+        1,
+        context)
+    assert(legacy.isInstanceOf[CelebornShufflePartitionPusher])
+    Seq(native, copying, legacy).foreach(_.abort())
   }
 
   test("configured frame limits and executor admission both constrain native RSS callbacks") {
@@ -241,6 +279,66 @@ class CometCelebornNativeShuffleWriterSuite extends CometTestBase {
       assert(results.forall(!_._7))
       assert(results.forall(_._8 == 2))
       assert(results.forall(_._9))
+    }
+  }
+
+  test("native frames reach a raw-push client from native memory and are released once") {
+    withNativeShuffleDependency() { dependency =>
+      val numMappers = dependency.rdd.getNumPartitions
+      def run(nativeFrames: Boolean, deferReleases: Boolean) =
+        spark.sparkContext.runJob(
+          dependency.rdd,
+          (context: TaskContext, inputs: Iterator[Product2[Int, ColumnarBatch]]) => {
+            val client = new RecordingCelebornRawPushClient
+            client.deferReleases = deferReleases
+            val pusher = CelebornShufflePusherFactory.create(
+              SparkEnv.get.conf
+                .clone()
+                .set(
+                  CometConf.COMET_SHUFFLE_RSS_NATIVE_FRAMES_ENABLED.key,
+                  nativeFrames.toString),
+              client,
+              93,
+              numMappers,
+              dependency.partitioner.numPartitions,
+              context)
+            val writer = CometCelebornNativeShuffleWriterSuite.newWriter(
+              dependency,
+              context,
+              pusher,
+              commitAuthorized = true)
+            writer.write(inputs)
+            writer.stop(success = true)
+            // A transport may release frames after the task has finished, on another thread.
+            val releaser = new Thread(() => client.releaseAll())
+            releaser.start()
+            releaser.join()
+            val pushes = client.pushes.asScala.toSeq
+            (
+              writer.getPartitionLengths().toSeq,
+              pushes.map(push => (push.partitionId, push.bytes.toSeq)),
+              pushes.forall(_.direct == nativeFrames),
+              client.releases.get() == pushes.length)
+          })
+
+      Seq(false, true).foreach { deferReleases =>
+        val native = run(nativeFrames = true, deferReleases)
+        val copied = run(nativeFrames = false, deferReleases)
+        assert(native.exists(_._2.nonEmpty))
+        assert(native.forall(_._3), "native frames must be pushed as direct buffers")
+        assert(copied.forall(_._3), "copied frames must be pushed as heap buffers")
+        assert(native.forall(_._4) && copied.forall(_._4), "every frame is released once")
+        assert(native.map(_._1).toSeq == copied.map(_._1).toSeq)
+        assert(native.map(_._2).toSeq == copied.map(_._2).toSeq, "frame bytes must not change")
+        native.foreach { case (lengths, pushes, _, _) =>
+          val pushed = pushes.groupBy(_._1).map { case (partition, frames) =>
+            partition -> frames.map(_._2.length.toLong).sum
+          }
+          lengths.zipWithIndex.foreach { case (length, partition) =>
+            assert(length == pushed.getOrElse(partition, 0L))
+          }
+        }
+      }
     }
   }
 
@@ -713,7 +811,7 @@ private[shuffle] object CometCelebornNativeShuffleWriterSuite {
   def newWriter(
       dependency: CometShuffleDependency[Int, ColumnarBatch, ColumnarBatch],
       context: TaskContext,
-      pusher: CelebornShufflePartitionPusher,
+      pusher: CelebornMapOutputPusher,
       commitAuthorized: Boolean = false,
       commitValidator: () => Boolean = () => true,
       onSizeLimitExceeded: Throwable => Unit = _ => ())

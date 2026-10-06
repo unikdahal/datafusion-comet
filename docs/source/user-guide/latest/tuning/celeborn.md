@@ -20,20 +20,23 @@ under the License.
 # Remote Shuffle with Celeborn
 
 See the [Celeborn guide](../celeborn.md) for setup and client compatibility. The settings
-below apply only to Comet's native remote shuffle, which is unavailable with the currently
-released Celeborn 0.6.x and 0.7.x clients. They do not tune Celeborn's existing Spark shuffle
-implementation.
+below apply only to Comet's native remote shuffle, which requires a Celeborn client that provides
+`ShuffleClient#pushRawData`. They do not tune Celeborn's existing Spark shuffle implementation.
 
 | Setting                                    | Default | Purpose                                                                                             |
 | ------------------------------------------ | ------- | --------------------------------------------------------------------------------------------------- |
 | `spark.comet.shuffle.rss.maxFrameBytes`    | 64 MiB  | Maximum size of one complete encoded frame. The admission budget can reduce the effective limit.    |
 | `spark.comet.shuffle.rss.maxInFlightBytes` | 512 MiB | Shared memory admission budget for map attempts using the same executor-side remote shuffle client. |
 
-Admission includes Arrow encoding workspace and overlapping native, JNI, and client frame
-copies. An ordinary uncompressed frame needs roughly seven times its size plus schema and
-codec overhead. The default 512 MiB budget accommodates ordinary frames up to the default
+Admission includes Arrow encoding workspace and the encoded frame. Celeborn sends the frame
+from native memory, so it stays admitted, at its encoded size, until Celeborn releases it after
+the last send or retry. An ordinary uncompressed frame needs roughly five times its size plus
+schema and codec overhead while it is encoded. The default 512 MiB budget accommodates ordinary frames up to the default
 64 MiB frame limit. Compression reduces transmitted bytes but still needs workspace for the
 uncompressed data. This budget bounds shuffle-write admission, not total executor memory.
+Frames waiting for Celeborn live in native memory outside Spark's off-heap pool, so allow for
+up to `spark.comet.shuffle.rss.maxInFlightBytes` on top of `spark.memory.offHeap.size` when
+sizing executor memory overhead.
 
 Comet splits batches between rows. If a row, schema, or encoding workspace cannot fit, Comet
 replaces the exchange with its local native shuffle writer before downstream tasks consume

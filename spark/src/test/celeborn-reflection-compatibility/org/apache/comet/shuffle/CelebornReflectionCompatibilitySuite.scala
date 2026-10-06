@@ -187,6 +187,17 @@ class CelebornReflectionCompatibilitySuite extends AnyFunSuite {
     assert(reason.contains("volatile"), reason)
   }
 
+  test("admit native shuffle only for clients that push caller-owned buffers") {
+    val providesRawPush = shuffleClient.getMethods.exists(_.getName == "pushRawData")
+    val reason = CelebornRawPushPartitionPusher.unavailableReason(shuffleClient)
+    if (providesRawPush) {
+      assert(reason == null)
+    } else {
+      assert(reason != null, s"Celeborn $celebornVersion must not use the raw push API")
+      assert(reason.contains("pushRawData"), reason)
+    }
+  }
+
   private def load(name: String): Class[_] = Class.forName(name, false, classLoader)
 
   private def instanceField(owner: Class[_], name: String, expectedType: Class[_]): Field = {

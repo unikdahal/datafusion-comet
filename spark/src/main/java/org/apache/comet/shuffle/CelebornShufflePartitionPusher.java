@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 /** Adapts complete Comet shuffle frames to an existing, task-owned Celeborn shuffle client. */
-public final class CelebornShufflePartitionPusher implements ShufflePartitionPusher {
+public final class CelebornShufflePartitionPusher implements CelebornMapOutputPusher {
 
   private static final int CELEBORN_BATCH_HEADER_BYTES = 4 * Integer.BYTES;
   private static final int MINIMUM_COMET_FRAME_BYTES = 2 * Long.BYTES;

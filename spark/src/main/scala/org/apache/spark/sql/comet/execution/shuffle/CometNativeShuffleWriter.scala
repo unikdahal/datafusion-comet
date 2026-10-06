@@ -19,6 +19,7 @@
 
 package org.apache.spark.sql.comet.execution.shuffle
 
+import java.nio.ByteBuffer
 import java.nio.file.{Files, Paths}
 import java.util.concurrent.{ScheduledFuture, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
@@ -42,7 +43,7 @@ import org.apache.comet.{CometConf, CometExecIterator, CometShuffleSizeLimitExce
 import org.apache.comet.serde.{OperatorOuterClass, PartitioningOuterClass, QueryPlanSerde}
 import org.apache.comet.serde.OperatorOuterClass.{CompressionCodec, Operator}
 import org.apache.comet.serde.operator.schema2Proto
-import org.apache.comet.shuffle.{CelebornShufflePartitionPusher, CelebornShufflePusherFactory, ShufflePartitionPusher}
+import org.apache.comet.shuffle.{CelebornMapOutputPusher, CelebornShufflePusherFactory, ShufflePartitionPusher}
 
 /**
  * Drives the native shuffle write in a single [[CometExecIterator]] per partition. The plan is
@@ -533,7 +534,7 @@ private[shuffle] object CometNativeShuffleWriter {
 
 /** A task-owned remote destination whose callback never crosses map-attempt boundaries. */
 private[shuffle] final case class CelebornNativeShuffleDestination(
-    pusher: CelebornShufflePartitionPusher,
+    pusher: CelebornMapOutputPusher,
     maxFrameBytes: Int,
     numPartitions: Int,
     commitAuthorized: Boolean = false,
@@ -562,6 +563,17 @@ private[shuffle] final case class CelebornNativeShuffleDestination(
     override def maxFrameBytes(): Int = CelebornNativeShuffleDestination.this.maxFrameBytes
 
     override def maxReservationBytes(): Int = pusher.maxReservationBytes()
+
+    override def frameCopies(): Int = pusher.frameCopies()
+
+    override def acceptsNativeFrames(): Boolean = pusher.acceptsNativeFrames()
+
+    override def pushNativeFrame(
+        partitionId: Int,
+        frame: ByteBuffer,
+        releaseHandle: Long,
+        retainedBytes: Int): Unit =
+      pusher.pushNativeFrame(partitionId, frame, releaseHandle, retainedBytes)
   }
 }
 
@@ -573,7 +585,7 @@ private[shuffle] object CelebornNativeShuffleDestination {
 
   private[shuffle] def watchForCancellation(
       taskContext: TaskContext,
-      pusher: CelebornShufflePartitionPusher,
+      pusher: CelebornMapOutputPusher,
       reportFailure: Throwable => Unit): ScheduledFuture[_] = {
     val handled = new AtomicBoolean(false)
     cancellationWatcher.scheduleWithFixedDelay(

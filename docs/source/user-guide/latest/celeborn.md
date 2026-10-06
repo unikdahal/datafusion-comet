@@ -24,12 +24,17 @@ remote storage for shuffle data.
 
 ## Support Status
 
-Comet's [native shuffle](tuning/shuffle.md#native-shuffle) through Celeborn is unavailable
-with the currently released Celeborn 0.6.x and 0.7.x clients.
-Setting `spark.comet.shuffle.mode=native` does not change that.
+Comet's [native shuffle](tuning/shuffle.md#native-shuffle) through Celeborn requires a Celeborn
+client that provides `ShuffleClient#pushRawData`. That API pushes a caller-owned buffer without
+copying it and tells the caller exactly once when the client no longer references it, which
+native shuffle needs both to bound its in-flight memory and to free each frame. With such a
+client, Comet sends encoded shuffle frames to Celeborn directly from native memory.
 
-You can still use Comet to accelerate supported scans, filters, and other query operators.
-Shuffle is handled by Celeborn's existing Spark integration.
+The currently released Celeborn 0.6.x and 0.7.x clients do not provide this API. With them,
+setting `spark.comet.shuffle.mode=native` does not change the shuffle path: you can still use
+Comet to accelerate supported scans, filters, and other query operators, and shuffle is handled
+by Celeborn's existing Spark integration. The API is client-only, so a client that provides it
+works with Celeborn 0.7 masters and workers.
 
 ## Setup
 
@@ -58,8 +63,10 @@ Spark 3.5 loads the shuffle manager before the executor's user-JAR classloader i
 Supplying only `--jars` or `--packages` does not ensure that the manager and Celeborn client
 are available at that point; use the startup classpaths above.
 
-This example enables Comet with Spark shuffle backed by Celeborn, as described in
-[Support Status](#support-status).
+This example enables Comet with Celeborn. With a released client, shuffle uses Celeborn's
+Spark integration, as described in [Support Status](#support-status). With a client that
+provides `ShuffleClient#pushRawData`, also set `spark.comet.shuffle.mode=native` and
+`spark.celeborn.client.spark.stageRerun.enabled=true` to use native shuffle.
 
 ```shell
 $SPARK_HOME/bin/spark-shell \
@@ -87,9 +94,9 @@ Keep your deployment's existing Celeborn authentication, storage, and recovery s
 
 1. Run a query containing a shuffle, then inspect its executed plan in the Spark SQL UI or
    with `df.explain("formatted")`. With AQE, inspect the final plan after an action completes.
-   Supported operators can appear as Comet nodes, while the shuffle appears as a plain
-   `Exchange`. This is the expected result with the currently released Celeborn 0.6.x and
-   0.7.x clients.
+   Supported operators can appear as Comet nodes. Native shuffle appears as `CometExchange`;
+   with the currently released Celeborn 0.6.x and 0.7.x clients the shuffle appears as a plain
+   `Exchange`.
 2. Inspect shuffle read/write bytes, records, and time in the Spark UI. Spark's remote-read
    byte counters alone cannot confirm that Celeborn stored the data: they also count local
    shuffle files fetched from another executor. Celeborn's fallback policy may select local
@@ -123,11 +130,11 @@ The absence of a fallback message does not prove that data was stored in Celebor
 
 ## Troubleshooting
 
-| Symptom                                                            | What to check                                                                                                                                                                                                            |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Celeborn classes cannot be loaded when the application starts      | Supply the matching shaded client on both driver and executor startup classpaths. Comet does not bundle it.                                                                                                              |
-| The plan contains `Exchange` rather than `CometExchange`           | This is expected with the currently released Celeborn 0.6.x and 0.7.x clients. Shuffle uses Celeborn's existing Spark integration; other supported operators can still run in Comet.                                     |
-| Setting `spark.comet.shuffle.mode=native` does not change the plan | Native shuffle is disabled with these clients. Changing this setting does not enable it.                                                                                                                                 |
-| No Comet operators appear in the plan                              | Check that the Comet plugin and native library loaded, that Comet execution is enabled, and that the query uses supported operators. Inspect the driver fallback explanations.                                           |
-| Shuffle data is stored locally instead of in Celeborn              | Check Celeborn's fallback policy, partition-count threshold, worker availability, and quota. An effective `spark.celeborn.client.spark.shuffle.fallback.policy=ALWAYS` selects local shuffle; `AUTO` can also select it. |
-| Changing the shuffle manager in the SQL session has no effect      | Set the manager before creating the Spark context. Restart the application to change it.                                                                                                                                 |
+| Symptom                                                            | What to check                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Celeborn classes cannot be loaded when the application starts      | Supply the matching shaded client on both driver and executor startup classpaths. Comet does not bundle it.                                                                                                                             |
+| The plan contains `Exchange` rather than `CometExchange`           | Native shuffle requires a client that provides `ShuffleClient#pushRawData`; released 0.6.x and 0.7.x clients do not. Shuffle then uses Celeborn's existing Spark integration; other supported operators can still run in Comet.         |
+| Setting `spark.comet.shuffle.mode=native` does not change the plan | Check the fallback reasons with `spark.comet.explain.fallback.enabled=true`. Native shuffle is disabled with clients that lack `ShuffleClient#pushRawData`, with `spark.io.encryption.enabled=true`, and without Celeborn stage reruns. |
+| No Comet operators appear in the plan                              | Check that the Comet plugin and native library loaded, that Comet execution is enabled, and that the query uses supported operators. Inspect the driver fallback explanations.                                                          |
+| Shuffle data is stored locally instead of in Celeborn              | Check Celeborn's fallback policy, partition-count threshold, worker availability, and quota. An effective `spark.celeborn.client.spark.shuffle.fallback.policy=ALWAYS` selects local shuffle; `AUTO` can also select it.                |
+| Changing the shuffle manager in the SQL session has no effect      | Set the manager before creating the Spark context. Restart the application to change it.                                                                                                                                                |

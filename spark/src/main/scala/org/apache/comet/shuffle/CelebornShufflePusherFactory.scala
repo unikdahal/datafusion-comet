@@ -59,7 +59,7 @@ object CelebornShufflePusherFactory {
       celebornShuffleId: Int,
       numMappers: Int,
       numPartitions: Int,
-      taskContext: TaskContext): CelebornShufflePartitionPusher = {
+      taskContext: TaskContext): CelebornMapOutputPusher = {
     requireUnencryptedNativeShuffle(conf)
     val frameEntry = CometConf.COMET_SHUFFLE_RSS_MAX_FRAME_BYTES
     val maxFrameBytes = conf.getSizeAsBytes(frameEntry.key, frameEntry.defaultValue.get.toString)
@@ -72,6 +72,20 @@ object CelebornShufflePusherFactory {
     require(
       maxInFlightBytes >= 76 && maxInFlightBytes <= Int.MaxValue,
       "Celeborn executor in-flight bytes must fit three complete frames and a request header")
+
+    if (CelebornRawPushPartitionPusher.unavailableReason(client.getClass) == null) {
+      val nativeFramesEntry = CometConf.COMET_SHUFFLE_RSS_NATIVE_FRAMES_ENABLED
+      return new CelebornRawPushPartitionPusher(
+        client,
+        celebornShuffleId,
+        taskContext.partitionId(),
+        encodeAttemptNumber(taskContext.stageAttemptNumber(), taskContext.attemptNumber()),
+        numMappers,
+        numPartitions,
+        maxFrameBytes.toInt,
+        maxInFlightBytes.toInt,
+        conf.getBoolean(nativeFramesEntry.key, nativeFramesEntry.defaultValue.get))
+    }
 
     new CelebornShufflePartitionPusher(
       client,
@@ -376,6 +390,6 @@ object CelebornShufflePusherFactory {
 
 /** A task-owned pusher, its application-owned client, and the resolved shuffle generation. */
 final case class ResolvedCelebornShufflePusher(
-    pusher: CelebornShufflePartitionPusher,
+    pusher: CelebornMapOutputPusher,
     client: AnyRef,
     celebornShuffleId: Int)
