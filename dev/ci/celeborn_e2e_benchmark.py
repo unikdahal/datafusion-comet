@@ -51,23 +51,24 @@ def queries(spark, root, partitions):
 
 def process_stats(pid):
     fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-    return int(fields[21]) * os.sysconf("SC_PAGE_SIZE"), (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    return int(fields[21]) * os.sysconf("SC_PAGE_SIZE"), (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK"), int(fields[17])
 
 
 class MemorySampler:
     def __init__(self, driver, services):
         self.driver = driver
         self.services = services
-        self.peak = {"driver_rss_bytes": 0, "service_rss_bytes": 0, "combined_rss_bytes": 0}
+        self.peak = {"driver_rss_bytes": 0, "service_rss_bytes": 0, "combined_rss_bytes": 0, "driver_threads": 0}
         self.samples = 0
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
 
     def sample(self):
-        driver = process_stats(self.driver)[0]
+        stats = process_stats(self.driver)
+        driver = stats[0]
         service = sum(process_stats(pid)[0] for pid in self.services)
         for key, value in [("driver_rss_bytes", driver), ("service_rss_bytes", service),
-                           ("combined_rss_bytes", driver + service)]:
+                           ("combined_rss_bytes", driver + service), ("driver_threads", stats[2])]:
             self.peak[key] = max(self.peak[key], value)
         self.samples += 1
 
@@ -200,6 +201,7 @@ def main():
                 after_cpu = process_stats(pid)[1]
                 after_service_cpu = sum(process_stats(service)[1] for service in services)
                 after_gc = gc_stats(spark)
+                heap = spark._jvm.java.lang.management.ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()
                 stable = sorted((list(row) for row in rows), key=lambda row: json.dumps(row))
                 digest = hashlib.sha256(json.dumps(stable, separators=(",", ":")).encode()).hexdigest()
                 executed = query._jdf.queryExecution().executedPlan()
@@ -211,6 +213,7 @@ def main():
                 sample = {"job_group": group, "repeat": repeat, "warmup": repeat < args.warmups,
                           "seconds": elapsed, "cpu_seconds": after_cpu - before_cpu,
                           "service_cpu_seconds": after_service_cpu - before_service_cpu,
+                          "jvm_heap_used_after_bytes": heap.getUsed(), "jvm_heap_committed_after_bytes": heap.getCommitted(),
                           **memory.peak, "rss_sample_count": memory.samples,
                           **{key: after_gc[key] - before_gc[key] for key in before_gc},
                           "sql_metrics": plan_metrics(executed)}
