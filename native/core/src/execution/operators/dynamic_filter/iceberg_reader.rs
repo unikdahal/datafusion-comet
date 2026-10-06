@@ -114,9 +114,7 @@ pub(super) fn reaches_iceberg_reader(input: &Arc<dyn ExecutionPlan>) -> bool {
             && reaches_iceberg_reader(filter.input());
     }
     if let Some(filter) = input.downcast_ref::<FilterExec>() {
-        return filter.projection().is_none()
-            && is_deterministic(filter.predicate())
-            && reaches_iceberg_reader(filter.input());
+        return is_deterministic(filter.predicate()) && reaches_iceberg_reader(filter.input());
     }
     if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
         return is_passable_projection(projection) && reaches_iceberg_reader(projection.input());
@@ -223,12 +221,27 @@ fn attach_below(
     }
 
     // The planner builds DataFusion filters for ordinary Spark filters; only join probes are
-    // converted to CometFilterExec. Both keep the input schema when they have no projection.
+    // converted to CometFilterExec.
     if let Some(filter) = input.downcast_ref::<FilterExec>() {
-        if filter.projection().is_some() || !is_deterministic(filter.predicate()) {
+        if !is_deterministic(filter.predicate()) {
             return Ok(None);
         }
-        let Some(reader) = attach_below(filter.input(), predicate, order, probe)? else {
+        // A projection over a filter is folded into the filter's own output projection;
+        // follow the key through it to its column in the filter's input.
+        let below = match filter.projection() {
+            None => probe,
+            Some(projection) => {
+                let Some(&index) = projection.get(probe.index) else {
+                    return Ok(None);
+                };
+                ProbeColumn {
+                    predicate_index: probe.predicate_index,
+                    index,
+                    name: filter.input().schema().field(index).name().to_string(),
+                }
+            }
+        };
+        let Some(reader) = attach_below(filter.input(), predicate, order, below)? else {
             return Ok(None);
         };
         return Ok(Some(Arc::clone(input).replace_children(
