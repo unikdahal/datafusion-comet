@@ -210,7 +210,11 @@ jobs:
           mkdir -p allocation-classes
           javac -d allocation-classes dev/ci/CelebornJvmAllocation.java
           jar cf allocation-metrics.jar -C allocation-classes .
+          cc -std=c11 -O2 -fPIC -shared -Wall -Wextra -Werror \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            dev/ci/CelebornNativeMemory.c -o allocation-native.so
           echo "ALLOCATION_JAR=$PWD/allocation-metrics.jar" >> "$GITHUB_ENV"
+          echo "ALLOCATION_NATIVE_LIBRARY=$PWD/allocation-native.so" >> "$GITHUB_ENV"
       - name: Free runner disk for replicated wide shuffles
         run: |
           sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet

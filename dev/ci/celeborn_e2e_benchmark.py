@@ -154,6 +154,10 @@ def residency_snapshot(spark, pid, output, label):
     heap = spark._jvm.java.lang.management.ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()
     result["java_heap_used_bytes"] = heap.getUsed()
     result["java_heap_committed_bytes"] = heap.getCommitted()
+    values = list(spark._jvm.org.apache.comet.benchmark.CelebornJvmAllocation.nativeAllocatorSnapshot())
+    assert len(values) == 5
+    for key, value in zip(["allocator_arena_bytes", "allocator_live_arena_bytes", "allocator_free_arena_bytes", "allocator_mmap_bytes", "allocator_top_free_bytes"], values):
+        result[key] = value
     return result
 
 
@@ -318,6 +322,8 @@ def main():
             # Full GC is diagnostic only, after all warmups and measurements in this fresh JVM.
             spark._jvm.java.lang.System.gc()
             residency["after_gc"] = residency_snapshot(spark, pid, args.output, "after-gc")
+            residency["trim_released_pages"] = spark._jvm.org.apache.comet.benchmark.CelebornJvmAllocation.trimNativeAllocator()
+            residency["after_trim"] = residency_snapshot(spark, pid, args.output, "after-trim")
             Path(args.output + ".residency.json").write_text(json.dumps(residency, indent=2))
     finally:
         spark.stop()

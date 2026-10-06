@@ -25,7 +25,20 @@ import com.sun.management.ThreadMXBean;
 
 /** Public JVM allocation counters for complete query measurements. */
 public final class CelebornJvmAllocation {
+  static {
+    String library = System.getProperty("celeborn.benchmark.nativeLibrary");
+    if (library != null) {
+      System.load(library);
+    }
+  }
+
   private CelebornJvmAllocation() {}
+
+  /** Arena bytes, live arena bytes, free arena bytes, mmap bytes, and top free bytes. */
+  public static native long[] nativeAllocatorSnapshot();
+
+  /** Release unused glibc pages after all measurements; never called during a timed query. */
+  public static native boolean trimNativeAllocator();
 
   public static String snapshot() {
     ThreadMXBean bean = (ThreadMXBean) ManagementFactory.getThreadMXBean();

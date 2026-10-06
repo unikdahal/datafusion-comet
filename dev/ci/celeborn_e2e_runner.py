@@ -182,6 +182,8 @@ def main():
                 "spark.eventLog.dir": "file:" + str(event_dir.resolve()),
                 "spark.executor.extraClassPath": ":".join(jars),
             }
+            if scenario.get("allocation"):
+                conf["spark.driver.extraJavaOptions"] = "-Dceleborn.benchmark.nativeLibrary=" + str(Path(os.environ["ALLOCATION_NATIVE_LIBRARY"]).resolve())
             (target / "spark-conf.json").write_text(json.dumps(conf, indent=2))
             conf_args = [item for key, value in conf.items() for item in ["--conf", key + "=" + value]]
             try:

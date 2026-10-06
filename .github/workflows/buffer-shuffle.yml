@@ -7,6 +7,7 @@ on:
       - '.github/workflows/celeborn-e2e.yml'
       - '.github/workflows/celeborn-e2e-report.yml'
       - 'dev/ci/CelebornJvmAllocation.java'
+      - 'dev/ci/CelebornNativeMemory.c'
       - 'docs/source/user-guide/latest/celeborn-benchmark.md'
   workflow_dispatch:
     inputs:

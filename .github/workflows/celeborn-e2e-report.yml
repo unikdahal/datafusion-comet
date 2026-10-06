@@ -6,6 +6,7 @@ on:
       - '.github/workflows/celeborn-e2e-report.yml'
       - 'dev/ci/celeborn_e2e_report.py'
       - 'dev/ci/CelebornJvmAllocation.java'
+      - 'dev/ci/CelebornNativeMemory.c'
   workflow_dispatch:
     inputs:
       performance_run:
@@ -48,6 +49,9 @@ jobs:
             --output /tmp/google-java-format.jar
           java -jar /tmp/google-java-format.jar --skip-sorting-imports --dry-run --set-exit-if-changed dev/ci/CelebornJvmAllocation.java
           javac -d /tmp/allocation-classes dev/ci/CelebornJvmAllocation.java
+          cc -std=c11 -O2 -fPIC -shared -Wall -Wextra -Werror \
+            -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+            dev/ci/CelebornNativeMemory.c -o /tmp/allocation-native.so
       - name: Verify source workflow results
         if: ${{ inputs.performance_run }}
         env:
