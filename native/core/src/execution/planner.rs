@@ -2972,7 +2972,10 @@ impl PhysicalPlanner {
                     && child.is::<Column>()
                     && matches!(
                         datatype,
-                        DataType::Int32 | DataType::Int64 | DataType::Date32
+                        DataType::Int32
+                            | DataType::Int64
+                            | DataType::Date32
+                            | DataType::Timestamp(TimeUnit::Microsecond, _)
                     )
                     && child.data_type(schema.as_ref())? == datatype
                 {
@@ -2997,7 +3000,10 @@ impl PhysicalPlanner {
                     && child.is::<Column>()
                     && matches!(
                         datatype,
-                        DataType::Int32 | DataType::Int64 | DataType::Date32
+                        DataType::Int32
+                            | DataType::Int64
+                            | DataType::Date32
+                            | DataType::Timestamp(TimeUnit::Microsecond, _)
                     )
                     && child.data_type(schema.as_ref())? == datatype
                 {

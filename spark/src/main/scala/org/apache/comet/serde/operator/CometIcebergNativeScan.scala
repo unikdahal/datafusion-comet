@@ -1246,7 +1246,8 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                           case (attr, id)
                               if runtimeFieldNames.contains(attr.name) &&
                                 (attr.dataType == IntegerType || attr.dataType == LongType ||
-                                  attr.dataType == DateType) =>
+                                  attr.dataType == DateType || attr.dataType == TimestampType ||
+                                  attr.dataType == TimestampNTZType) =>
                             id
                         }
                         .toSet

@@ -32,7 +32,7 @@ use crate::execution::operators::RuntimeScanOrder;
 use datafusion::physical_plan::ExecutionPlan;
 
 use super::super::parquet_reader::{
-    is_direct_column_null_checks, try_attach_parquet_reader_filter,
+    is_direct_column_null_checks, is_parquet_reader_key, try_attach_parquet_reader_filter,
 };
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::parquet::ParquetFileReaderFactory;
@@ -58,8 +58,12 @@ pub(super) fn try_attach_topk_reader_filter(
     )? {
         return Ok(Some(scan));
     }
-    // The Parquet reader filters on a single key.
-    if predicate.children().len() != 1 {
+    // The Parquet reader filters on a single signed integer key.
+    let children = predicate.children();
+    let [key] = children.as_slice() else {
+        return Ok(None);
+    };
+    if !is_parquet_reader_key(key, &input.schema()) {
         return Ok(None);
     }
     let Some(scan) = input.downcast_ref::<DataSourceExec>() else {

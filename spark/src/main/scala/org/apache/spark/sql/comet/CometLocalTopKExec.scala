@@ -25,7 +25,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType}
+import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType, TimestampNTZType, TimestampType}
 
 import com.google.common.base.Objects
 
@@ -54,7 +54,8 @@ object CometLocalTopKExec {
           }
         case _: CometIcebergNativeScanExec =>
           order.dataType == IntegerType || order.dataType == LongType ||
-          order.dataType == DateType
+          order.dataType == DateType || order.dataType == TimestampType ||
+          order.dataType == TimestampNTZType
         case _ => false
       })
     }

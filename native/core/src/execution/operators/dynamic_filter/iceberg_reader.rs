@@ -378,6 +378,14 @@ fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
         ScalarValue::Int32(Some(value)) => Some(Datum::int(*value)),
         ScalarValue::Int64(Some(value)) => Some(Datum::long(*value)),
         ScalarValue::Date32(Some(days)) => Some(Datum::date(*days)),
+        // Spark TIMESTAMP carries a zone and maps to Iceberg timestamptz; TIMESTAMP_NTZ has
+        // none and maps to timestamp. Both store microseconds since the epoch.
+        ScalarValue::TimestampMicrosecond(Some(micros), Some(_)) => {
+            Some(Datum::timestamptz_micros(*micros))
+        }
+        ScalarValue::TimestampMicrosecond(Some(micros), None) => {
+            Some(Datum::timestamp_micros(*micros))
+        }
         _ => None,
     }
 }
@@ -830,6 +838,45 @@ mod tests {
         )
         .unwrap();
         assert!(extract_iceberg_predicate(&many, 0, "id").is_none());
+    }
+
+    #[test]
+    fn timestamp_bounds_keep_their_zone_semantics() {
+        let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new("ts", 0));
+        let bound = |value: ScalarValue| -> Arc<dyn PhysicalExpr> {
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&column),
+                Operator::Lt,
+                lit(value),
+            ))
+        };
+        // Spark TIMESTAMP (with a zone) is Iceberg timestamptz; TIMESTAMP_NTZ is timestamp.
+        assert_eq!(
+            extract_iceberg_predicate(
+                &bound(ScalarValue::TimestampMicrosecond(
+                    Some(7),
+                    Some("UTC".into())
+                )),
+                0,
+                "ts"
+            ),
+            Some(Reference::new("ts").less_than(Datum::timestamptz_micros(7)))
+        );
+        assert_eq!(
+            extract_iceberg_predicate(
+                &bound(ScalarValue::TimestampMicrosecond(Some(7), None)),
+                0,
+                "ts"
+            ),
+            Some(Reference::new("ts").less_than(Datum::timestamp_micros(7)))
+        );
+        // Other units are not translated.
+        assert!(extract_iceberg_predicate(
+            &bound(ScalarValue::TimestampNanosecond(Some(7), None)),
+            0,
+            "ts"
+        )
+        .is_none());
     }
 
     #[test]

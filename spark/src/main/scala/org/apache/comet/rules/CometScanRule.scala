@@ -1246,7 +1246,8 @@ object CometScanRule extends Logging {
     def directKeyAttribute(expression: Expression): Option[Attribute] = expression match {
       case attr: Attribute
           if attr.dataType == IntegerType || attr.dataType == LongType ||
-            attr.dataType == DateType =>
+            attr.dataType == DateType || attr.dataType == TimestampType ||
+            attr.dataType == TimestampNTZType =>
         Some(attr)
       case _ => None
     }

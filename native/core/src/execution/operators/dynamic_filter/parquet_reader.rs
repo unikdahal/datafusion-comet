@@ -52,6 +52,19 @@ pub(super) fn is_direct_column_null_checks(predicate: &Arc<dyn PhysicalExpr>) ->
         .is_some_and(|is_not_null| is_not_null.arg().is::<Column>())
 }
 
+/// Whether `key` has a type the native Parquet reader filter supports: a signed integer.
+/// Date and timestamp keys reach only native Iceberg readers.
+pub(super) fn is_parquet_reader_key(
+    key: &Arc<dyn PhysicalExpr>,
+    schema: &arrow::datatypes::Schema,
+) -> bool {
+    use arrow::datatypes::DataType;
+    matches!(
+        key.data_type(schema),
+        Ok(DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64)
+    )
+}
+
 pub(super) fn try_attach_parquet_reader_filter(
     input: &Arc<dyn ExecutionPlan>,
     predicate: Arc<DynamicFilterPhysicalExpr>,

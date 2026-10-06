@@ -1076,6 +1076,80 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("runtime pruning on date and timestamp keys reads best files first") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        "spark.sql.adaptive.enabled" -> "false",
+        "spark.sql.shuffle.partitions" -> "1",
+        "spark.sql.iceberg.aggregate-push-down.enabled" -> "false",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_TOPK_FUSION_ENABLED.key -> "true") {
+        val table = "test_cat.db.runtime_temporal"
+        spark.sql(s"""CREATE TABLE $table (d DATE, ts TIMESTAMP, v INT) USING iceberg
+          TBLPROPERTIES ('format-version'='2', 'write.distribution-mode'='none',
+            'write.parquet.row-group-size-bytes'='65536')""")
+        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+          // Eight files, each holding an ascending range of both keys.
+          spark
+            .range(16384)
+            .repartitionByRange(8, col("id"))
+            .sortWithinPartitions("id")
+            .selectExpr(
+              "date_add(DATE'2024-01-01', CAST(id / 64 AS INT)) AS d",
+              "timestamp_micros(1704067200000000 + id * 1000000) AS ts",
+              "CAST(id AS INT) AS v")
+            .write
+            .format("iceberg")
+            .mode("append")
+            .saveAsTable(table)
+        }
+        spark.read
+          .format("iceberg")
+          .option("split-size", "1073741824")
+          .load(table)
+          .createOrReplaceTempView("runtime_temporal")
+        val dates = spark
+          .range(1)
+          .selectExpr("DATE'2024-01-03' AS d")
+        dates.createOrReplaceTempView("runtime_temporal_dates")
+        val queries = Seq(
+          CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key ->
+            "SELECT ts, v FROM runtime_temporal ORDER BY ts DESC LIMIT 5",
+          CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key ->
+            "SELECT d, v FROM runtime_temporal ORDER BY d, v LIMIT 5",
+          CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key ->
+            "SELECT max(ts) FROM runtime_temporal",
+          CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key ->
+            """SELECT /*+ BROADCAST(x) */ count(*), sum(f.v) FROM runtime_temporal f
+              JOIN runtime_temporal_dates x ON f.d = x.d""")
+        for ((flag, query) <- queries) {
+          var expected = Seq.empty[Row]
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            expected = spark.sql(query).collect().toSeq
+          }
+          withSQLConf(flag -> "true") {
+            val df = spark.sql(query)
+            assert(df.collect().toSeq == expected, query)
+            val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
+            assert(scans.nonEmpty, query)
+            // The bound is set by the first (best) file; statistics reject the rest unopened.
+            val pruned = scans.map(_.metrics("iceberg_runtime_file_tasks_pruned").value).sum
+            assert(
+              pruned > 0,
+              s"no file rejected for $query: " +
+                s"${scans.map(_.metrics.map { case (k, v) => k -> v.value })}")
+          }
+        }
+      }
+    }
+  }
+
   test("runtime file statistics skip footer reads and preserve Iceberg deletes") {
     assume(icebergAvailable, "Iceberg not available in classpath")
     withTempIcebergDir { warehouseDir =>

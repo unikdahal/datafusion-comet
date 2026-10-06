@@ -27,7 +27,7 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{JoinType, NullEquality, Result, Statistics};
@@ -45,8 +45,8 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
-use super::iceberg_reader::try_attach_iceberg_reader_filter;
-use super::parquet_reader::try_attach_parquet_reader_filter;
+use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_reader_filter};
+use super::parquet_reader::{is_parquet_reader_key, try_attach_parquet_reader_filter};
 use super::DynamicFilterExec;
 
 /// A permanent plan must not own a completed join's filter or build accumulator:
@@ -90,11 +90,17 @@ impl DynamicFilterJoinExec {
             vec![Arc::clone(&self.template.on()[0].1)],
             lit(true),
         ));
-        let reader = match try_attach_parquet_reader_filter(
-            self.template.right(),
-            Arc::clone(&predicate),
-            &self.config,
-        )? {
+        let probe_key = &self.template.on()[0].1;
+        let parquet_reader = if is_parquet_reader_key(probe_key, &self.template.right().schema()) {
+            try_attach_parquet_reader_filter(
+                self.template.right(),
+                Arc::clone(&predicate),
+                &self.config,
+            )?
+        } else {
+            None
+        };
+        let reader = match parquet_reader {
             Some(reader) => Some(reader),
             None => try_attach_iceberg_reader_filter(
                 self.template.right(),
@@ -327,10 +333,24 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
     if build_type != probe_type
         || !matches!(
             build_type,
-            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 | DataType::Date32
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::Date32
+                | DataType::Timestamp(TimeUnit::Microsecond, _)
         )
     {
-        return Ok(Some("requires matching integer or date keys"));
+        return Ok(Some("requires matching integer, date or timestamp keys"));
+    }
+    // Date and timestamp keys are supported for native Iceberg probes only; other probes keep
+    // the existing integer-key behavior.
+    if !is_parquet_reader_key(probe_key, &join.right().schema())
+        && !reaches_iceberg_reader(join.right())
+    {
+        return Ok(Some(
+            "date and timestamp keys require a native Iceberg probe",
+        ));
     }
     Ok(None)
 }

@@ -119,7 +119,7 @@ impl IcebergScanExec {
     /// The Iceberg field id and name behind output column `output_index`, when every task maps
     /// it to the same top-level int, long or date field.
     pub(crate) fn runtime_predicate_field(&self, output_index: usize) -> Option<(i32, String)> {
-        use arrow::datatypes::DataType;
+        use arrow::datatypes::{DataType, TimeUnit};
         use iceberg::spec::{PrimitiveType, Type};
 
         let output = self.output_schema.fields().get(output_index)?;
@@ -156,6 +156,14 @@ impl IcebergScanExec {
                 (DataType::Int32, Type::Primitive(PrimitiveType::Int))
                     | (DataType::Int64, Type::Primitive(PrimitiveType::Long))
                     | (DataType::Date32, Type::Primitive(PrimitiveType::Date))
+                    | (
+                        DataType::Timestamp(TimeUnit::Microsecond, Some(_)),
+                        Type::Primitive(PrimitiveType::Timestamptz)
+                    )
+                    | (
+                        DataType::Timestamp(TimeUnit::Microsecond, None),
+                        Type::Primitive(PrimitiveType::Timestamp)
+                    )
             ) {
                 return None;
             }

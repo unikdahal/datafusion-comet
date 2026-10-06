@@ -20,7 +20,7 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{internal_err, Result, Statistics};
@@ -79,6 +79,7 @@ impl TopKReaderFilterExec {
                     | DataType::Int32
                     | DataType::Int64
                     | DataType::Date32
+                    | DataType::Timestamp(TimeUnit::Microsecond, _)
             )
         {
             return Ok(None);

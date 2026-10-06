@@ -450,8 +450,9 @@ object IcebergReflection extends Logging {
     if (isStagedScan(scan)) tasksFromTaskGroups(scan) else tasksFromTasksAccessor(scan)
 
   /**
-   * Top-level INT, BIGINT and DATE columns of `schema`: the only key types the runtime predicate
-   * producers support, and so the only columns whose statistics can prune a file.
+   * Top-level INT, BIGINT, DATE and microsecond TIMESTAMP columns of `schema`: the only key types
+   * the runtime predicate producers support, and so the only columns whose statistics can prune a
+   * file.
    */
   def runtimeKeyColumns(schema: Any): Seq[String] = {
     import scala.jdk.CollectionConverters._
@@ -463,7 +464,7 @@ object IcebergReflection extends Logging {
         .toSeq
         .flatMap { column =>
           val typeStr = getMethod(column.getClass, "type").invoke(column).toString
-          if (typeStr == "int" || typeStr == "long" || typeStr == "date") {
+          if (Set("int", "long", "date", "timestamp", "timestamptz").contains(typeStr)) {
             Some(getMethod(column.getClass, "name").invoke(column).asInstanceOf[String])
           } else {
             None
