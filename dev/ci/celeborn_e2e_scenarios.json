@@ -9,7 +9,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "large-numeric": {
     "rows": 10000000,
@@ -21,7 +22,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "wide-uncompressed": {
     "rows": 2000000,
@@ -33,7 +35,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "wide-lz4": {
     "rows": 2000000,
@@ -45,7 +48,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "wide-zstd": {
     "rows": 2000000,
@@ -57,7 +61,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "many-partitions": {
     "rows": 1000000,
@@ -69,7 +74,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "tight-admission": {
     "rows": 2000000,
@@ -81,7 +87,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "replicated": {
     "rows": 2000000,
@@ -93,7 +100,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": true,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "two-cores": {
     "rows": 2000000,
@@ -105,7 +113,8 @@
     "frame": "8m",
     "cores": 2,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
   },
   "skewed": {
     "rows": 2000000,
@@ -117,7 +126,8 @@
     "frame": "8m",
     "cores": 4,
     "replicate": false,
-    "skew": 80
+    "skew": 80,
+    "batch": 8192
   },
   "small-frames": {
     "rows": 1000000,
@@ -129,6 +139,20 @@
     "frame": "64k",
     "cores": 4,
     "replicate": false,
-    "skew": 0
+    "skew": 0,
+    "batch": 8192
+  },
+  "large-frames": {
+    "rows": 2000000,
+    "width": 256,
+    "entropy": "hex",
+    "partitions": 4,
+    "codec": "none",
+    "admission": "64m",
+    "frame": "8m",
+    "cores": 4,
+    "replicate": false,
+    "skew": 0,
+    "batch": 65536
   }
 }

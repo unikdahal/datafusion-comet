@@ -169,7 +169,7 @@ def main():
                 "spark.shuffle.service.enabled": "false",
                 "spark.shuffle.compress": str(scenario["codec"] != "none").lower(),
                 "spark.comet.exec.enabled": "true", "spark.comet.shuffle.enabled": "true",
-                "spark.comet.shuffle.mode": "native",
+                "spark.comet.shuffle.mode": "native", "spark.comet.batchSize": str(scenario["batch"]),
                 "spark.comet.shuffle.compression.codec": "lz4" if scenario["codec"] == "none" else scenario["codec"],
                 "spark.comet.shuffle.celeborn.directBuffer.enabled": str(mode == "direct").lower(),
                 "spark.comet.shuffle.rss.maxFrameBytes": scenario["frame"],

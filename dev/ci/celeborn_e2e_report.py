@@ -92,6 +92,7 @@ def main():
         reference = json.loads((directory / "reference.json").read_text())["queries"]
         entries = {mode: [] for mode in ["original", "heap", "direct"]}
         process = {mode: [] for mode in entries}
+        frames = {mode: [] for mode in ["heap", "direct"]}
         for fork in range(protocol["forks"]):
             for mode in entries:
                 target = directory / f"fork-{fork}-{mode}"
@@ -108,10 +109,12 @@ def main():
                     assert len(samples) == protocol["samples"]
                     assert all(s["task_metrics"]["Shuffle Bytes Written"] > 0 for s in samples)
                 if mode != "original":
-                    assert json.loads((target / "queries.json.native-frames.json").read_text())
+                    frame_records = json.loads((target / "queries.json.native-frames.json").read_text())
+                    assert frame_records
+                    frames[mode].extend(frame["payload_bytes"] for frame in frame_records)
                 entries[mode].append(record["queries"])
                 process[mode].append(resources(target / "process-resources.txt"))
-        summary = {"config": config, "protocol": protocol, "queries": {}, "process": process}
+        summary = {"config": config, "protocol": protocol, "queries": {}, "process": process, "frames": {mode: {"samples": len(values), "min": min(values), "median": median(values), "max": max(values)} for mode, values in frames.items()}}
         for query_name in reference:
             query_summary = {"sha256": reference[query_name]["sha256"], "rows": reference[query_name]["rows"]}
             for mode in entries:

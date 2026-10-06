@@ -172,11 +172,13 @@ def main():
                 spark.sparkContext.setJobGroup(group, group)
                 before_gc = gc_stats(spark)
                 before_cpu = process_stats(pid)[1]
+                before_service_cpu = sum(process_stats(service)[1] for service in services)
                 with MemorySampler(pid, services) as memory:
                     start = time.perf_counter()
                     rows = query.collect()
                     elapsed = time.perf_counter() - start
                 after_cpu = process_stats(pid)[1]
+                after_service_cpu = sum(process_stats(service)[1] for service in services)
                 after_gc = gc_stats(spark)
                 stable = sorted((list(row) for row in rows), key=lambda row: json.dumps(row))
                 digest = hashlib.sha256(json.dumps(stable, separators=(",", ":")).encode()).hexdigest()
@@ -188,6 +190,7 @@ def main():
                 assert record["sha256"] == digest
                 sample = {"job_group": group, "repeat": repeat, "warmup": repeat < args.warmups,
                           "seconds": elapsed, "cpu_seconds": after_cpu - before_cpu,
+                          "service_cpu_seconds": after_service_cpu - before_service_cpu,
                           **memory.peak, "rss_sample_count": memory.samples,
                           **{key: after_gc[key] - before_gc[key] for key in before_gc},
                           "sql_metrics": plan_metrics(executed)}
