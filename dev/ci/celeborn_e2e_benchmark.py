@@ -200,6 +200,15 @@ def main():
                 Path(args.output).write_text(json.dumps({"config": vars(args), "application_id": spark.sparkContext.applicationId,
                                                         "native_capability_reason": unavailable, "queries": records}, indent=2))
                 print("SAMPLE=" + json.dumps({"mode": args.mode, "query": name, **{k: v for k, v in sample.items() if k != "sql_metrics"}}), flush=True)
+        if args.mode in ["original", "heap", "direct"]:
+            files = [file for file in Path("/tmp/celeborn-worker").rglob("*")
+                     if spark.sparkContext.applicationId in str(file) and file.is_file() and file.stat().st_size > 0]
+            assert files, "No data in this application's live Celeborn worker storage"
+            if spark.sparkContext.getConf().get("spark.celeborn.client.push.replicate.enabled") == "true":
+                assert any(file.name.split(".")[0].endswith("-1") for file in files), "No stored replicas"
+            Path(args.output + ".worker-storage.json").write_text(json.dumps({
+                "files": len(files), "bytes": sum(file.stat().st_size for file in files),
+                "examples": [str(file) for file in files[:20]]}, indent=2))
         if args.mode in ["heap", "direct"]:
             frames = stored_frames(spark.sparkContext.applicationId)
             assert frames, "No native frames in this application's live worker storage"

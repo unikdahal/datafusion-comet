@@ -108,6 +108,10 @@ def main():
                     samples = [s for s in query["samples"] if not s["warmup"]]
                     assert len(samples) == protocol["samples"]
                     assert all(s["task_metrics"]["Shuffle Bytes Written"] > 0 for s in samples)
+                storage_file = target / "queries.json.worker-storage.json"
+                # Older syntax/path smoke runs predate the generic storage record.
+                if storage_file.exists():
+                    assert json.loads(storage_file.read_text())["bytes"] > 0
                 if mode != "original":
                     frame_records = json.loads((target / "queries.json.native-frames.json").read_text())
                     assert frame_records
