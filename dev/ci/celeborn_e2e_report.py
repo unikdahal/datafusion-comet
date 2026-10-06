@@ -95,6 +95,10 @@ def main():
                         "Public JVM allocation counters surround the collect action. Counters for surviving threads are summed; if threads end during the interval, their allocation is omitted and the value is a lower bound. The ended-thread count includes threads created and terminated during the interval. This measures allocation traffic, not simultaneous live memory or native allocation.", "",
                         "| Scenario / query | Original allocated MiB | Heap allocated MiB | Direct allocated MiB | Direct vs heap | Maximum ended threads O/H/D |",
                         "| --- | ---: | ---: | ---: | ---: | --- |"]
+    live_memory_lines = ["", "## Live memory diagnostics", "",
+                         "These counters are sampled only in the separate allocation scenarios. Peak counters can occur at different instants, so their medians must not be added or subtracted to decompose RSS. Rust live bytes count allocator Layout bytes; they exclude retained allocator pages, fragmentation, libc allocations, and mmap. JVM direct-buffer counters do not cover every native allocation. After-query Rust bytes help distinguish live allocations from process residency, but do not provide an allocation-site profile.", "",
+                         "| Scenario / query / mode | Peak Rust live MiB | Rust live after MiB | Peak pool reserved MiB | Peak Java heap used MiB | Peak Java heap committed MiB | Peak JVM direct-buffer MiB |",
+                         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
     manifests = {}
     for directory in sorted(args.artifacts.glob("e2e-*")):
         name = directory.name.removeprefix("e2e-")
@@ -146,6 +150,14 @@ def main():
                 if "jvm_allocated_bytes" in samples[0]:
                     query_summary[mode]["jvm_allocated_bytes"] = median([s["jvm_allocated_bytes"] for s in samples])
                     query_summary[mode]["allocation_threads_ended"] = max(s["allocation_threads_ended"] for s in samples)
+                if "live_memory_after" in samples[0]:
+                    keys = list(samples[0]["live_memory_after"])
+                    query_summary[mode]["live_memory_peak"] = {key: median([s[key] for s in samples]) for key in keys}
+                    query_summary[mode]["live_memory_after"] = {key: median([s["live_memory_after"][key] for s in samples]) for key in keys}
+                    values = query_summary[mode]["live_memory_peak"]
+                    after = query_summary[mode]["live_memory_after"]
+                    counters = [values["native_live_bytes"], after["native_live_bytes"], values["native_pool_reserved_bytes"], values["jvm_heap_used_bytes"], values["jvm_heap_committed_bytes"], values["jvm_direct_buffer_bytes"]]
+                    live_memory_lines.append(f"| {name} / {query_name} / {mode} | " + " | ".join(f"{v/1048576:.1f}" for v in counters) + " |")
             for ref, candidate in [("original", "heap"), ("original", "direct"), ("heap", "direct")]:
                 query_summary[candidate + "_vs_" + ref] = comparison(query_summary[ref]["fork_median_seconds"], query_summary[candidate]["fork_median_seconds"])
             original, heap, direct = [query_summary[mode] for mode in entries]
@@ -169,7 +181,7 @@ def main():
         configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config.get('batch', 8192)} | {config['cores']} | {config['replicate']} | {config['skew']} |")
         result[name] = summary
     assert result
-    lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + configuration_lines)
+    lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + live_memory_lines + configuration_lines)
     lines.extend(["", "## Binary manifests", "", "```json", json.dumps(manifests, indent=2), "```", ""])
     (args.output / "performance.md").write_text("\n".join(lines))
     (args.output / "performance.json").write_text(json.dumps({"manifests": manifests, "scenarios": result}, indent=2) + "\n")

@@ -55,13 +55,21 @@ def process_stats(pid):
 
 
 class MemorySampler:
-    def __init__(self, driver, services):
+    def __init__(self, driver, services, spark=None):
         self.driver = driver
         self.services = services
         self.peak = {"driver_rss_bytes": 0, "service_rss_bytes": 0, "combined_rss_bytes": 0, "driver_threads": 0}
         self.samples = 0
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
+        self.jvm = spark._jvm if spark is not None else None
+        self.error = None
+        if self.jvm is not None:
+            self.native = self.jvm.org.apache.comet.Native()
+            self.heap = self.jvm.java.lang.management.ManagementFactory.getMemoryMXBean()
+            cls = self.jvm.java.lang.Class.forName("java.lang.management.BufferPoolMXBean")
+            self.buffers = self.jvm.java.lang.management.ManagementFactory.getPlatformMXBeans(cls)
+            self.peak.update({key: 0 for key in ["native_live_bytes", "native_pool_reserved_bytes", "jvm_heap_used_bytes", "jvm_heap_committed_bytes", "jvm_direct_buffer_bytes"]})
 
     def sample(self):
         stats = process_stats(self.driver)
@@ -71,11 +79,23 @@ class MemorySampler:
                            ("combined_rss_bytes", driver + service), ("driver_threads", stats[2])]:
             self.peak[key] = max(self.peak[key], value)
         self.samples += 1
+        if self.jvm is not None:
+            native = list(self.native.getMemoryUsage())
+            assert len(native) == 4
+            heap = self.heap.getHeapMemoryUsage()
+            self.live = {"native_live_bytes": native[0], "native_pool_reserved_bytes": native[1],
+                         "jvm_heap_used_bytes": heap.getUsed(), "jvm_heap_committed_bytes": heap.getCommitted(),
+                         "jvm_direct_buffer_bytes": sum(max(0, bean.getMemoryUsed()) for bean in self.buffers if bean.getName() == "direct")}
+            for key, value in self.live.items():
+                self.peak[key] = max(self.peak[key], value)
 
     def run(self):
-        while not self.stop.is_set():
-            self.sample()
-            self.stop.wait(0.1)
+        try:
+            while not self.stop.is_set():
+                self.sample()
+                self.stop.wait(0.1)
+        except Exception as error:
+            self.error = error
 
     def __enter__(self):
         self.thread.start()
@@ -84,6 +104,8 @@ class MemorySampler:
     def __exit__(self, *args):
         self.stop.set()
         self.thread.join()
+        if self.error is not None:
+            raise RuntimeError("Memory diagnostics failed") from self.error
         self.sample()
 
 
@@ -196,7 +218,7 @@ def main():
                 allocation_before = json.loads(spark._jvm.org.apache.comet.benchmark.CelebornJvmAllocation.snapshot()) if args.allocation else {}
                 before_cpu = process_stats(pid)[1]
                 before_service_cpu = sum(process_stats(service)[1] for service in services)
-                with MemorySampler(pid, services) as memory:
+                with MemorySampler(pid, services, spark if args.allocation else None) as memory:
                     start = time.perf_counter()
                     rows = query.collect()
                     elapsed = time.perf_counter() - start
@@ -228,6 +250,7 @@ def main():
                     sample["jvm_allocated_bytes"] = sum(value - before.get(thread, 0) for thread, value in after.items())
                     sample["allocation_threads_ended"] = len(before.keys() - after.keys()) + max(0, started - newly_alive)
                     sample["allocation_threads_started"] = started
+                    sample["live_memory_after"] = memory.live
                 record["samples"].append(sample)
                 Path(args.output + "." + name + ".plan.txt").write_text(plan)
                 # Checkpoint every query so failures retain the successful measurements too.

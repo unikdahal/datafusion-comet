@@ -16,4 +16,6 @@ The speed report presents complete-query seconds, speedup against the original, 
 
 Select `allocation-wide,allocation-large` for additional query-level Java allocation diagnostics using the public JVM thread allocation counters. These are separate scenarios so instrumentation cannot change the primary measurements. Ended-thread coverage is reported: allocation from terminated threads is omitted, making the measurement a lower bound when any threads end. Java allocation traffic is separate from live RSS and native allocation.
 
+The diagnostic scenarios also sample live Rust allocator bytes, native pool reservations, Java heap usage and direct-buffer counters. Rust counters exclude allocator retention, fragmentation, libc allocations and mmap. The report keeps the after-query live counters alongside their sampled peaks. Counter peaks can occur at different instants and cannot be summed to reconstruct RSS.
+
 Dispatch `Celeborn performance report` with a completed performance run and an optional completed allocation run to combine their raw artifacts and publish a complete speed, memory and CPU report. This regenerates the report in Actions without rerunning queries or rebuilding binaries.
