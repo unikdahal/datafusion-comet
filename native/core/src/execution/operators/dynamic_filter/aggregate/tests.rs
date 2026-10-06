@@ -203,7 +203,7 @@ fn unsupported_shapes_and_disabled_config_retain_aggregate() {
 /// under a column projection. The key is followed to its scan column through both.
 #[test]
 fn minmax_attaches_through_filter_and_projection() {
-    use datafusion::physical_plan::filter::FilterExec;
+    use datafusion::physical_plan::filter::FilterExecBuilder;
     use datafusion::physical_plan::projection::ProjectionExec;
 
     let schema = Arc::new(
@@ -242,7 +242,7 @@ fn minmax_attaches_through_filter_and_projection() {
         .unwrap(),
     );
     let filter: Arc<dyn ExecutionPlan> = Arc::new(
-        FilterExec::try_new(
+        FilterExecBuilder::new(
             Arc::new(BinaryExpr::new(
                 Arc::new(Column::new("other", 0)),
                 Operator::Gt,
@@ -250,8 +250,9 @@ fn minmax_attaches_through_filter_and_projection() {
             )),
             scan,
         )
+        .apply_projection(Some(vec![1]))
         .unwrap()
-        .with_projection(Some(vec![1]))
+        .build()
         .unwrap(),
     );
     let projection: Arc<dyn ExecutionPlan> = Arc::new(
