@@ -67,8 +67,8 @@ impl RuntimePredicateProvider for IcebergRuntimePredicateProvider {
         self.predicate.snapshot_generation()
     }
 
-    fn prefers_largest_first(&self) -> bool {
-        self.largest_first
+    fn largest_first_column(&self) -> Option<String> {
+        self.largest_first.then(|| self.iceberg_field_name.clone())
     }
 
     fn snapshot(&self) -> IcebergResult<RuntimePredicateSnapshot> {

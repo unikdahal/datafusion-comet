@@ -166,6 +166,37 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("data tables named like metadata tables keep the native scan") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.hadoop_catalog" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.hadoop_catalog.type" -> "hadoop",
+        "spark.sql.catalog.hadoop_catalog.warehouse" -> warehouseDir.getAbsolutePath,
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+
+        // Each name ends with a metadata table name but is an ordinary data table.
+        for (table <- Seq("user_files", "snapshots", "order_history")) {
+          spark.sql(s"CREATE TABLE hadoop_catalog.db.$table (id INT, name STRING) USING iceberg")
+          spark.sql(s"INSERT INTO hadoop_catalog.db.$table VALUES (1, 'a'), (2, 'b')")
+          checkIcebergNativeScan(s"SELECT * FROM hadoop_catalog.db.$table ORDER BY id")
+        }
+
+        // A real metadata table still falls back, and still answers correctly.
+        checkIcebergNativeScanFallback(
+          "SELECT count(*) FROM hadoop_catalog.db.user_files.files",
+          "Iceberg Metadata tables are not supported")
+
+        for (table <- Seq("user_files", "snapshots", "order_history")) {
+          spark.sql(s"DROP TABLE hadoop_catalog.db.$table")
+        }
+      }
+    }
+  }
+
   test("filter pushdown - equality predicates") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 

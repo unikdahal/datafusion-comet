@@ -148,8 +148,29 @@ case class CometScanRule(session: SparkSession)
     // (...metadata.json#all_manifests) but uppercase via the catalog-identifier form
     // (db.table.ALL_DATA_FILES), and the latter must hit this gate too rather than fall through
     // to reflection that fails on the metadata-table class.
-    val name = scanExec.table.name().toLowerCase(Locale.ROOT)
-    metadataTableSuffix.exists(name.endsWith)
+    //
+    // Prefer the Iceberg table's own type: every metadata table extends BaseMetadataTable, so a
+    // data table whose name merely ends with one of these words (`orders_history`,
+    // `user_files`, `snapshots`) still gets the native scan. Only when the scan is not
+    // Iceberg's, or the table cannot be reached, fall back to the name, and then only to a
+    // whole name segment (`db.t.files`, `...metadata.json#files`).
+    val icebergTable =
+      if (scanExec.scan.getClass.getName.startsWith("org.apache.iceberg.")) {
+        IcebergReflection.getTable(scanExec.scan)
+      } else {
+        None
+      }
+    icebergTable match {
+      case Some(table) if table != null =>
+        Iterator
+          .iterate[Class[_]](table.getClass)(_.getSuperclass)
+          .takeWhile(_ != null)
+          .exists(_.getName == "org.apache.iceberg.BaseMetadataTable")
+      case _ =>
+        val name = scanExec.table.name().toLowerCase(Locale.ROOT)
+        metadataTableSuffix.exists(suffix =>
+          name.endsWith("." + suffix) || name.endsWith("#" + suffix))
+    }
   }
 
   private def transformV1Scan(plan: SparkPlan, scanExec: FileSourceScanExec): SparkPlan = {
