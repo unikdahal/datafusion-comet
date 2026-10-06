@@ -197,6 +197,21 @@
     "batch": 8192,
     "allocation": true
   },
+  "allocation-wide-spark-sort": {
+    "rows": 2000000,
+    "width": 256,
+    "entropy": "hex",
+    "partitions": 64,
+    "codec": "none",
+    "admission": "64m",
+    "frame": "8m",
+    "cores": 4,
+    "replicate": false,
+    "skew": 0,
+    "batch": 8192,
+    "allocation": true,
+    "native_sort": false
+  },
   "allocation-large": {
     "rows": 2000000,
     "width": 256,
