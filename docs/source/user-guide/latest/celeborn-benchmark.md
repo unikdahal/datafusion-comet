@@ -22,6 +22,8 @@ After all measured queries, diagnostics use `jcmd GC.heap_info` and Linux `smaps
 
 Diagnostics also record process-wide glibc `mallinfo2` live/free arena counters and call `malloc_trim(0)` after every measurement has finished, to distinguish retained unused pages from live allocations. Neither this diagnostic helper nor trimming is part of Comet or Celeborn's production execution path. Arena counters exclude malloc mmap allocations and identify no individual allocation site.
 
+Public Celeborn pooled-Netty allocator metrics and Comet Arrow allocator charges are recorded after the queries as well. Pool ownership includes unused capacity and is separate from native allocator retention. Arrow charges can overlap Rust allocation counters and do not measure unique physical memory.
+
 Dispatch `Celeborn performance report` with a completed performance run and an optional completed allocation run to combine their raw artifacts and publish a complete speed, memory and CPU report. This regenerates the report in Actions without rerunning queries or rebuilding binaries.
 
 The `skewed-more-memory` and `skewed-spark-sort` controls retain the skewed dataset while changing only the off-heap budget or post-shuffle sorting engine. Their effective configurations are reported explicitly. A failed scenario must remain visible: the optional report setting `include_failed_performance` includes its partial records as an incomplete scenario and makes no performance claim for it. By default incomplete records fail report generation.

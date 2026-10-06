@@ -109,6 +109,10 @@ def main():
                        "glibc mallinfo2 reports process-wide malloc arenas, including JVM and native-library allocations. Arena live/free counts exclude mmap allocations, which are reported separately. After all queries and full GC, malloc_trim(0) attempts to return unused resident pages to the OS. This diagnostic call never runs during timed queries and is not part of the product implementation. A reduction in RSS with unchanged live allocation counters demonstrates retained freed pages; counters do not identify individual allocation sites.", "",
                        "| Scenario / mode / snapshot | Arena MiB | Live arena MiB | Free arena MiB | Malloc mmap MiB |",
                        "| --- | ---: | ---: | ---: | ---: |"]
+    retained_pool_lines = ["", "## Network and Arrow pool ownership after queries", "",
+                           "Celeborn's public pooled-allocator metrics count the memory those Netty allocators own, including pooled capacity. They exclude non-pooled allocators. Arrow counters are allocator charges, not unique physical bytes, and can overlap Rust live bytes. These values must not be added to reconstruct RSS.", "",
+                           "| Scenario / mode / snapshot | Celeborn pool count | Pooled direct MiB | Pooled heap MiB | Arrow root charged MiB | Arrow import charged MiB |",
+                           "| --- | ---: | ---: | ---: | ---: | ---: |"]
     manifests = {}
     for directory in sorted(args.artifacts.glob("e2e-*")):
         name = directory.name.removeprefix("e2e-")
@@ -221,6 +225,11 @@ def main():
                         keys = ["allocator_arena_bytes", "allocator_live_arena_bytes", "allocator_free_arena_bytes", "allocator_mmap_bytes"]
                         values = [median([record[label][key] for record in records]) / 1048576 for key in keys]
                         allocator_lines.append(f"| {name} / {mode} / {label} | " + " | ".join(f"{v:.1f}" for v in values) + " |")
+                    if "celeborn_pooled_allocators" in records[0][label]:
+                        count = median([record[label]["celeborn_pooled_allocators"] for record in records])
+                        keys = ["celeborn_pooled_direct_bytes", "celeborn_pooled_heap_bytes", "arrow_root_charged_bytes", "arrow_import_charged_bytes"]
+                        values = [median([record[label][key] for record in records]) / 1048576 for key in keys]
+                        retained_pool_lines.append(f"| {name} / {mode} / {label} | {count:g} | " + " | ".join(f"{v:.1f}" for v in values) + " |")
         o, h, d = [median([fork["max_rss_bytes"] for fork in process[mode]]) / 1048576 for mode in process]
         process_lines.append(f"| {name} | {o:.1f} | {h:.1f} | {d:.1f} | {(h/o-1)*100:+.1f}% | {(d/o-1)*100:+.1f}% |")
         configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config.get('batch', 8192)} | {config['cores']} | {config['replicate']} | {config['skew']} | {config.get('offheap', '1g')} | {config.get('native_sort', True)} |")
@@ -228,7 +237,7 @@ def main():
     assert result
     if failures:
         lines[2:2] = ["**Incomplete scenarios: " + ", ".join(sorted(failures)) + ".** These failed to complete the measurement protocol. No speed or memory comparison is claimed for them. The raw artifacts retain the error logs and partial records; JSON lists every missing measurement.", ""]
-    lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + live_memory_lines + residency_lines + allocator_lines + configuration_lines)
+    lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + live_memory_lines + residency_lines + allocator_lines + retained_pool_lines + configuration_lines)
     lines.extend(["", "## Binary manifests", "", "```json", json.dumps(manifests, indent=2), "```", ""])
     (args.output / "performance.md").write_text("\n".join(lines))
     (args.output / "performance.json").write_text(json.dumps({"manifests": manifests, "scenarios": result, "incomplete_scenarios": failures}, indent=2) + "\n")

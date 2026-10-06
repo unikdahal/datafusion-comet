@@ -154,6 +154,13 @@ def residency_snapshot(spark, pid, output, label):
     heap = spark._jvm.java.lang.management.ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()
     result["java_heap_used_bytes"] = heap.getUsed()
     result["java_heap_committed_bytes"] = heap.getCommitted()
+    pools = list(spark._jvm.org.apache.celeborn.common.network.util.NettyUtils.getAllPooledByteBufAllocators().toArray())
+    result["celeborn_pooled_allocators"] = len(pools)
+    result["celeborn_pooled_direct_bytes"] = sum(max(0, pool.metric().usedDirectMemory()) for pool in pools)
+    result["celeborn_pooled_heap_bytes"] = sum(max(0, pool.metric().usedHeapMemory()) for pool in pools)
+    module = getattr(getattr(spark._jvm.org.apache.comet, "package$"), "MODULE$")
+    result["arrow_root_charged_bytes"] = module.CometArrowAllocator().getAllocatedMemory()
+    result["arrow_import_charged_bytes"] = module.CometArrowImportAllocator().getAllocatedMemory()
     values = list(spark._jvm.org.apache.comet.benchmark.CelebornJvmAllocation.nativeAllocatorSnapshot())
     assert len(values) == 5
     for key, value in zip(["allocator_arena_bytes", "allocator_live_arena_bytes", "allocator_free_arena_bytes", "allocator_mmap_bytes", "allocator_top_free_bytes"], values):
