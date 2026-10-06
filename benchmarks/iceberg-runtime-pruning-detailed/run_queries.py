@@ -100,7 +100,7 @@ def topk(table, k, desc=False, nulls=None, extra="", cols="id, value, payload", 
     # Ids are unique in most tables, so a single sort key is deterministic; the date, null and
     # NaN tables repeat keys and need a tie-break. Pass tiebreak=True to force a second key.
     if tiebreak is None:
-        tiebreak = any(t in table for t in ("date", "nulls", "nan"))
+        tiebreak = any(t in table for t in ("date", "nulls", "nan", "skewed"))
     if tiebreak:
         label += "_two_keys"
     order = f"{key}{direction}{placement}" + (", value" if tiebreak else "")
