@@ -248,6 +248,7 @@ jobs:
           path: results/**
   report:
     needs: benchmark
+    if: ${{ always() && needs.benchmark.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
