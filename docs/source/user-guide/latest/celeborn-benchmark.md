@@ -2,7 +2,7 @@
 
 Dispatch `Celeborn end-to-end performance` on GitHub Actions to build exact source revisions and measure query speed, resident memory, GC, and shuffle metrics. All builds and measurements execute in Actions. The workflow pins the original and current Comet and Celeborn commits, verifies binary hashes, and packages the native libraries using the production release profile.
 
-The original Comet/client pair selects delegated row shuffle because the transport fields cannot safely be replaced. The new heap and direct modes select native shuffle using the public buffer API. An original/new comparison includes this execution-path and format change. A heap/direct comparison measures the buffer-mode tradeoff within the same native implementation.
+The original Comet/client pair selects delegated row shuffle because the transport fields cannot safely be replaced. The new heap and direct modes select native shuffle using the public buffer API. Native shuffle also lets downstream operators stay native; the original hash query uses Spark sort, while the new default uses Comet sort. An original/new comparison includes these execution-path and format changes. A heap/direct comparison measures the buffer-mode tradeoff within the same native implementation.
 
 The checked-in scenario matrix varies input rows from one to ten million, payload width from zero to 256 bytes, payload compressibility, codecs, partition counts, admission limits, frame sizes, batch sizes, replication, task concurrency, and skew. Hash repartition, range repartition and join queries retain the payload through their exchange and validate their results against vanilla Spark. Native plans and samples from the application's live worker storage guard against silently benchmarking a fallback path.
 

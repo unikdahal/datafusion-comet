@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       performance_run:
-        description: Successful end-to-end performance run ID
+        description: Completed end-to-end performance run ID
         type: string
         required: true
       allocation_run:
