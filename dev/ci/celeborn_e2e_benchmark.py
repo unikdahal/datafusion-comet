@@ -221,9 +221,13 @@ def main():
                           **{key: after_gc[key] - before_gc[key] for key in before_gc},
                           "sql_metrics": plan_metrics(executed)}
                 if args.allocation:
-                    sample["jvm_allocated_bytes"] = sum(value - allocation_before.get(thread, 0) for thread, value in allocation_after.items())
-                    sample["allocation_threads_ended"] = len(allocation_before.keys() - allocation_after.keys())
-                    sample["allocation_threads_started"] = len(allocation_after.keys() - allocation_before.keys())
+                    before = allocation_before["threads"]
+                    after = allocation_after["threads"]
+                    started = allocation_after["total_started"] - allocation_before["total_started"]
+                    newly_alive = len(after.keys() - before.keys())
+                    sample["jvm_allocated_bytes"] = sum(value - before.get(thread, 0) for thread, value in after.items())
+                    sample["allocation_threads_ended"] = len(before.keys() - after.keys()) + max(0, started - newly_alive)
+                    sample["allocation_threads_started"] = started
                 record["samples"].append(sample)
                 Path(args.output + "." + name + ".plan.txt").write_text(plan)
                 # Checkpoint every query so failures retain the successful measurements too.

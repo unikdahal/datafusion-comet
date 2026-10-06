@@ -36,7 +36,10 @@ public final class CelebornJvmAllocation {
     }
     long[] ids = bean.getAllThreadIds();
     long[] allocated = bean.getThreadAllocatedBytes(ids);
-    StringBuilder json = new StringBuilder("{");
+    StringBuilder json =
+        new StringBuilder("{\"total_started\":")
+            .append(bean.getTotalStartedThreadCount())
+            .append(",\"threads\":{");
     boolean first = true;
     for (int i = 0; i < ids.length; i++) {
       if (allocated[i] < 0) {
@@ -48,6 +51,6 @@ public final class CelebornJvmAllocation {
       first = false;
       json.append('"').append(ids[i]).append("\":").append(allocated[i]);
     }
-    return json.append('}').toString();
+    return json.append("}}").toString();
   }
 }
