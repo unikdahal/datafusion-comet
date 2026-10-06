@@ -110,6 +110,7 @@ impl IcebergScanExec {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn runtime_predicate_field_name(&self, output_index: usize) -> Option<String> {
         self.runtime_predicate_field(output_index)
             .map(|(_, name)| name)
