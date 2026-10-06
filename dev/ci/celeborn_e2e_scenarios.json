@@ -136,11 +136,11 @@
     "partitions": 64,
     "codec": "lz4",
     "admission": "64m",
-    "frame": "64k",
+    "frame": "16k",
     "cores": 4,
     "replicate": false,
     "skew": 0,
-    "batch": 8192
+    "batch": 65536
   },
   "large-frames": {
     "rows": 2000000,
