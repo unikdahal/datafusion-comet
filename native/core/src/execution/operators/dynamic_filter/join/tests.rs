@@ -276,10 +276,10 @@ async fn completed_filter_evaluates_only_the_shared_probe_key() {
         batches_to_sort_string(&expected)
     );
 
-    // Inspect the actual build-generated bounds AND hash-membership expression. Its key
-    // remains at index 17 here, so the consumer must also remap every nested reference.
+    // Inspect the actual build-generated bounds AND membership expression: an IN list for
+    // this 1024-key build side, a hash lookup for larger ones. Its key remains at index 17
+    // here, so the consumer must also remap every nested reference.
     let completed = predicate.current().unwrap();
-    assert!(completed.to_string().contains("hash_lookup"));
     assert!(completed.to_string().contains("AND"));
     predicate
         .update(Arc::new(AssertKeyOnlyBatch {
