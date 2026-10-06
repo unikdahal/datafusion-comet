@@ -23,6 +23,7 @@ use datafusion::physical_expr::expressions::{
     BinaryExpr, Column, DynamicFilterPhysicalExpr, InListExpr, IsNotNullExpr, IsNullExpr, Literal,
 };
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_comet_operators::CometFilterExec;
 use iceberg::arrow::{RuntimePredicateProvider, RuntimePredicateSnapshot};
@@ -111,7 +112,19 @@ pub(super) fn reaches_iceberg_reader(input: &Arc<dyn ExecutionPlan>) -> bool {
             && is_deterministic(filter.predicate())
             && reaches_iceberg_reader(filter.input());
     }
+    if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
+        return is_passable_projection(projection) && reaches_iceberg_reader(projection.input());
+    }
     input.is::<IcebergScanExec>()
+}
+
+/// A projection the reader can attach through: it keeps every row, and computes nothing
+/// whose value could depend on which other rows were read.
+fn is_passable_projection(projection: &ProjectionExec) -> bool {
+    projection
+        .expr()
+        .iter()
+        .all(|projected| is_deterministic(&projected.expr))
 }
 
 /// Whether `expr` is built only from expressions known to be deterministic.
@@ -153,6 +166,36 @@ pub(super) fn try_attach_iceberg_reader_filter(
     predicate: Arc<DynamicFilterPhysicalExpr>,
     order: Option<RuntimeScanOrder>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    // A multi-key TopK filter lists every sort key; only the first one bounds the scan.
+    let children = predicate.children();
+    let Some(column) = children
+        .first()
+        .and_then(|child| child.downcast_ref::<Column>())
+    else {
+        return Ok(None);
+    };
+    let probe = ProbeColumn {
+        predicate_index: column.index(),
+        index: column.index(),
+        name: column.name().to_string(),
+    };
+    attach_below(input, &predicate, order, probe)
+}
+
+/// The probe key: its index in the producer's input, which the published predicate refers
+/// to, and its index and name in the plan node currently being descended.
+struct ProbeColumn {
+    predicate_index: usize,
+    index: usize,
+    name: String,
+}
+
+fn attach_below(
+    input: &Arc<dyn ExecutionPlan>,
+    predicate: &Arc<DynamicFilterPhysicalExpr>,
+    order: Option<RuntimeScanOrder>,
+    probe: ProbeColumn,
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     if input.fetch().is_some() {
         return Ok(None);
     }
@@ -161,9 +204,7 @@ pub(super) fn try_attach_iceberg_reader_filter(
         if filter.has_projection() || !is_deterministic(filter.predicate()) {
             return Ok(None);
         }
-        let Some(reader) =
-            try_attach_iceberg_reader_filter(filter.input(), Arc::clone(&predicate), order)?
-        else {
+        let Some(reader) = attach_below(filter.input(), predicate, order, probe)? else {
             return Ok(None);
         };
         return match filter.with_execution_input(reader) {
@@ -175,34 +216,48 @@ pub(super) fn try_attach_iceberg_reader_filter(
         };
     }
 
+    if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
+        // Follow the key through a column reference to its position below the projection.
+        let Some(source) = projection
+            .expr()
+            .get(probe.index)
+            .and_then(|projected| projected.expr.downcast_ref::<Column>())
+        else {
+            return Ok(None);
+        };
+        if !is_passable_projection(projection) {
+            return Ok(None);
+        }
+        let below = ProbeColumn {
+            predicate_index: probe.predicate_index,
+            index: source.index(),
+            name: source.name().to_string(),
+        };
+        let Some(reader) = attach_below(projection.input(), predicate, order, below)? else {
+            return Ok(None);
+        };
+        return Ok(Some(Arc::clone(input).with_new_children(vec![reader])?));
+    }
+
     let Some(scan) = input.downcast_ref::<IcebergScanExec>() else {
         return Ok(None);
     };
-    // A multi-key TopK filter lists every sort key; only the first one bounds the scan.
-    let children = predicate.children();
-    let Some(column) = children
-        .first()
-        .and_then(|child| child.downcast_ref::<Column>())
-    else {
-        return Ok(None);
-    };
-
     if scan
         .schema()
         .fields()
-        .get(column.index())
-        .is_none_or(|field| field.name() != column.name())
+        .get(probe.index)
+        .is_none_or(|field| field.name() != &probe.name)
     {
         return Ok(None);
     }
-    let Some((iceberg_field_id, iceberg_field_name)) = scan.runtime_predicate_field(column.index())
+    let Some((iceberg_field_id, iceberg_field_name)) = scan.runtime_predicate_field(probe.index)
     else {
         return Ok(None);
     };
     let provider: Arc<dyn RuntimePredicateProvider> = Arc::new(
         IcebergRuntimePredicateProvider::new(
-            Arc::clone(&predicate),
-            column.index(),
+            Arc::clone(predicate),
+            probe.predicate_index,
             iceberg_field_name,
         )
         .with_largest_first(matches!(order, Some(RuntimeScanOrder::Descending { .. }))),

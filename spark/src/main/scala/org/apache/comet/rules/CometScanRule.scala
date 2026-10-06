@@ -1231,7 +1231,7 @@ object CometScanRule extends Logging {
     import org.apache.spark.sql.catalyst.expressions.aggregate.{Max, Min, Partial}
     import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
     import org.apache.spark.sql.catalyst.plans.{Inner, LeftSemi}
-    import org.apache.spark.sql.execution.{FilterExec, TakeOrderedAndProjectExec}
+    import org.apache.spark.sql.execution.{FilterExec, ProjectExec, TakeOrderedAndProjectExec}
     import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
     import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
     import org.apache.spark.sql.execution.joins.HashJoin
@@ -1271,6 +1271,15 @@ object CometScanRule extends Logging {
           record(scan, key)
         case filter: FilterExec if allowFilters && passableFilter(filter.condition) =>
           readerInput(filter.child, key, allowFilters = true)
+        // Column pruning puts a projection between the filter and the producer. The native
+        // reader follows the key through a column reference, so retain its statistics too.
+        case project: ProjectExec
+            if allowFilters && project.projectList.forall(_.deterministic) &&
+              project.projectList.exists {
+                case attr: Attribute => attr.exprId == key.exprId
+                case _ => false
+              } =>
+          readerInput(project.child, key, allowFilters = true)
         case _ =>
       }
 
