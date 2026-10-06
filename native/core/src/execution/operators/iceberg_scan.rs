@@ -69,8 +69,9 @@ pub struct IcebergScanExec {
     /// Spark V2 catalog name; forwarded as dispatchKey to the credential bridge. Empty when the
     /// table has no catalog identity.
     catalog_name: String,
-    /// Pre-planned file scan tasks
-    tasks: Vec<FileScanTask>,
+    /// Pre-planned file scan tasks, shared by every copy of this scan (one per runtime
+    /// predicate attachment).
+    tasks: Arc<[FileScanTask]>,
     /// Number of data files to read concurrently
     data_file_concurrency_limit: usize,
     /// Execution-time predicate source attached to this scan.
@@ -102,7 +103,7 @@ impl IcebergScanExec {
             plan_properties,
             catalog_properties,
             catalog_name,
-            tasks,
+            tasks: tasks.into(),
             data_file_concurrency_limit,
             runtime_predicate_provider: None,
             runtime_task_order: None,
@@ -126,7 +127,7 @@ impl IcebergScanExec {
         let mut field_id = None;
         let mut field_name: Option<String> = None;
 
-        for task in &self.tasks {
+        for task in self.tasks.iter() {
             let current_id = *task.project_field_ids().get(output_index)?;
             if field_id.is_some_and(|expected| expected != current_id) {
                 return None;
@@ -192,7 +193,7 @@ impl IcebergScanExec {
             plan_properties: Arc::clone(&self.plan_properties),
             catalog_properties: self.catalog_properties.clone(),
             catalog_name: self.catalog_name.clone(),
-            tasks: self.tasks.clone(),
+            tasks: Arc::clone(&self.tasks),
             data_file_concurrency_limit: self.data_file_concurrency_limit,
             runtime_predicate_provider: Some(runtime_predicate_provider),
             runtime_task_order: task_order,
@@ -248,7 +249,7 @@ impl ExecutionPlan for IcebergScanExec {
         _partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        self.execute_with_tasks(self.tasks.clone(), context)
+        self.execute_with_tasks(self.tasks.to_vec(), context)
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -331,17 +332,29 @@ impl IcebergScanExec {
             baseline_metrics: metrics.baseline,
             scan_metrics,
             bytes_scanned: metrics.bytes_scanned,
-            runtime_file_tasks_pruned: metrics.runtime_file_tasks_pruned,
-            runtime_predicate_tasks: metrics.runtime_predicate_tasks,
-            runtime_row_groups_pruned: metrics.runtime_row_groups_pruned,
-            runtime_predicate_refreshes: metrics.runtime_predicate_refreshes,
-            runtime_row_groups_pruned_live: metrics.runtime_row_groups_pruned_live,
             last_reported_bytes: 0,
-            last_reported_runtime_file_tasks_pruned: 0,
-            last_reported_runtime_predicate_tasks: 0,
-            last_reported_runtime_row_groups_pruned: 0,
-            last_reported_runtime_predicate_refreshes: 0,
-            last_reported_runtime_row_groups_pruned_live: 0,
+            runtime: [
+                ReportedCount::new(
+                    metrics.runtime_file_tasks_pruned,
+                    ScanMetrics::runtime_file_tasks_pruned,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_predicate_tasks,
+                    ScanMetrics::runtime_predicate_tasks,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_row_groups_pruned,
+                    ScanMetrics::runtime_row_groups_pruned,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_predicate_refreshes,
+                    ScanMetrics::runtime_predicate_refreshes,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_row_groups_pruned_live,
+                    ScanMetrics::runtime_row_groups_pruned_live,
+                ),
+            ],
         };
 
         Ok(Box::pin(wrapped_stream))
@@ -407,16 +420,35 @@ struct IcebergStreamWrapper<S> {
     bytes_scanned: Count,
     /// Last reported bytes_read value for delta computation
     last_reported_bytes: u64,
-    runtime_file_tasks_pruned: Count,
-    runtime_predicate_tasks: Count,
-    runtime_row_groups_pruned: Count,
-    runtime_predicate_refreshes: Count,
-    runtime_row_groups_pruned_live: Count,
-    last_reported_runtime_file_tasks_pruned: u64,
-    last_reported_runtime_predicate_tasks: u64,
-    last_reported_runtime_row_groups_pruned: u64,
-    last_reported_runtime_predicate_refreshes: u64,
-    last_reported_runtime_row_groups_pruned_live: u64,
+    /// Runtime pruning counters bridged from iceberg-rust's live totals.
+    runtime: [ReportedCount; 5],
+}
+
+/// A Spark metric fed from a running total in iceberg-rust's [`ScanMetrics`].
+struct ReportedCount {
+    metric: Count,
+    read: fn(&ScanMetrics) -> u64,
+    reported: u64,
+}
+
+impl ReportedCount {
+    fn new(metric: Count, read: fn(&ScanMetrics) -> u64) -> Self {
+        Self {
+            metric,
+            read,
+            reported: 0,
+        }
+    }
+
+    /// Adds whatever the total grew by since the last report.
+    fn report(&mut self, scan_metrics: &ScanMetrics) {
+        let current = (self.read)(scan_metrics);
+        let delta = current.saturating_sub(self.reported);
+        if delta > 0 {
+            self.metric.add(delta as usize);
+            self.reported = current;
+        }
+    }
 }
 
 /// Cached projection state: file schema, adapter, and pre-built projection expressions.
@@ -489,40 +521,9 @@ where
             self.last_reported_bytes = current;
         }
 
-        let current = self.scan_metrics.runtime_file_tasks_pruned();
-        let delta = current.saturating_sub(self.last_reported_runtime_file_tasks_pruned);
-        if delta > 0 {
-            self.runtime_file_tasks_pruned.add(delta as usize);
-            self.last_reported_runtime_file_tasks_pruned = current;
-        }
-
-        let current_tasks = self.scan_metrics.runtime_predicate_tasks();
-        let task_delta = current_tasks.saturating_sub(self.last_reported_runtime_predicate_tasks);
-        if task_delta > 0 {
-            self.runtime_predicate_tasks.add(task_delta as usize);
-            self.last_reported_runtime_predicate_tasks = current_tasks;
-        }
-
-        let current_pruned = self.scan_metrics.runtime_row_groups_pruned();
-        let pruned_delta =
-            current_pruned.saturating_sub(self.last_reported_runtime_row_groups_pruned);
-        if pruned_delta > 0 {
-            self.runtime_row_groups_pruned.add(pruned_delta as usize);
-            self.last_reported_runtime_row_groups_pruned = current_pruned;
-        }
-
-        let current = self.scan_metrics.runtime_predicate_refreshes();
-        let delta = current.saturating_sub(self.last_reported_runtime_predicate_refreshes);
-        if delta > 0 {
-            self.runtime_predicate_refreshes.add(delta as usize);
-            self.last_reported_runtime_predicate_refreshes = current;
-        }
-
-        let current = self.scan_metrics.runtime_row_groups_pruned_live();
-        let delta = current.saturating_sub(self.last_reported_runtime_row_groups_pruned_live);
-        if delta > 0 {
-            self.runtime_row_groups_pruned_live.add(delta as usize);
-            self.last_reported_runtime_row_groups_pruned_live = current;
+        let this = &mut *self;
+        for counter in &mut this.runtime {
+            counter.report(&this.scan_metrics);
         }
 
         self.baseline_metrics.record_poll(result)
