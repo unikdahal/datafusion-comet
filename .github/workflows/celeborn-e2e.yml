@@ -210,10 +210,13 @@ jobs:
           SPARK_HOME=$(python -c 'import os, pyspark; print(os.path.dirname(pyspark.__file__))')
           echo "SPARK_HOME=$SPARK_HOME" >> "$GITHUB_ENV"
           python - <<'EOF'
-          import hashlib, json
+          import hashlib, json, os
           from pathlib import Path
           for directory in Path('artifacts').iterdir():
               manifest = json.loads((directory / 'manifest.json').read_text())
+              project = 'CELEBORN' if directory.name.startswith('celeborn-') else 'COMET'
+              version = 'ORIGINAL' if directory.name.endswith('-original') else 'CURRENT'
+              assert manifest['sha'] == os.environ[version + '_' + project]
               file = directory / 'distribution.tar.gz' if directory.name.startswith('celeborn-') else next(directory.glob('*.jar'))
               key = 'distribution_sha256' if directory.name.startswith('celeborn-') else 'jar_sha256'
               assert hashlib.sha256(file.read_bytes()).hexdigest() == manifest[key]
