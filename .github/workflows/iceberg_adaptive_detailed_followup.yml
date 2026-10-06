@@ -1,0 +1,208 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+
+# Fork-only detailed benchmark of native Iceberg runtime pruning on the Arrow 59 flavor.
+# The branch and the main commit it is based on are built with identical commands, then five
+# suites run on separate runners: join, topk_minmax, layouts, fuzz and tpch. Every suite runs
+# plain Spark, main, the branch with runtime filters off and the branch with them on, in
+# rotated order, over byte-identical tables. See benchmarks/iceberg-runtime-pruning-detailed.
+
+name: Fork Detailed Iceberg Pruning Follow-up
+
+on:
+  push:
+    branches: ['detailed-followup/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-iceberg-detailed-followup-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: "-Clink-arg=-fuse-ld=bfd"
+
+jobs:
+  benchmark:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: topk_minmax
+            rows: '16000000'
+            rounds: '3'
+            reps: '2'
+          - suite: strjoin
+            rows: '16000000'
+            rounds: '1'
+            reps: '1'
+    env:
+      BENCH_SUITE: ${{ matrix.suite }}
+      BENCH_ROWS: ${{ matrix.rows }}
+      BENCH_FILES: '16'
+      BENCH_ROUNDS: ${{ matrix.rounds }}
+      BENCH_REPS: ${{ matrix.reps }}
+      BENCH_FUZZ_ROWS: '4000000'
+      BENCH_FUZZ_QUERIES: '500'
+      TPCH_SF: '3'
+      SPARK_LOCAL_HOSTNAME: localhost
+      SPARK_LOCAL_IP: 127.0.0.1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: comet-*
+          path: jars
+          run-id: 37421864571
+          github-token: ${{ github.token }}
+      - name: Install Spark 3.5.9 and Iceberg 1.8.1
+        run: |
+          python3 -m pip install --user --break-system-packages pyspark==3.5.9
+          if [ "$BENCH_SUITE" = tpch ]; then
+            python3 -m pip install --user --break-system-packages duckdb
+          fi
+          curl -fsSL -o jars/iceberg.jar \
+            https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.8.1/iceberg-spark-runtime-3.5_2.12-1.8.1.jar
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # The tables are large: keep them on the big scratch disk.
+          sudo mkdir -p /mnt/bench && sudo chown "$USER" /mnt/bench
+          echo "WAREHOUSE=/mnt/bench/warehouse" >> "$GITHUB_ENV"
+          echo "BENCH_OUTPUT=$GITHUB_WORKSPACE/results-$BENCH_SUITE.jsonl" >> "$GITHUB_ENV"
+      - name: Record the environment
+        run: |
+          {
+            echo "## Environment ($BENCH_SUITE)"
+            echo
+            echo "- main commit: \`$(cat jars/comet-main/comet-commit.txt)\`"
+            echo "- branch commit: \`$(cat jars/comet-branch/comet-commit.txt)\`"
+            echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) vCPUs"
+            echo "- memory: $(free -g | awk '/Mem:/ {print $2}') GiB"
+            echo "- Spark 3.5.9, Iceberg 1.8.1, Java $(java -version 2>&1 | head -1)"
+            echo "- rows: $BENCH_ROWS; rounds: $BENCH_ROUNDS; reps per round: $BENCH_REPS; TPC-H SF: $TPCH_SF"
+            echo
+          } > environment-$BENCH_SUITE.md
+          df -h /mnt | tail -1
+      - name: Generate TPC-H data
+        if: matrix.suite == 'tpch'
+        run: python3 benchmarks/iceberg-runtime-pruning-detailed/tpch_generate.py "$TPCH_SF" /mnt/bench/tpch-parquet | tee tpch-generate.log
+      - name: Generate tables once with plain Spark
+        run: |
+          script=generate_data.py
+          if [ "$BENCH_SUITE" = tpch ]; then script=tpch_iceberg.py; export TPCH_PARQUET=/mnt/bench/tpch-parquet; fi
+          spark-submit --master 'local[4]' --driver-memory 8g --jars jars/iceberg.jar \
+            --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+            --conf spark.sql.catalog.bench=org.apache.iceberg.spark.SparkCatalog \
+            --conf spark.sql.catalog.bench.type=hadoop \
+            --conf "spark.sql.catalog.bench.warehouse=$WAREHOUSE" \
+            --conf spark.sql.shuffle.partitions=16 \
+            --conf spark.ui.enabled=false \
+            benchmarks/iceberg-runtime-pruning-detailed/$script | tee generate-$BENCH_SUITE.log
+          { echo "## Tables ($BENCH_SUITE)"; echo; grep '^TABLE' generate-$BENCH_SUITE.log | sed 's/^/- /'; echo; } >> environment-$BENCH_SUITE.md
+          rm -rf /mnt/bench/tpch-parquet
+      - name: Run rounds in rotated variant order
+        run: |
+          filters() {
+            for key in join.dynamicFilter.enabled topK.fusion.enabled \
+                topK.dynamicFilter.enabled aggregate.dynamicFilter.enabled; do
+              echo "--conf spark.comet.exec.$key=$1"
+            done
+          }
+          script=run_queries.py
+          if [ "$BENCH_SUITE" = tpch ]; then script=run_tpch.py; fi
+          variants=(spark main off on)
+          for round in $(seq 0 $((BENCH_ROUNDS - 1))); do
+            for offset in 0 1 2 3; do
+              variant="${variants[$(((round + offset) % 4))]}"
+              echo "round $round variant $variant"
+              if [ "$variant" = spark ]; then
+                comet_args=(--jars jars/iceberg.jar)
+              else
+                case "$variant" in
+                  main) jar=jars/comet-main/comet.jar; enabled=true ;;
+                  off) jar=jars/comet-branch/comet.jar; enabled=false ;;
+                  on) jar=jars/comet-branch/comet.jar; enabled=true ;;
+                esac
+                comet_args=(
+                  --jars "jars/iceberg.jar,$jar"
+                  --conf "spark.driver.extraClassPath=$jar"
+                  --conf "spark.executor.extraClassPath=$jar"
+                  --conf spark.plugins=org.apache.spark.CometPlugin
+                  --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager
+                  --conf spark.comet.exec.shuffle.enabled=true
+                  --conf spark.memory.offHeap.enabled=true
+                  --conf spark.memory.offHeap.size=5g
+                  --conf spark.comet.scan.icebergNative.enabled=true
+                  --conf spark.comet.expression.Cast.allowIncompatible=true
+                  $(filters "$enabled")
+                )
+              fi
+              BENCH_VARIANT="$variant" BENCH_ROUND="$round" BENCH_SEED="$((round + 1))" \
+              spark-submit --master 'local[4]' --driver-memory 7g \
+                "${comet_args[@]}" \
+                --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+                --conf spark.sql.catalog.bench=org.apache.iceberg.spark.SparkCatalog \
+                --conf spark.sql.catalog.bench.type=hadoop \
+                --conf "spark.sql.catalog.bench.warehouse=$WAREHOUSE" \
+                --conf spark.sql.adaptive.enabled=false \
+                --conf spark.sql.shuffle.partitions=4 \
+                --conf spark.sql.iceberg.aggregate-push-down.enabled=false \
+                --conf spark.ui.enabled=false \
+                benchmarks/iceberg-runtime-pruning-detailed/$script > "run-$BENCH_SUITE-$round-$variant.log" 2>&1 \
+                || { tail -100 "run-$BENCH_SUITE-$round-$variant.log"; exit 1; }
+            done
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: detailed-${{ matrix.suite }}
+          path: |
+            environment-*.md
+            results-*.jsonl
+            generate-*.log
+            tpch-generate.log
+            run-*.log
+
+  report:
+    needs: benchmark
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: detailed-*
+          path: results
+          merge-multiple: true
+      - name: Summarize
+        run: |
+          python3 benchmarks/iceberg-runtime-pruning-detailed/summarize.py results/results-*.jsonl > report.md || status=$?
+          cat results/environment-*.md report.md >> "$GITHUB_STEP_SUMMARY"
+          exit ${status:-0}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: detailed-report
+          path: report.md

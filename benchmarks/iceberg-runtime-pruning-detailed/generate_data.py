@@ -200,6 +200,7 @@ PLAN = {
         ROWS,
         True,
     ),
+    "strjoin": ("fz_", ["sorted", "long", "str"], FUZZ_ROWS, False),
     "fuzz": (
         "fz_",
         [

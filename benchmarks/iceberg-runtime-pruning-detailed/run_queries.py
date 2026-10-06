@@ -83,7 +83,7 @@ def join(table, ktype, dim, form="inner"):
     return (f"join_{form}__{table}__{dim}", sql, ordered, None)
 
 
-def topk(table, k, desc=False, nulls=None, extra="", cols="id, value, payload", offset=0, key="id"):
+def topk(table, k, desc=False, nulls=None, extra="", cols="id, value, payload", offset=0, key="id", tiebreak=None):
     direction = " DESC" if desc else ""
     placement = f" NULLS {nulls}" if nulls else ""
     tail = f" OFFSET {offset}" if offset else ""
@@ -97,7 +97,14 @@ def topk(table, k, desc=False, nulls=None, extra="", cols="id, value, payload", 
     ):
         if present:
             label += "_" + tag
-    sql = f"SELECT {cols} FROM {T}{table}{where} ORDER BY {key}{direction}{placement}, value LIMIT {k}{tail}"
+    # Ids are unique in most tables, so a single sort key is deterministic; the date, null and
+    # NaN tables repeat keys and need a tie-break. Pass tiebreak=True to force a second key.
+    if tiebreak is None:
+        tiebreak = any(t in table for t in ("date", "nulls", "nan"))
+    if tiebreak:
+        label += "_two_keys"
+    order = f"{key}{direction}{placement}" + (", value" if tiebreak else "")
+    sql = f"SELECT {cols} FROM {T}{table}{where} ORDER BY {order} LIMIT {k}{tail}"
     return (f"{label}__{table}", sql, True, None)
 
 
@@ -127,6 +134,7 @@ def topk_minmax_suite():
         queries.append(topk(table, 10, desc=True))
         queries += [minmax(table, kind) for kind in ("min", "max", "both")]
     queries.append(topk("f_sorted", 1000, desc=True))
+    queries += [topk(t, 10, tiebreak=True) for t in ("f_sorted", "f_unsorted", "f_reversed_files")]
     for ktype in ["long", "str", "date", "nulls", "nan"]:
         table = f"f_{ktype}"
         queries += [topk(table, 10), topk(table, 10, desc=True), minmax(table, "both")]
@@ -136,7 +144,7 @@ def topk_minmax_suite():
         topk("f_sorted", 10, offset=1000),
         topk("f_sorted", 100, extra="value % 3 = 0"),
         topk("f_unsorted", 100, extra="value % 3 = 0"),
-        topk("f_sorted", 100, key="k2, id"),
+        topk("f_sorted", 100, key="k2, id", tiebreak=True),
         topk("f_sorted", 10, key="value"),
         # No pruning possible: the sort key is an expression or an unordered string.
         topk("f_sorted", 10, key="id + 1"),
@@ -274,12 +282,29 @@ def fuzz_queries():
     return queries
 
 
+def strjoin_suite():
+    """String-key joins against a build side of growing size, with the expected row count."""
+    queries = []
+    for width in (1000, 10000, 40000, 100000, 500000, 1000000, 3000000):
+        start = 100000
+        for ktype, table in (("str", "fz_str"), ("long", "fz_long"), ("int", "fz_sorted")):
+            keys = typed(ktype, "id")
+            for dedup in ("", "DISTINCT "):
+                d = f"(SELECT {dedup}{keys} AS id FROM range({start}, {start + width})) d"
+                for form, hint in (("broadcast", "BROADCAST(d)"), ("shuffled_hash", "SHUFFLE_HASH(d)"), ("sort_merge", "MERGE(d)")):
+                    name = f"strjoin_{ktype}_{form}_{'distinct' if dedup else 'plain'}_{width}"
+                    sql = f"SELECT /*+ {hint} */ count(*) AS n, count(DISTINCT f.id) AS ids FROM {T}{table} f JOIN {d} ON f.id = d.id"
+                    queries.append((name, sql, True, None))
+    return queries
+
+
 def queries_for(suite):
     return {
         "join": join_suite,
         "topk_minmax": topk_minmax_suite,
         "layouts": layouts_suite,
         "fuzz": fuzz_queries,
+        "strjoin": strjoin_suite,
     }[suite]()
 
 

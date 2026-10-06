@@ -130,6 +130,7 @@ def run_query(spark, name, sql, ordered=True, confs=None):
         "total_ms": (finished - started) * 1000.0,
         "rows": len(rows),
         "checksum": digest(rows, ordered),
+        "sample": repr([tuple(normalize(v) for v in row) for row in rows[:3]])[:300] if len(rows) <= 3 else "",
         **scan_metrics(plan),
     }
 

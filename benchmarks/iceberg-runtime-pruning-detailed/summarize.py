@@ -171,6 +171,22 @@ def main():
                 f"{pm('iceberg_runtime_row_groups_pruned'):,.0f} ({pm('iceberg_runtime_row_groups_pruned_live'):,.0f}) |"
             )
 
+    # --- string-join diagnostic: the expected count is the width in the query name -----------
+    diag = [q for q in queries if suite_of[q] == "strjoin"]
+    if diag:
+        print("\n## strjoin: join results against the expected row count\n")
+        print("Every build key exists exactly once in the fact table, so `n` must equal the width.\n")
+        print("| query | expected | Spark | main | off | on |")
+        print("|---|---|---|---|---|---|")
+        for q in diag:
+            expected = int(q.rsplit("_", 1)[1])
+            cells = []
+            for v in VARIANTS:
+                runs = by_key[(q, v)]
+                cells.append(runs[0].get("sample", "?") if runs and "error" not in runs[0] else "error")
+            if any(not c.startswith(f"[({expected},") for c in cells):
+                print(f"| {q} | {expected} | " + " | ".join(cells) + " |")
+
     # --- fuzz ----------------------------------------------------------------------------
     fuzz = [q for q in queries if suite_of[q] == "fuzz"]
     if fuzz:
