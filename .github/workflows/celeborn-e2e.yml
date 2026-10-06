@@ -205,6 +205,9 @@ jobs:
           run-id: ${{ inputs.binary_run || github.run_id }}
           pattern: celeborn-*
           path: artifacts
+      - name: Free runner disk for replicated wide shuffles
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
       - name: Prepare exact binaries and Spark runtime
         run: |
           python -m pip install pyspark==3.5.9
