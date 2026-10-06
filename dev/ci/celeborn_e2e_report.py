@@ -81,8 +81,8 @@ def main():
                      "| Scenario | Original MiB | Heap MiB | Direct MiB | Heap change | Direct change |",
                      "| --- | ---: | ---: | ---: | ---: | ---: |"]
     configuration_lines = ["", "## Workload configuration", "",
-                           "| Scenario | Input rows | Payload bytes/row | Payload | Partitions | Codec | Admission | Frame | Cores | Replicas | Skew percent |",
-                           "| --- | ---: | ---: | --- | ---: | --- | --- | --- | ---: | --- | ---: |"]
+                           "| Scenario | Input rows | Payload bytes/row | Payload | Partitions | Codec | Admission | Frame | Batch rows | Cores | Replicas | Skew percent |",
+                           "| --- | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | --- | ---: |"]
     manifests = {}
     for directory in sorted(args.artifacts.glob("e2e-*")):
         name = directory.name.removeprefix("e2e-")
@@ -133,7 +133,7 @@ def main():
             summary["queries"][query_name] = query_summary
         o, h, d = [median([fork["max_rss_bytes"] for fork in process[mode]]) / 1048576 for mode in process]
         process_lines.append(f"| {name} | {o:.1f} | {h:.1f} | {d:.1f} | {(h/o-1)*100:+.1f}% | {(d/o-1)*100:+.1f}% |")
-        configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config['cores']} | {config['replicate']} | {config['skew']} |")
+        configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config.get('batch', 8192)} | {config['cores']} | {config['replicate']} | {config['skew']} |")
         result[name] = summary
     assert result
     lines.extend(memory_lines + process_lines + diagnostic_lines + configuration_lines)

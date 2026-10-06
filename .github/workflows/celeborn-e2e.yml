@@ -6,6 +6,10 @@ on:
       - '.github/workflows/celeborn-e2e.yml'
   workflow_dispatch:
     inputs:
+      binary_run:
+        description: Optional successful run whose pinned binaries should be reused
+        type: string
+        default: ''
       scenarios:
         description: Comma-separated scenario names, or all
         type: string
@@ -60,6 +64,7 @@ jobs:
               output.write('scenarios=' + json.dumps(selected) + '\n')
           EOF
   comet:
+    if: ${{ !inputs.binary_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
@@ -136,6 +141,7 @@ jobs:
           name: comet-${{ matrix.version }}
           path: bundle/**
   celeborn:
+    if: ${{ !inputs.binary_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -172,6 +178,7 @@ jobs:
           path: bundle/**
   benchmark:
     needs: [protocol, comet, celeborn]
+    if: ${{ always() && needs.protocol.result == 'success' && (inputs.binary_run || (needs.comet.result == 'success' && needs.celeborn.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
@@ -187,10 +194,14 @@ jobs:
           java-version: '17'
       - uses: actions/download-artifact@v4
         with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.binary_run || github.run_id }}
           pattern: comet-*
           path: artifacts
       - uses: actions/download-artifact@v4
         with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.binary_run || github.run_id }}
           pattern: celeborn-*
           path: artifacts
       - name: Prepare exact binaries and Spark runtime
