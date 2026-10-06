@@ -108,18 +108,38 @@ def plan_metrics(plan):
     return result
 
 
-def stored_frames(application_id):
-    samples = []
+def storage_snapshot(application_id):
+    files = []
     for file in Path("/tmp/celeborn-worker").rglob("*"):
-        if application_id not in str(file) or not file.is_file() or file.stat().st_size < 32:
+        if application_id not in str(file):
             continue
-        with file.open("rb") as stream:
-            head = stream.read(32)
+        try:
+            if file.is_file():
+                size = file.stat().st_size
+                if size > 0:
+                    files.append({"path": str(file), "file_bytes": size})
+        except FileNotFoundError:
+            # Spark's ContextCleaner may unregister older exchanges during observation.
+            continue
+    return files
+
+
+def stored_frames(files):
+    samples = []
+    for file in files:
+        if file["file_bytes"] < 32:
+            continue
+        try:
+            with Path(file["path"]).open("rb") as stream:
+                head = stream.read(32)
+        except FileNotFoundError:
+            continue
+        if len(head) != 32:
+            continue
         map_id, attempt, batch_id, payload_bytes = struct.unpack("<4i", head[:16])
         frame_body_bytes, fields = struct.unpack("<2q", head[16:32])
         if payload_bytes >= 16 and frame_body_bytes == payload_bytes - 8 and 0 < fields < 1024:
-            samples.append({"path": str(file), "file_bytes": file.stat().st_size,
-                            "payload_bytes": payload_bytes, "field_count": fields,
+            samples.append({**file, "payload_bytes": payload_bytes, "field_count": fields,
                             "map_id": map_id, "attempt": attempt, "batch_id": batch_id})
     return samples
 
@@ -201,16 +221,15 @@ def main():
                                                         "native_capability_reason": unavailable, "queries": records}, indent=2))
                 print("SAMPLE=" + json.dumps({"mode": args.mode, "query": name, **{k: v for k, v in sample.items() if k != "sql_metrics"}}), flush=True)
         if args.mode in ["original", "heap", "direct"]:
-            files = [file for file in Path("/tmp/celeborn-worker").rglob("*")
-                     if spark.sparkContext.applicationId in str(file) and file.is_file() and file.stat().st_size > 0]
+            files = storage_snapshot(spark.sparkContext.applicationId)
             assert files, "No data in this application's live Celeborn worker storage"
             if spark.sparkContext.getConf().get("spark.celeborn.client.push.replicate.enabled") == "true":
-                assert any(file.name.split(".")[0].endswith("-1") for file in files), "No stored replicas"
+                assert any(Path(file["path"]).name.split(".")[0].endswith("-1") for file in files), "No stored replicas"
             Path(args.output + ".worker-storage.json").write_text(json.dumps({
-                "files": len(files), "bytes": sum(file.stat().st_size for file in files),
-                "examples": [str(file) for file in files[:20]]}, indent=2))
+                "files": len(files), "bytes": sum(file["file_bytes"] for file in files),
+                "examples": [file["path"] for file in files[:20]]}, indent=2))
         if args.mode in ["heap", "direct"]:
-            frames = stored_frames(spark.sparkContext.applicationId)
+            frames = stored_frames(files)
             assert frames, "No native frames in this application's live worker storage"
             if spark.sparkContext.getConf().get("spark.celeborn.client.push.replicate.enabled") == "true":
                 assert any(Path(frame["path"]).name.split(".")[0].endswith("-1") for frame in frames), "No native replicas"
