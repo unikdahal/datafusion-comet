@@ -687,6 +687,29 @@ class CometJoinSuite extends CometTestBase {
     }
   }
 
+  test("join dynamic filter prunes the probe side of a semi join") {
+    withSQLConf(
+      CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.SHUFFLE_PARTITIONS.key -> "2") {
+      val probe = (0 until 100).map(i => (Option(i), i.toLong)) :+ ((None: Option[Int], 100L))
+      withParquetTable(probe, "semi_probe") {
+        withParquetTable(Seq((Some(10), 4L), (Some(60), 5L), (None, 6L)), "semi_build") {
+          // An unmatched probe row never reaches a semi join's output, so pruning it early
+          // cannot change the answer.
+          val query = "SELECT /*+ SHUFFLE_HASH(b) */ p.* FROM semi_probe p " +
+            "LEFT SEMI JOIN semi_build b ON p._1 = b._1"
+          val (_, plan) = checkSparkAnswerAndOperator(sql(query))
+          val native = nativeHashJoins(plan)
+          assert(native.size == 1, s"Expected native hash join:\n$plan")
+          assert(native.head.metrics("dynamic_filter_join_rows_evaluated").value > 0L)
+          assert(native.head.metrics("dynamic_filter_join_rows_pruned").value > 0L)
+        }
+      }
+    }
+  }
+
   test("join dynamic filter leaves unsupported joins on their existing native path") {
     withSQLConf(
       CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true",
@@ -701,7 +724,6 @@ class CometJoinSuite extends CometTestBase {
             "LEFT JOIN dynamic_build b ON p._1 = b._1" -> "b",
             "RIGHT JOIN dynamic_build b ON p._1 = b._1" -> "p",
             "FULL JOIN dynamic_build b ON p._1 = b._1" -> "b",
-            "LEFT SEMI JOIN dynamic_build b ON p._1 = b._1" -> "b",
             "LEFT ANTI JOIN dynamic_build b ON p._1 = b._1" -> "b",
             "JOIN dynamic_build b ON p._1 <=> b._1" -> "b",
             "JOIN dynamic_build b ON p._1 + 1 = b._1" -> "b",
