@@ -2,6 +2,10 @@ name: Buffer shuffle validation
 on:
   push:
     branches: [feature/async-buffer-shuffle]
+    paths-ignore:
+      - 'dev/ci/celeborn_e2e_*'
+      - '.github/workflows/celeborn-e2e.yml'
+      - 'docs/source/user-guide/latest/celeborn-benchmark.md'
   workflow_dispatch:
     inputs:
       celeborn_repository:

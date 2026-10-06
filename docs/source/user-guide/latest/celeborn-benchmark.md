@@ -1,0 +1,13 @@
+# End-to-end Celeborn shuffle benchmarks
+
+Dispatch `Celeborn end-to-end performance` on GitHub Actions to build exact source revisions and measure query speed, resident memory, GC, and shuffle metrics. All builds and measurements execute in Actions. The workflow pins the original and current Comet and Celeborn commits, verifies binary hashes, and packages the native libraries using the production release profile.
+
+The original Comet/client pair selects delegated row shuffle because the transport fields cannot safely be replaced. The new heap and direct modes select native shuffle using the public buffer API. An original/new comparison includes this execution-path and format change. A heap/direct comparison measures the buffer-mode tradeoff within the same native implementation.
+
+The checked-in scenario matrix varies input rows from one to ten million, payload width from zero to 256 bytes, payload compressibility, codecs, partition counts, admission limits, frame sizes, replication, task concurrency, and skew. Hash repartition, range repartition and join queries retain the payload through their exchange and validate their results against vanilla Spark. Native plans and samples from the application's live worker storage guard against silently benchmarking a fallback path.
+
+By default each mode uses three independent JVM forks, three warmups and five measurements per query per fork. Every measurement rebuilds its query and exchanges. Mode and query orders rotate; modes execute sequentially on the same runner. Services restart and worker storage is cleared between JVM forks. Event logs, plans, raw samples, hardware details, effective configuration, binary manifests and process resource measurements are uploaded as artifacts. Timing excludes input preparation and checksum calculation, and includes the complete query collect action.
+
+The report separates per-query sampled Spark process RSS, combined service/process RSS, and process-lifetime high-water RSS from framing allocation. Driver RSS includes JVM and native memory. Combined RSS sums the resident memory of separate processes and can count shared mappings twice. Memory is sampled every 100 ms. GC, task CPU, shuffle byte/time, spill and SQL metrics help diagnose differences; they do not provide a full CPU profile or network trace.
+
+Use `scenarios=small-numeric,forks=1,warmups=1,samples=1` for a smoke check. Use the defaults for measurements. Three forks provide limited estimates of variability; the report preserves paired fork ratios and exploratory bootstrap intervals without asserting a universal performance improvement. GitHub-hosted single-machine results are useful for comparative diagnosis and must be rechecked in the target deployment for capacity planning.

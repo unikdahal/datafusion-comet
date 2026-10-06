@@ -1,0 +1,243 @@
+name: Celeborn end-to-end performance
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: Comma-separated scenario names, or all
+        type: string
+        default: all
+      forks:
+        description: Independent JVMs per mode (three balances execution order)
+        type: number
+        default: 3
+      warmups:
+        description: Fresh query warmups per JVM
+        type: number
+        default: 3
+      samples:
+        description: Fresh measured queries per JVM
+        type: number
+        default: 5
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+env:
+  ORIGINAL_COMET: ba08acd815d5fd15f75ce9f314715778b9161cf1
+  CURRENT_COMET: 336a9434481b5dfd9fd53b64503cd393d1b39f7b
+  ORIGINAL_CELEBORN: 1f15bdcda40bcc9107d3f0b8ba64ad66c785cd0b
+  CURRENT_CELEBORN: ecead097a8649bff24dacbaf481ef0fb9f2f5330
+  RUSTFLAGS: '-Ctarget-cpu=x86-64-v3 -Clink-arg=-fuse-ld=bfd'
+  CARGO_PROFILE_RELEASE_DEBUG: '0'
+  SPARK_LOCAL_IP: 127.0.0.1
+  SPARK_LOCAL_HOSTNAME: localhost
+jobs:
+  protocol:
+    runs-on: ubuntu-24.04
+    outputs:
+      scenarios: ${{ steps.matrix.outputs.scenarios }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check benchmark scripts and select scenarios
+        id: matrix
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          python -m py_compile dev/ci/celeborn_e2e_*.py
+          python - <<'EOF'
+          import json, os
+          from pathlib import Path
+          available = json.loads(Path('dev/ci/celeborn_e2e_scenarios.json').read_text())
+          selected = list(available) if os.environ['SCENARIOS'] == 'all' else os.environ['SCENARIOS'].split(',')
+          assert selected and all(name in available for name in selected)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('scenarios=' + json.dumps(selected) + '\n')
+          EOF
+  comet:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [original, current]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.version == 'original' && env.ORIGINAL_COMET || env.CURRENT_COMET }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/cache/restore@v4
+        if: matrix.version == 'original'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ runner.os }}-cargo-e2e-original-${{ hashFiles('native/**/Cargo.lock', 'native/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-buffer-release-debug0-
+      - name: Build original production native library
+        if: matrix.version == 'original'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          ./mvnw -B -ntp -Pspark-3.5,scala-2.12 compile -DskipTests
+          (cd native && cargo build --release -j 2)
+      - uses: actions/download-artifact@v4
+        if: matrix.version == 'current'
+        with:
+          github-token: ${{ github.token }}
+          run-id: 37387763044
+          name: native-release-library
+          path: native/target/release
+      - name: Verify native source and package matching JVM library
+        env:
+          VERSION: ${{ matrix.version }}
+        run: |
+          if [ "$VERSION" = current ]; then
+            test "$(head -1 native/target/release/native-build.txt)" = "$CURRENT_COMET"
+          fi
+          ./mvnw -B -ntp -Pspark-3.5,scala-2.12 -Prelease package -DskipTests
+          mkdir -p bundle
+          cp $(find spark/target -maxdepth 1 -name 'comet-spark-spark3.5_2.12-*.jar' ! -name '*tests*' ! -name '*sources*' | head -1) bundle/
+          python - <<'EOF'
+          import hashlib, json, subprocess, zipfile
+          from pathlib import Path
+          jar = next(Path('bundle').glob('*.jar'))
+          native = Path('native/target/release/libcomet.so').read_bytes()
+          with zipfile.ZipFile(jar) as archive:
+              embedded = archive.read('org/apache/comet/linux/x86_64/libcomet.so')
+          assert embedded == native
+          manifest = {'sha': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+                      'jar_sha256': hashlib.sha256(jar.read_bytes()).hexdigest(),
+                      'native_sha256': hashlib.sha256(native).hexdigest(),
+                      'profile': 'release, thin LTO, one codegen unit, debug=0', 'rustflags': '-Ctarget-cpu=x86-64-v3 -Clink-arg=-fuse-ld=bfd'}
+          Path('bundle/manifest.json').write_text(json.dumps(manifest,indent=2))
+          EOF
+      - uses: actions/cache/save@v4
+        if: matrix.version == 'original'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ runner.os }}-cargo-e2e-original-${{ hashFiles('native/**/Cargo.lock', 'native/**/Cargo.toml') }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comet-${{ matrix.version }}
+          path: bundle/**
+  celeborn:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [original, current]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/celeborn
+          ref: ${{ matrix.version == 'original' && env.ORIGINAL_CELEBORN || env.CURRENT_CELEBORN }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Build matching client, master and workers
+        run: |
+          build/make-distribution.sh -Pspark-3.5
+          mkdir -p bundle
+          tar -czf bundle/distribution.tar.gz dist
+          python - <<'EOF'
+          import hashlib, json, subprocess
+          from pathlib import Path
+          dist = Path('bundle/distribution.tar.gz')
+          client = next(Path('dist/spark').glob('celeborn-client-spark-3-shaded_2.12-*.jar'))
+          Path('bundle/manifest.json').write_text(json.dumps({'sha':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+              'distribution_sha256':hashlib.sha256(dist.read_bytes()).hexdigest(),
+              'client_sha256':hashlib.sha256(client.read_bytes()).hexdigest()},indent=2))
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: celeborn-${{ matrix.version }}
+          path: bundle/**
+  benchmark:
+    needs: [protocol, comet, celeborn]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        scenario: ${{ fromJSON(needs.protocol.outputs.scenarios) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: comet-*
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: celeborn-*
+          path: artifacts
+      - name: Prepare exact binaries and Spark runtime
+        run: |
+          python -m pip install pyspark==3.5.9
+          SPARK_HOME=$(python -c 'import os, pyspark; print(os.path.dirname(pyspark.__file__))')
+          echo "SPARK_HOME=$SPARK_HOME" >> "$GITHUB_ENV"
+          python - <<'EOF'
+          import hashlib, json
+          from pathlib import Path
+          for directory in Path('artifacts').iterdir():
+              manifest = json.loads((directory / 'manifest.json').read_text())
+              file = directory / 'distribution.tar.gz' if directory.name.startswith('celeborn-') else next(directory.glob('*.jar'))
+              key = 'distribution_sha256' if directory.name.startswith('celeborn-') else 'jar_sha256'
+              assert hashlib.sha256(file.read_bytes()).hexdigest() == manifest[key]
+          EOF
+          for version in original current; do
+            tar -xzf "artifacts/celeborn-$version/distribution.tar.gz" -C "artifacts/celeborn-$version"
+            rm "artifacts/celeborn-$version/distribution.tar.gz"
+          done
+          mkdir -p results
+          lscpu > results/hardware.txt
+          free -b > results/memory.txt
+          df -B1 > results/disk.txt
+          java -version 2> results/java.txt
+          git rev-parse HEAD > results/benchmark-source.txt
+      - name: Run repeated end-to-end queries
+        run: |
+          python -u dev/ci/celeborn_e2e_runner.py --scenario '${{ matrix.scenario }}' \
+            --artifacts artifacts --output results \
+            --forks '${{ inputs.forks }}' --warmups '${{ inputs.warmups }}' --samples '${{ inputs.samples }}' \
+            2>&1 | tee results/orchestration.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-${{ matrix.scenario }}
+          path: results/**
+  report:
+    needs: benchmark
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: e2e-*
+          path: evidence
+      - name: Summarize speed, memory and diagnostic metrics
+        run: |
+          python dev/ci/celeborn_e2e_report.py --artifacts evidence --output report
+          cat report/performance.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: end-to-end-report
+          path: report/**
