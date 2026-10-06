@@ -24,7 +24,7 @@ use datafusion::physical_expr::expressions::{
 };
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions};
 use datafusion_comet_operators::CometFilterExec;
 use iceberg::arrow::{RuntimePredicateProvider, RuntimePredicateSnapshot};
 use iceberg::expr::{Predicate, Reference};
@@ -236,7 +236,10 @@ fn attach_below(
         let Some(reader) = attach_below(projection.input(), predicate, order, below)? else {
             return Ok(None);
         };
-        return Ok(Some(Arc::clone(input).with_new_children(vec![reader])?));
+        return Ok(Some(Arc::clone(input).replace_children(
+            vec![reader],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )?));
     }
 
     let Some(scan) = input.downcast_ref::<IcebergScanExec>() else {
