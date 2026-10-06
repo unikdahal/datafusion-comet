@@ -27,6 +27,8 @@ use datafusion::datasource::physical_plan::{FileSource, ParquetSource};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::physical_expr::expressions::DynamicFilterPhysicalExpr;
 use datafusion::physical_expr::PhysicalExpr;
+
+use crate::execution::operators::RuntimeScanOrder;
 use datafusion::physical_plan::ExecutionPlan;
 
 use super::super::parquet_reader::{
@@ -45,12 +47,14 @@ pub(super) fn try_attach_topk_reader_filter(
     input: &Arc<dyn ExecutionPlan>,
     predicate: Arc<DynamicFilterPhysicalExpr>,
     config: &ConfigOptions,
+    order: RuntimeScanOrder,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     // Iceberg scans and Parquet DataSourceExec inputs are disjoint plan types,
     // so trying Iceberg first never hides a Parquet attachment.
     if let Some(scan) = super::super::iceberg_reader::try_attach_iceberg_reader_filter(
         input,
         Arc::clone(&predicate),
+        Some(order),
     )? {
         return Ok(Some(scan));
     }

@@ -75,6 +75,9 @@ pub struct IcebergScanExec {
     data_file_concurrency_limit: usize,
     /// Execution-time predicate source attached to this scan.
     runtime_predicate_provider: Option<Arc<dyn RuntimePredicateProvider>>,
+    /// Field id and direction to order file tasks by, so the producer's bound tightens on the
+    /// best files first and statistics reject the rest before they are opened.
+    runtime_task_order: Option<(i32, RuntimeScanOrder)>,
     /// Metrics
     metrics: ExecutionPlanMetricsSet,
 }
@@ -102,11 +105,19 @@ impl IcebergScanExec {
             tasks,
             data_file_concurrency_limit,
             runtime_predicate_provider: None,
+            runtime_task_order: None,
             metrics,
         })
     }
 
     pub(crate) fn runtime_predicate_field_name(&self, output_index: usize) -> Option<String> {
+        self.runtime_predicate_field(output_index)
+            .map(|(_, name)| name)
+    }
+
+    /// The Iceberg field id and name behind output column `output_index`, when every task maps
+    /// it to the same top-level int, long or date field.
+    pub(crate) fn runtime_predicate_field(&self, output_index: usize) -> Option<(i32, String)> {
         use arrow::datatypes::DataType;
         use iceberg::spec::{PrimitiveType, Type};
 
@@ -143,6 +154,7 @@ impl IcebergScanExec {
                 (output.data_type(), field.field_type.as_ref()),
                 (DataType::Int32, Type::Primitive(PrimitiveType::Int))
                     | (DataType::Int64, Type::Primitive(PrimitiveType::Long))
+                    | (DataType::Date32, Type::Primitive(PrimitiveType::Date))
             ) {
                 return None;
             }
@@ -157,12 +169,13 @@ impl IcebergScanExec {
             field_name = Some(current_name);
         }
 
-        field_name
+        field_id.zip(field_name)
     }
 
     pub(crate) fn with_runtime_predicate_provider(
         &self,
         runtime_predicate_provider: Arc<dyn RuntimePredicateProvider>,
+        task_order: Option<(i32, RuntimeScanOrder)>,
     ) -> Self {
         Self {
             metadata_location: self.metadata_location.clone(),
@@ -173,6 +186,7 @@ impl IcebergScanExec {
             tasks: self.tasks.clone(),
             data_file_concurrency_limit: self.data_file_concurrency_limit,
             runtime_predicate_provider: Some(runtime_predicate_provider),
+            runtime_task_order: task_order,
             metrics: self.metrics.clone(),
         }
     }
@@ -252,6 +266,11 @@ impl IcebergScanExec {
 
         let metrics = IcebergScanMetrics::new(&self.metrics);
         metrics.num_splits.add(tasks.len());
+
+        let mut tasks = tasks;
+        if let Some((field_id, order)) = self.runtime_task_order {
+            order_tasks_for_runtime_bound(&mut tasks, field_id, order);
+        }
 
         // Delete-file sizes are not serialized and arrive as 0 (unknown).
         // iceberg-rust sizes each Parquet delete file once per reader, when a
@@ -611,6 +630,94 @@ fn adapt_batch_with_expressions(
     RecordBatch::try_new(Arc::clone(target_schema), columns).map_err(|e| e.into())
 }
 
+/// Direction in which a runtime producer's bound tightens: a top-k or MIN keeps the smallest
+/// values (`Ascending`), a descending top-k or MAX the largest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeScanOrder {
+    Ascending { nulls_first: bool },
+    Descending { nulls_first: bool },
+}
+
+/// Reorders file tasks so the ones holding the producer's best values are read first.
+///
+/// Read order never changes a top-k or MIN/MAX result, and a single Spark task reads its file
+/// tasks in sequence by default. Files sorted by key are otherwise read in ascending order, so
+/// a descending top-k or MAX bound only tightens on the last file and prunes nothing. Reading
+/// the file with the highest upper bound first sets the bound at once; statistics then reject
+/// the remaining files before they are opened.
+///
+/// Tasks are ranked by the key's whole-file bound (lower bound ascending, or upper bound
+/// descending). When nulls sort first they are the best values, so files that hold nulls come
+/// first. Splits of one file keep their offsets in the same direction. Tasks without a usable
+/// bound keep their relative order after the ranked ones.
+pub(crate) fn order_tasks_for_runtime_bound(
+    tasks: &mut [FileScanTask],
+    field_id: i32,
+    order: RuntimeScanOrder,
+) {
+    use std::cmp::Ordering;
+
+    let (descending, nulls_first) = match order {
+        RuntimeScanOrder::Ascending { nulls_first } => (false, nulls_first),
+        RuntimeScanOrder::Descending { nulls_first } => (true, nulls_first),
+    };
+    let field_type = |task: &FileScanTask| {
+        task.schema()
+            .field_by_id(field_id)
+            .and_then(|field| field.field_type.as_primitive_type().cloned())
+    };
+    // Only bounds typed like the field compare with each other, so the ranking is a total order.
+    let bound = |task: &FileScanTask| {
+        let metrics = task.file_metrics()?;
+        let bounds = if descending {
+            metrics.upper_bounds()
+        } else {
+            metrics.lower_bounds()
+        };
+        let bound = bounds.get(&field_id)?;
+        (Some(bound.data_type()) == field_type(task).as_ref()).then(|| bound.clone())
+    };
+    let holds_nulls = |task: &FileScanTask| {
+        task.file_metrics()
+            .and_then(|metrics| metrics.null_value_counts().get(&field_id))
+            .is_some_and(|count| *count > 0)
+    };
+    let mut ranked: Vec<_> = tasks
+        .iter()
+        .map(|task| (nulls_first && holds_nulls(task), bound(task), task.start()))
+        .zip(tasks.iter().cloned())
+        .collect();
+    ranked.sort_by(
+        |((left_nulls, left, left_start), _), ((right_nulls, right, right_start), _)| {
+            right_nulls
+                .cmp(left_nulls)
+                .then_with(|| match (left, right) {
+                    (Some(left), Some(right)) => {
+                        let order = left.partial_cmp(right).unwrap_or(Ordering::Equal);
+                        if descending {
+                            order.reverse()
+                        } else {
+                            order
+                        }
+                    }
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                })
+                .then_with(|| {
+                    if descending {
+                        right_start.cmp(left_start)
+                    } else {
+                        left_start.cmp(right_start)
+                    }
+                })
+        },
+    );
+    for (slot, (_, task)) in tasks.iter_mut().zip(ranked) {
+        *slot = task;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -905,6 +1012,80 @@ mod tests {
             decoded.aad_prefix().map(|a| a.len()),
             Some(16),
             "expected a 16-byte AAD prefix from the Java blob"
+        );
+    }
+
+    #[test]
+    fn runtime_order_reads_best_files_first() {
+        use std::collections::HashMap;
+
+        use iceberg::scan::FileScanTaskMetrics;
+        use iceberg::spec::{Datum, NestedField, PrimitiveType, Type};
+
+        use super::{order_tasks_for_runtime_bound, RuntimeScanOrder};
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![NestedField::optional(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into()])
+                .build()
+                .unwrap(),
+        );
+        let task = |path: &str, start: u64, bounds: Option<(i32, i32, u64)>| {
+            let metrics = bounds.map(|(lower, upper, nulls)| {
+                Arc::new(FileScanTaskMetrics::new(
+                    Some(10),
+                    HashMap::new(),
+                    HashMap::from([(1, nulls)]),
+                    HashMap::new(),
+                    HashMap::from([(1, Datum::int(lower))]),
+                    HashMap::from([(1, Datum::int(upper))]),
+                ))
+            });
+            FileScanTask::builder()
+                .with_file_size_in_bytes(1024)
+                .with_start(start)
+                .with_length(0)
+                .with_data_file_path(path.into())
+                .with_data_file_format(DataFileFormat::Parquet)
+                .with_schema(Arc::clone(&schema))
+                .with_project_field_ids(vec![1])
+                .with_case_sensitive(false)
+                .with_file_metrics(metrics)
+                .build()
+                .unwrap()
+        };
+        let tasks = vec![
+            task("a", 0, Some((0, 99, 0))),
+            task("unknown", 0, None),
+            task("b", 0, Some((100, 199, 3))),
+            task("c", 0, Some((200, 299, 0))),
+            task("c", 100, Some((200, 299, 0))),
+        ];
+        let order = |order| {
+            let mut tasks = tasks.clone();
+            order_tasks_for_runtime_bound(&mut tasks, 1, order);
+            tasks
+                .iter()
+                .map(|task| format!("{}@{}", task.data_file_path(), task.start()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(RuntimeScanOrder::Descending { nulls_first: false }),
+            ["c@100", "c@0", "b@0", "a@0", "unknown@0"]
+        );
+        assert_eq!(
+            order(RuntimeScanOrder::Ascending { nulls_first: false }),
+            ["a@0", "b@0", "c@0", "c@100", "unknown@0"]
+        );
+        // Nulls sort first: the file holding nulls has the best values.
+        assert_eq!(
+            order(RuntimeScanOrder::Ascending { nulls_first: true }),
+            ["b@0", "a@0", "c@0", "c@100", "unknown@0"]
         );
     }
 }

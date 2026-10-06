@@ -43,6 +43,8 @@ mod reader;
 
 use reader::try_attach_topk_reader_filter;
 
+use crate::execution::operators::RuntimeScanOrder;
+
 /// Keep an unexecuted template in the Spark plan. Each stream gets a fresh TopK
 /// and reader predicate, so a previous execution's threshold cannot discard rows
 /// in a later execution. Only metric handles outlive the stream.
@@ -109,10 +111,23 @@ impl TopKReaderFilterExec {
                 .collect(),
             lit(true),
         ));
+        // Read the files holding the first key's best values first, so the bound tightens at
+        // once and the remaining files are rejected by their statistics.
+        let first = self.template.expr()[0].options;
+        let order = if first.descending {
+            RuntimeScanOrder::Descending {
+                nulls_first: first.nulls_first,
+            }
+        } else {
+            RuntimeScanOrder::Ascending {
+                nulls_first: first.nulls_first,
+            }
+        };
         let reader = try_attach_topk_reader_filter(
             self.template.input(),
             Arc::clone(&predicate),
             &self.config,
+            order,
         )?;
         let reader_filter_attached = reader.is_some();
         let input = reader.unwrap_or_else(|| Arc::clone(self.template.input()));

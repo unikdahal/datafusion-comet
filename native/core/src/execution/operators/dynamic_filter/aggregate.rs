@@ -38,6 +38,7 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 
 use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_reader_filter};
+use crate::execution::operators::RuntimeScanOrder;
 
 /// AggregateExec's default state reset can retain producer bounds. Reconstruct
 /// the aggregate from its public configuration for every execution instead.
@@ -93,7 +94,9 @@ impl IcebergMinMaxFilterExec {
         }
         let fresh = Self::fresh_aggregate(aggregate, Arc::clone(aggregate.input()))?;
         let predicate = Self::producer(&fresh);
-        if try_attach_iceberg_reader_filter(fresh.input(), predicate)?.is_none() {
+        if try_attach_iceberg_reader_filter(fresh.input(), predicate, Self::scan_order(&fresh))?
+            .is_none()
+        {
             return Ok(None);
         }
         Ok(Some(Self {
@@ -118,6 +121,20 @@ impl IcebergMinMaxFilterExec {
         .with_limit_options(template.limit_options()))
     }
 
+    /// MIN tightens toward small values and MAX toward large ones; nulls never qualify.
+    fn scan_order(aggregate: &AggregateExec) -> Option<RuntimeScanOrder> {
+        match aggregate.aggr_expr()[0]
+            .fun()
+            .name()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "min" => Some(RuntimeScanOrder::Ascending { nulls_first: false }),
+            "max" => Some(RuntimeScanOrder::Descending { nulls_first: false }),
+            _ => None,
+        }
+    }
+
     fn producer(aggregate: &AggregateExec) -> Arc<DynamicFilterPhysicalExpr> {
         Arc::new(DynamicFilterPhysicalExpr::new(
             aggregate.aggr_expr()[0].expressions(),
@@ -128,12 +145,16 @@ impl IcebergMinMaxFilterExec {
     fn build_runtime_aggregate(&self) -> Result<AggregateExec> {
         let aggregate = Self::fresh_aggregate(&self.template, Arc::clone(self.template.input()))?;
         let predicate = Self::producer(&aggregate);
-        let input = try_attach_iceberg_reader_filter(aggregate.input(), Arc::clone(&predicate))?
-            .ok_or_else(|| {
-                datafusion::common::internal_datafusion_err!(
-                    "Eligible MIN/MAX aggregate lost its Iceberg reader"
-                )
-            })?;
+        let input = try_attach_iceberg_reader_filter(
+            aggregate.input(),
+            Arc::clone(&predicate),
+            Self::scan_order(&aggregate),
+        )?
+        .ok_or_else(|| {
+            datafusion::common::internal_datafusion_err!(
+                "Eligible MIN/MAX aggregate lost its Iceberg reader"
+            )
+        })?;
         Self::fresh_aggregate(&aggregate, input)?.with_dynamic_filter_expr(predicate)
     }
 }

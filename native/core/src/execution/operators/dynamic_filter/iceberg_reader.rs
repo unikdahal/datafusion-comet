@@ -31,7 +31,7 @@ use iceberg::spec::Datum;
 use iceberg::{Error, ErrorKind, Result as IcebergResult};
 
 use super::parquet_reader::is_direct_column_null_checks;
-use crate::execution::operators::IcebergScanExec;
+use crate::execution::operators::{IcebergScanExec, RuntimeScanOrder};
 
 #[derive(Debug)]
 struct IcebergRuntimePredicateProvider {
@@ -103,9 +103,12 @@ pub(super) fn reaches_iceberg_reader(input: &Arc<dyn ExecutionPlan>) -> bool {
     input.is::<IcebergScanExec>()
 }
 
+/// Attaches `predicate` to the Iceberg scan below `input`. With `order`, the scan also reads
+/// its file tasks best-first for that direction (see `order_tasks_for_runtime_bound`).
 pub(super) fn try_attach_iceberg_reader_filter(
     input: &Arc<dyn ExecutionPlan>,
     predicate: Arc<DynamicFilterPhysicalExpr>,
+    order: Option<RuntimeScanOrder>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
     if input.fetch().is_some() {
         return Ok(None);
@@ -116,7 +119,7 @@ pub(super) fn try_attach_iceberg_reader_filter(
             return Ok(None);
         }
         let Some(reader) =
-            try_attach_iceberg_reader_filter(filter.input(), Arc::clone(&predicate))?
+            try_attach_iceberg_reader_filter(filter.input(), Arc::clone(&predicate), order)?
         else {
             return Ok(None);
         };
@@ -149,7 +152,8 @@ pub(super) fn try_attach_iceberg_reader_filter(
     {
         return Ok(None);
     }
-    let Some(iceberg_field_name) = scan.runtime_predicate_field_name(column.index()) else {
+    let Some((iceberg_field_id, iceberg_field_name)) = scan.runtime_predicate_field(column.index())
+    else {
         return Ok(None);
     };
     let provider: Arc<dyn RuntimePredicateProvider> =
@@ -158,9 +162,10 @@ pub(super) fn try_attach_iceberg_reader_filter(
             column.index(),
             iceberg_field_name,
         ));
-    Ok(Some(Arc::new(
-        scan.with_runtime_predicate_provider(provider),
-    )))
+    Ok(Some(Arc::new(scan.with_runtime_predicate_provider(
+        provider,
+        order.map(|order| (iceberg_field_id, order)),
+    ))))
 }
 
 fn extract_iceberg_predicate(
