@@ -188,6 +188,12 @@ def main():
                      "--samples", args.samples, "--service-pids", ",".join(map(str, pids)),
                      "--output", target / "queries.json"], target / "spark.log", env)
                 record = json.loads((target / "queries.json").read_text())
+                if mode != "original":
+                    frames = json.loads((target / "queries.json.native-frames.json").read_text())
+                    frame_limit = int(scenario["frame"][:-1]) * {"k": 1024, "m": 1048576}[scenario["frame"][-1]]
+                    assert all(frame["payload_bytes"] <= frame_limit for frame in frames)
+                    if args.scenario == "large-frames":
+                        assert max(frame["payload_bytes"] for frame in frames) >= 1048576, "Large-frame case must actually push MiB-size frames"
                 metrics = event_metrics(event_dir)
                 for name, query in record["queries"].items():
                     assert query["sha256"] == expected[name]["sha256"] and query["rows"] == expected[name]["rows"], (mode, name)
