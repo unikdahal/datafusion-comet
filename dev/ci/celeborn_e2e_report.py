@@ -58,9 +58,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--allow-incomplete", action="store_true", help="Report incomplete scenarios explicitly, without performance claims for them")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     result = {}
+    failures = {}
     lines = ["# End-to-end speed and memory", "",
              "All measurements ran in GitHub Actions on Ubuntu 24.04 with Java 17 and Spark 3.5.9. Each scenario uses one isolated runner, one master, and two workers on that machine. Modes run sequentially; no Spark benchmark shares its runner with another benchmark.", "",
              "**Original** runs the exact original Comet and Celeborn fork-main commits. Its capability check selects delegated row shuffle. **Heap** and **Direct** run the new native shuffle implementation; heap is asynchronous with one JNI copy, direct is a synchronous native-buffer borrow. Original/new comparisons therefore include the shuffle implementation and format change. Heap/direct comparisons isolate the buffer-mode tradeoff.", "",
@@ -110,6 +112,23 @@ def main():
         protocol = json.loads((directory / "protocol.json").read_text())
         assert protocol["forks"] > 0 and protocol["samples"] > 0
         reference = json.loads((directory / "reference.json").read_text())["queries"]
+        incomplete = []
+        for fork in range(protocol["forks"]):
+            for mode in ["original", "heap", "direct"]:
+                target = directory / f"fork-{fork}-{mode}" / "queries.json"
+                if not target.exists():
+                    incomplete.append({"fork": fork, "mode": mode, "reason": "missing query record"})
+                    continue
+                queries = json.loads(target.read_text())["queries"]
+                for query_name in reference:
+                    samples = [s for s in queries.get(query_name, {}).get("samples", []) if not s["warmup"]]
+                    if len(samples) != protocol["samples"]:
+                        incomplete.append({"fork": fork, "mode": mode, "query": query_name, "measured_samples": len(samples), "required_samples": protocol["samples"]})
+        if incomplete:
+            assert args.allow_incomplete, (name, incomplete)
+            failures[name] = {"config": config, "protocol": protocol, "incomplete": incomplete,
+                              "benchmark_source": (directory / "benchmark-source.txt").read_text().strip()}
+            continue
         entries = {mode: [] for mode in ["original", "heap", "direct"]}
         process = {mode: [] for mode in entries}
         residency = {mode: [] for mode in entries}
@@ -197,11 +216,14 @@ def main():
         configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config.get('batch', 8192)} | {config['cores']} | {config['replicate']} | {config['skew']} | {config.get('offheap', '1g')} | {config.get('native_sort', True)} |")
         result[name] = summary
     assert result
+    if failures:
+        lines[2:2] = ["**Incomplete scenarios: " + ", ".join(sorted(failures)) + ".** These failed to complete the measurement protocol. No speed or memory comparison is claimed for them. The raw artifacts retain the error logs and partial records; JSON lists every missing measurement.", ""]
     lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + live_memory_lines + residency_lines + configuration_lines)
     lines.extend(["", "## Binary manifests", "", "```json", json.dumps(manifests, indent=2), "```", ""])
     (args.output / "performance.md").write_text("\n".join(lines))
-    (args.output / "performance.json").write_text(json.dumps({"manifests": manifests, "scenarios": result}, indent=2) + "\n")
+    (args.output / "performance.json").write_text(json.dumps({"manifests": manifests, "scenarios": result, "incomplete_scenarios": failures}, indent=2) + "\n")
     print("VERIFIED_SCENARIOS=" + str(len(result)))
+    print("INCOMPLETE_SCENARIOS=" + str(len(failures)))
 
 
 if __name__ == "__main__":

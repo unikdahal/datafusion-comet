@@ -16,6 +16,14 @@ on:
         description: Optional successful allocation diagnostic run ID
         type: string
         default: ''
+      capacity_run:
+        description: Optional successful controlled memory and sort comparison run ID
+        type: string
+        default: ''
+      include_failed_performance:
+        description: Report failed primary scenarios explicitly alongside completed scenarios
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
@@ -46,17 +54,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PERFORMANCE_RUN: ${{ inputs.performance_run }}
           ALLOCATION_RUN: ${{ inputs.allocation_run }}
+          CAPACITY_RUN: ${{ inputs.capacity_run }}
+          INCLUDE_FAILED: ${{ inputs.include_failed_performance }}
         run: |
           python - <<'EOF'
           import json, os, subprocess
           runs = {}
-          for role in ['PERFORMANCE_RUN', 'ALLOCATION_RUN']:
+          for role in ['PERFORMANCE_RUN', 'ALLOCATION_RUN', 'CAPACITY_RUN']:
               run = os.environ[role]
               if not run:
                   continue
               assert run.isdigit()
               record = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{run}'], text=True))
-              assert record['status'] == 'completed' and record['conclusion'] == 'success', (role, record['status'], record['conclusion'])
+              conclusions = ['success', 'failure'] if role == 'PERFORMANCE_RUN' and os.environ['INCLUDE_FAILED'] == 'true' else ['success']
+              assert record['status'] == 'completed' and record['conclusion'] in conclusions, (role, record['status'], record['conclusion'])
               assert record['path'] == '.github/workflows/celeborn-e2e.yml'
               runs[role] = {key: record[key] for key in ['id', 'head_sha', 'html_url', 'created_at', 'status', 'conclusion']}
           os.makedirs('report', exist_ok=True)
@@ -77,10 +88,21 @@ jobs:
           run-id: ${{ inputs.allocation_run }}
           pattern: e2e-*
           path: evidence
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.capacity_run }}
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.capacity_run }}
+          pattern: e2e-*
+          path: evidence
       - name: Publish complete speed, memory and CPU report
         if: ${{ inputs.performance_run }}
+        env:
+          INCLUDE_FAILED: ${{ inputs.include_failed_performance }}
         run: |
-          python dev/ci/celeborn_e2e_report.py --artifacts evidence --output report
+          options=()
+          if [ "$INCLUDE_FAILED" = true ]; then options+=(--allow-incomplete); fi
+          python dev/ci/celeborn_e2e_report.py --artifacts evidence --output report "${options[@]}"
           cat report/performance.md >> "$GITHUB_STEP_SUMMARY"
           git rev-parse HEAD > report/report-source.txt
       - uses: actions/upload-artifact@v4
