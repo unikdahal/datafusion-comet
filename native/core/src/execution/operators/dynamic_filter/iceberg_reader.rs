@@ -956,4 +956,125 @@ mod tests {
             Some(Reference::new("day").greater_than_or_equal_to(Datum::date(19_000)))
         );
     }
+
+    /// A small build side publishes bounds AND an exact IN list; both reach the reader.
+    #[tokio::test]
+    async fn extracts_bounds_and_membership_from_real_in_list_filter() {
+        use arrow::array::{Int32Array, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::common::{JoinType, NullEquality};
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::physical_plan::collect;
+        use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
+        use datafusion::prelude::SessionContext;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Int32, false)]));
+        let input = |values| {
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int32Array::from(values))],
+            )
+            .unwrap();
+            MemorySourceConfig::try_new_exec(&[vec![batch]], Arc::clone(&schema), None).unwrap()
+        };
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::clone(&key)],
+            lit(true),
+        ));
+        let join = HashJoinExec::try_new(
+            input(vec![100, 103]),
+            Arc::new(super::super::DynamicFilterExec::new(
+                input(vec![100, 101, 102, 103]),
+                Arc::clone(&dynamic),
+                datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new(),
+                "adapter_test",
+            )),
+            vec![(Arc::clone(&key), key)],
+            None,
+            &JoinType::Inner,
+            None,
+            PartitionMode::Partitioned,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap()
+        .with_dynamic_filter_expr(Arc::clone(&dynamic))
+        .unwrap();
+        // DataFusion's default limits admit this two-key build side as an IN list.
+        let session = SessionContext::new();
+        let result = collect(Arc::new(join), session.task_ctx()).await.unwrap();
+        assert_eq!(result.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        let published = dynamic.current().unwrap().to_string();
+        assert!(!published.contains("hash_lookup"), "{published}");
+        let provider = IcebergRuntimePredicateProvider::new(dynamic, 0, "id".into());
+        let predicate = provider
+            .snapshot()
+            .unwrap()
+            .into_predicate()
+            .expect("bounds and membership translate")
+            .to_string();
+        for part in ["id >= 100", "id <= 103", "IN"] {
+            assert!(predicate.contains(part), "{part} missing from {predicate}");
+        }
+    }
+
+    /// DataFusion's TopK over two keys publishes `key < t OR (key = t AND ...)`; the reader
+    /// gets the first key bounded inclusively.
+    #[tokio::test]
+    async fn extracts_first_key_bound_from_real_multi_key_topk_filter() {
+        use arrow::array::{Int32Array, RecordBatch};
+        use arrow::compute::SortOptions;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+        use datafusion::physical_plan::collect;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+        use datafusion::prelude::SessionContext;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int32, false),
+            Field::new("second", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![5, 1, 3, 1, 4, 2])),
+                Arc::new(Int32Array::from(vec![0, 9, 0, 7, 0, 0])),
+            ],
+        )
+        .unwrap();
+        let input =
+            MemorySourceConfig::try_new_exec(&[vec![batch]], Arc::clone(&schema), None).unwrap();
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let second: Arc<dyn PhysicalExpr> = Arc::new(Column::new("second", 1));
+        let options = SortOptions {
+            descending: false,
+            nulls_first: false,
+        };
+        let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::clone(&key), Arc::clone(&second)],
+            lit(true),
+        ));
+        let sort = SortExec::new(
+            LexOrdering::new(vec![
+                PhysicalSortExpr::new(key, options),
+                PhysicalSortExpr::new(second, options),
+            ])
+            .unwrap(),
+            input,
+        )
+        .with_fetch(Some(2))
+        .with_dynamic_filter_expr(Arc::clone(&dynamic))
+        .unwrap();
+        let session = SessionContext::new();
+        let result = collect(Arc::new(sort), session.task_ctx()).await.unwrap();
+        assert_eq!(result.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        // The heap holds (1, 7) and (1, 9): every later candidate needs key <= 1.
+        let provider = IcebergRuntimePredicateProvider::new(dynamic, 0, "id".into());
+        assert_eq!(
+            provider.snapshot().unwrap().into_predicate(),
+            Some(Reference::new("id").less_than_or_equal_to(Datum::int(1)))
+        );
+    }
 }
