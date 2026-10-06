@@ -34,8 +34,10 @@ To configure Comet to convert `SortMergeJoin` to `ShuffledHashJoin`, set `spark.
 ### Join Runtime Filters
 
 Set `spark.comet.exec.join.dynamicFilter.enabled=true` to try experimental native hash join runtime
-filtering. It is disabled by default. Eligible joins are inner joins with one direct signed integer
-key (`TINYINT`, `SMALLINT`, `INT`, or `BIGINT`) and one native partition per input within each task.
+filtering. It is disabled by default. Eligible joins are inner and semi joins with one direct signed
+integer key (`TINYINT`, `SMALLINT`, `INT`, or `BIGINT`; native Iceberg probe sides also accept `DATE`)
+and one native partition per input within each task. Anti and outer joins keep their existing path,
+because their probe rows without a match still reach the output.
 Both broadcast and shuffled hash joins support either Spark build side. Unsupported joins keep
 their existing execution path.
 
@@ -160,16 +162,28 @@ rejected rows. Positional and equality deletes keep their original semantics. A 
 be applied to a file, for example after schema evolution, is ignored for that file.
 
 To prune files before opening them, Comet re-plans only the eligible Iceberg reader input on the
-driver and retains statistics only for the exact direct `INT` or `BIGINT` runtime-filter key.
+driver and retains statistics only for the exact direct `INT`, `BIGINT` or `DATE` runtime-filter
+key.
 For joins this is the probe side only. If the linked Iceberg version cannot request selected column
 statistics, Comet skips whole-file pruning and keeps row-group runtime pruning instead of loading
 statistics for every column.
+
+Iceberg scans add three behaviors:
+
+- A build side with at most 1024 distinct keys is applied as an exact `IN` predicate as well as a
+  range, so keys spread across the key range can still prune row groups and pages.
+- A local TopK may order by further direct columns after an eligible first key; only the first key
+  bounds the reader.
+- A scan feeding a TopK or MIN/MAX reads its files best-first for that bound: lowest lower bound
+  first for an ascending TopK or `MIN`, highest upper bound first for a descending TopK or `MAX`.
+  For a descending TopK or `MAX` it also reads each file's row groups largest first. The bound
+  then tightens on the first file and later files are rejected from their statistics.
 
 ### MIN/MAX Reader Pruning
 
 Set `spark.comet.exec.aggregate.dynamicFilter.enabled=true` to pass the improving bound of a
 partial `MIN` or `MAX` aggregate to its native Iceberg reader. This option is experimental and
-disabled by default. It supports one direct `INT` or `BIGINT` argument, no `GROUP BY`, no
+disabled by default. It supports one direct `INT`, `BIGINT` or `DATE` argument, no `GROUP BY`, no
 aggregate filter, and one native input partition. Each execution creates a fresh bound. Rows that
 cannot improve the current minimum or maximum are skipped by the reader; the aggregate still
 computes the result. Disable Iceberg aggregate pushdown

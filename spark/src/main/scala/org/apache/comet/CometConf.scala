@@ -539,7 +539,8 @@ object CometConf extends ShimCometConf {
       .category(CATEGORY_EXEC)
       .doc(
         "Experimental opt-in: use a native MIN/MAX aggregate's improving bound to prune " +
-          "unread Iceberg row groups. Supports one direct INT or BIGINT argument, no GROUP BY, " +
+          "unread Iceberg row groups. Supports one direct INT, BIGINT or DATE argument, no " +
+          "GROUP BY, " +
           "and one native input partition. Bounds are fresh for each execution and do not " +
           "cross Spark exchanges. Unsupported aggregate shapes retain their existing path.")
       .booleanConf
@@ -552,7 +553,8 @@ object CometConf extends ShimCometConf {
         "Experimental opt-in: use a completed native hash join build's key domain to prune " +
           "eligible native Parquet or Iceberg row groups and filter probe batches before the " +
           "hash probe. " +
-          "Supports inner joins with one direct signed integer key and one native partition " +
+          "Supports inner and semi joins with one direct signed integer key (DATE also for " +
+          "Iceberg) and one native partition " +
           "per input, including both Spark build sides. The probe filter remains active " +
           "when reader pruning is unavailable. Unsupported joins retain their existing " +
           "execution path. Filters do not cross Spark exchanges or JVM/Arrow boundaries.")
@@ -564,7 +566,8 @@ object CometConf extends ShimCometConf {
       .category(CATEGORY_EXEC)
       .doc(
         "Experimental opt-in: run an eligible local TopK in the same native execution as its " +
-          "Parquet or Iceberg scan. Supports one direct signed integer sort key. " +
+          "Parquet or Iceberg scan. Supports one direct signed integer first sort key; Iceberg " +
+          "scans also accept DATE and further direct sort keys. " +
           "This changes the local " +
           "execution pipeline and can reduce scan/TopK overlap, so it may be slower for some " +
           "workloads.")
@@ -578,7 +581,7 @@ object CometConf extends ShimCometConf {
         "Experimental opt-in: use a local TopK heap's improving threshold to prune " +
           "eligible native Parquet or Iceberg input. " +
           "Requires spark.comet.exec.topK.fusion.enabled. " +
-          "Supports one direct signed integer sort key. Thresholds are local to each " +
+          "Supports the same sort keys as fusion. Thresholds are local to each " +
           "native execution and do not cross Spark exchanges or JVM/Arrow boundaries. " +
           "Unsupported readers retain ordinary TopK execution.")
       .booleanConf

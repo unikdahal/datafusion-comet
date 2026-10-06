@@ -450,7 +450,7 @@ object IcebergReflection extends Logging {
     if (isStagedScan(scan)) tasksFromTaskGroups(scan) else tasksFromTasksAccessor(scan)
 
   /**
-   * Top-level INT and BIGINT columns of `schema`: the only key types the runtime predicate
+   * Top-level INT, BIGINT and DATE columns of `schema`: the only key types the runtime predicate
    * producers support, and so the only columns whose statistics can prune a file.
    */
   def runtimeKeyColumns(schema: Any): Seq[String] = {
@@ -463,7 +463,7 @@ object IcebergReflection extends Logging {
         .toSeq
         .flatMap { column =>
           val typeStr = getMethod(column.getClass, "type").invoke(column).toString
-          if (typeStr == "int" || typeStr == "long") {
+          if (typeStr == "int" || typeStr == "long" || typeStr == "date") {
             Some(getMethod(column.getClass, "name").invoke(column).asInstanceOf[String])
           } else {
             None
