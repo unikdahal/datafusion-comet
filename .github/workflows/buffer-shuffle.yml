@@ -5,6 +5,8 @@ on:
     paths-ignore:
       - 'dev/ci/celeborn_e2e_*'
       - '.github/workflows/celeborn-e2e.yml'
+      - '.github/workflows/celeborn-e2e-report.yml'
+      - 'dev/ci/CelebornJvmAllocation.java'
       - 'docs/source/user-guide/latest/celeborn-benchmark.md'
   workflow_dispatch:
     inputs:
