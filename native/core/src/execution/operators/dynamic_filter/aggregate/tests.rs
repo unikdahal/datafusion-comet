@@ -198,3 +198,77 @@ fn unsupported_shapes_and_disabled_config_retain_aggregate() {
         .unwrap()
         .is_none());
 }
+
+/// `SELECT min(key) FROM t WHERE other > 5`: a filter whose folded projection drops `other`,
+/// under a column projection. The key is followed to its scan column through both.
+#[test]
+fn minmax_attaches_through_filter_and_projection() {
+    use datafusion::physical_plan::filter::FilterExec;
+    use datafusion::physical_plan::projection::ProjectionExec;
+
+    let schema = Arc::new(
+        IcebergSchema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "other", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(2, "key", Type::Primitive(PrimitiveType::Int)).into(),
+            ])
+            .build()
+            .unwrap(),
+    );
+    let task = FileScanTask::builder()
+        .with_data_file_path("/tmp/minmax.parquet".into())
+        .with_data_file_format(DataFileFormat::Parquet)
+        .with_file_size_in_bytes(1024)
+        .with_start(0)
+        .with_length(1024)
+        .with_record_count(Some(10))
+        .with_schema(schema)
+        .with_project_field_ids(vec![1, 2])
+        .with_case_sensitive(false)
+        .build()
+        .unwrap();
+    let scan: Arc<dyn ExecutionPlan> = Arc::new(
+        IcebergScanExec::new(
+            "/tmp/metadata.json".into(),
+            Arc::new(Schema::new(vec![
+                Field::new("other", DataType::Int32, true),
+                Field::new("key", DataType::Int32, true),
+            ])),
+            Default::default(),
+            String::new(),
+            vec![task],
+            1,
+        )
+        .unwrap(),
+    );
+    let filter: Arc<dyn ExecutionPlan> = Arc::new(
+        FilterExec::try_new(
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("other", 0)),
+                Operator::Gt,
+                lit(5_i32),
+            )),
+            scan,
+        )
+        .unwrap()
+        .with_projection(Some(vec![1]))
+        .unwrap(),
+    );
+    let projection: Arc<dyn ExecutionPlan> = Arc::new(
+        ProjectionExec::try_new(
+            vec![(
+                Arc::new(Column::new("key", 0)) as Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+                "key".to_string(),
+            )],
+            filter,
+        )
+        .unwrap(),
+    );
+    let aggregate = aggregate(projection, false, false, false);
+    assert!(
+        IcebergMinMaxFilterExec::try_new(&aggregate, &ConfigOptions::default())
+            .unwrap()
+            .is_some(),
+        "MIN must reach the Iceberg reader through the filter and the projection"
+    );
+}
