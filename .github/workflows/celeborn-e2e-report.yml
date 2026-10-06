@@ -1,5 +1,11 @@
 name: Celeborn performance report
 on:
+  push:
+    branches: [feature/async-buffer-shuffle]
+    paths:
+      - '.github/workflows/celeborn-e2e-report.yml'
+      - 'dev/ci/celeborn_e2e_report.py'
+      - 'dev/ci/CelebornJvmAllocation.java'
   workflow_dispatch:
     inputs:
       performance_run:
@@ -35,6 +41,7 @@ jobs:
           java -jar /tmp/google-java-format.jar --skip-sorting-imports --dry-run --set-exit-if-changed dev/ci/CelebornJvmAllocation.java
           javac -d /tmp/allocation-classes dev/ci/CelebornJvmAllocation.java
       - name: Verify source workflow results
+        if: ${{ inputs.performance_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           PERFORMANCE_RUN: ${{ inputs.performance_run }}
@@ -57,6 +64,7 @@ jobs:
               json.dump(runs, output, indent=2)
           EOF
       - uses: actions/download-artifact@v4
+        if: ${{ inputs.performance_run }}
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.performance_run }}
@@ -70,11 +78,13 @@ jobs:
           pattern: e2e-*
           path: evidence
       - name: Publish complete speed, memory and CPU report
+        if: ${{ inputs.performance_run }}
         run: |
           python dev/ci/celeborn_e2e_report.py --artifacts evidence --output report
           cat report/performance.md >> "$GITHUB_STEP_SUMMARY"
           git rev-parse HEAD > report/report-source.txt
       - uses: actions/upload-artifact@v4
+        if: ${{ inputs.performance_run }}
         with:
           name: complete-performance-report
           path: report/**
