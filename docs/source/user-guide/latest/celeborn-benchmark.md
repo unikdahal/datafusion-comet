@@ -18,4 +18,6 @@ Select `allocation-wide,allocation-large` for additional query-level Java alloca
 
 The diagnostic scenarios also sample live Rust allocator bytes, native pool reservations, Java heap usage and direct-buffer counters. Rust counters exclude allocator retention, fragmentation, libc allocations and mmap. The report keeps the after-query live counters alongside their sampled peaks. Counter peaks can occur at different instants and cannot be summed to reconstruct RSS.
 
+After all measured queries, diagnostics use `jcmd GC.heap_info` and Linux `smaps` to separate resident Java heap pages from other anonymous and file-backed mappings, before and after an explicit full GC. This GC never runs between timed queries. Other anonymous memory includes native arenas, JVM allocations and stacks; this breakdown is not an allocation-site profile.
+
 Dispatch `Celeborn performance report` with a completed performance run and an optional completed allocation run to combine their raw artifacts and publish a complete speed, memory and CPU report. This regenerates the report in Actions without rerunning queries or rebuilding binaries.

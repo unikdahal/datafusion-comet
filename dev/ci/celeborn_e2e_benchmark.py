@@ -23,7 +23,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import struct
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -113,6 +115,46 @@ def gc_stats(spark):
     beans = spark._jvm.java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()
     return {"gc_count": sum(max(0, bean.getCollectionCount()) for bean in beans),
             "gc_ms": sum(max(0, bean.getCollectionTime()) for bean in beans)}
+
+
+def residency_snapshot(spark, pid, output, label):
+    # This diagnostic is outside every measured query. The public jcmd heap summary gives
+    # the reserved Java heap address range; smaps then measures its resident pages directly.
+    jcmd = Path(os.environ["JAVA_HOME"]) / "bin/jcmd"
+    info = subprocess.check_output([str(jcmd), str(pid), "GC.heap_info"], text=True)
+    Path(output + f".{label}.heap-info.txt").write_text(info)
+    region = re.search(r"garbage-first heap.*\[(0x[0-9a-f]+),\s*(0x[0-9a-f]+)\)", info)
+    assert region, info
+    heap_start, heap_end = [int(value, 16) for value in region.groups()]
+    result = {"total_rss_bytes": 0, "java_heap_rss_bytes": 0, "outside_heap_anonymous_rss_bytes": 0,
+              "other_rss_bytes": 0}
+    category = None
+    for line in Path(f"/proc/{pid}/smaps").read_text().splitlines():
+        mapping = re.match(r"([0-9a-f]+)-([0-9a-f]+)\s+\S+\s+\S+\s+\S+\s+\S+(?:\s+(.*))?", line)
+        if mapping:
+            start, end = [int(value, 16) for value in mapping.groups()[:2]]
+            name = mapping.group(3) or ""
+            if start >= heap_start and end <= heap_end:
+                category = "java_heap_rss_bytes"
+            elif start < heap_end and end > heap_start:
+                raise RuntimeError("A process mapping straddles the Java heap boundary")
+            elif not name or name in ["[heap]", "[stack]"] or name.startswith("[anon:"):
+                category = "outside_heap_anonymous_rss_bytes"
+            else:
+                category = "other_rss_bytes"
+        elif line.startswith("Rss:"):
+            value = int(line.split()[1]) * 1024
+            assert category is not None
+            result[category] += value
+            result["total_rss_bytes"] += value
+    assert result["java_heap_rss_bytes"] > 0
+    native = list(spark._jvm.org.apache.comet.Native().getMemoryUsage())
+    result["native_live_bytes"] = native[0]
+    result["native_pool_reserved_bytes"] = native[1]
+    heap = spark._jvm.java.lang.management.ManagementFactory.getMemoryMXBean().getHeapMemoryUsage()
+    result["java_heap_used_bytes"] = heap.getUsed()
+    result["java_heap_committed_bytes"] = heap.getCommitted()
+    return result
 
 
 def plan_metrics(plan):
@@ -271,6 +313,12 @@ def main():
             if spark.sparkContext.getConf().get("spark.celeborn.client.push.replicate.enabled") == "true":
                 assert any(Path(frame["path"]).name.split(".")[0].endswith("-1") for frame in frames), "No native replicas"
             Path(args.output + ".native-frames.json").write_text(json.dumps(frames, indent=2))
+        if args.allocation:
+            residency = {"before_gc": residency_snapshot(spark, pid, args.output, "before-gc")}
+            # Full GC is diagnostic only, after all warmups and measurements in this fresh JVM.
+            spark._jvm.java.lang.System.gc()
+            residency["after_gc"] = residency_snapshot(spark, pid, args.output, "after-gc")
+            Path(args.output + ".residency.json").write_text(json.dumps(residency, indent=2))
     finally:
         spark.stop()
 

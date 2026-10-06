@@ -99,6 +99,10 @@ def main():
                          "These counters are sampled only in the separate allocation scenarios. Peak counters can occur at different instants, so their medians must not be added or subtracted to decompose RSS. Rust live bytes count allocator Layout bytes; they exclude retained allocator pages, fragmentation, libc allocations, and mmap. JVM direct-buffer counters do not cover every native allocation. After-query Rust bytes help distinguish live allocations from process residency, but do not provide an allocation-site profile.", "",
                          "| Scenario / query / mode | Peak Rust live MiB | Rust live after MiB | Peak pool reserved MiB | Peak Java heap used MiB | Peak Java heap committed MiB | Peak JVM direct-buffer MiB |",
                          "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    residency_lines = ["", "## Resident memory after all queries", "",
+                       "Each fresh diagnostic JVM records Linux smaps before and after an explicit full GC, after all measured queries. The Java heap address range comes from the public jcmd GC.heap_info command. Other anonymous memory includes native arenas, JVM allocations and thread stacks; it does not identify allocation sites. File-backed and special mappings are reported separately. Values are medians across forks, in MiB.", "",
+                       "| Scenario / mode / snapshot | Total RSS | Java heap RSS | Other anonymous RSS | Other RSS | Live Rust bytes | Java heap used | Java heap committed |",
+                       "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     manifests = {}
     for directory in sorted(args.artifacts.glob("e2e-*")):
         name = directory.name.removeprefix("e2e-")
@@ -108,6 +112,7 @@ def main():
         reference = json.loads((directory / "reference.json").read_text())["queries"]
         entries = {mode: [] for mode in ["original", "heap", "direct"]}
         process = {mode: [] for mode in entries}
+        residency = {mode: [] for mode in entries}
         frames = {mode: [] for mode in ["heap", "direct"]}
         for fork in range(protocol["forks"]):
             for mode in entries:
@@ -134,6 +139,9 @@ def main():
                     frames[mode].extend(frame["payload_bytes"] for frame in frame_records)
                 entries[mode].append(record["queries"])
                 process[mode].append(resources(target / "process-resources.txt"))
+                residency_file = target / "queries.json.residency.json"
+                if residency_file.exists():
+                    residency[mode].append(json.loads(residency_file.read_text()))
         summary = {"config": config, "protocol": protocol, "benchmark_source": (directory / "benchmark-source.txt").read_text().strip(), "queries": {}, "process": process, "frames": {mode: {"samples": len(values), "min": min(values), "median": median(values), "max": max(values)} for mode, values in frames.items()}}
         for query_name in reference:
             query_summary = {"sha256": reference[query_name]["sha256"], "rows": reference[query_name]["rows"]}
@@ -176,12 +184,20 @@ def main():
                 ended = "/".join(str(v["allocation_threads_ended"]) for v in [original, heap, direct])
                 allocation_lines.append(f"| {name} / {query_name} | {o:.1f} | {h:.1f} | {d:.1f} | {(d/h-1)*100:+.1f}% | {ended} |")
             summary["queries"][query_name] = query_summary
+        if any(residency.values()):
+            assert all(len(values) == protocol["forks"] for values in residency.values())
+            summary["residency"] = residency
+            for mode, records in residency.items():
+                for label in ["before_gc", "after_gc"]:
+                    keys = ["total_rss_bytes", "java_heap_rss_bytes", "outside_heap_anonymous_rss_bytes", "other_rss_bytes", "native_live_bytes", "java_heap_used_bytes", "java_heap_committed_bytes"]
+                    values = [median([record[label][key] for record in records]) / 1048576 for key in keys]
+                    residency_lines.append(f"| {name} / {mode} / {label} | " + " | ".join(f"{v:.1f}" for v in values) + " |")
         o, h, d = [median([fork["max_rss_bytes"] for fork in process[mode]]) / 1048576 for mode in process]
         process_lines.append(f"| {name} | {o:.1f} | {h:.1f} | {d:.1f} | {(h/o-1)*100:+.1f}% | {(d/o-1)*100:+.1f}% |")
         configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config.get('batch', 8192)} | {config['cores']} | {config['replicate']} | {config['skew']} |")
         result[name] = summary
     assert result
-    lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + live_memory_lines + configuration_lines)
+    lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + live_memory_lines + residency_lines + configuration_lines)
     lines.extend(["", "## Binary manifests", "", "```json", json.dumps(manifests, indent=2), "```", ""])
     (args.output / "performance.md").write_text("\n".join(lines))
     (args.output / "performance.json").write_text(json.dumps({"manifests": manifests, "scenarios": result}, indent=2) + "\n")
