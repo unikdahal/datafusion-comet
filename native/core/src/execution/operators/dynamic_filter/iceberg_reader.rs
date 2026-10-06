@@ -23,6 +23,7 @@ use datafusion::physical_expr::expressions::{
     BinaryExpr, Column, DynamicFilterPhysicalExpr, InListExpr, IsNotNullExpr, IsNullExpr, Literal,
 };
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::{ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions};
 use datafusion_comet_operators::CometFilterExec;
@@ -109,6 +110,11 @@ pub(super) fn reaches_iceberg_reader(input: &Arc<dyn ExecutionPlan>) -> bool {
     }
     if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
         return !filter.has_projection()
+            && is_deterministic(filter.predicate())
+            && reaches_iceberg_reader(filter.input());
+    }
+    if let Some(filter) = input.downcast_ref::<FilterExec>() {
+        return filter.projection().is_none()
             && is_deterministic(filter.predicate())
             && reaches_iceberg_reader(filter.input());
     }
@@ -214,6 +220,21 @@ fn attach_below(
                 Ok(None)
             }
         };
+    }
+
+    // The planner builds DataFusion filters for ordinary Spark filters; only join probes are
+    // converted to CometFilterExec. Both keep the input schema when they have no projection.
+    if let Some(filter) = input.downcast_ref::<FilterExec>() {
+        if filter.projection().is_some() || !is_deterministic(filter.predicate()) {
+            return Ok(None);
+        }
+        let Some(reader) = attach_below(filter.input(), predicate, order, probe)? else {
+            return Ok(None);
+        };
+        return Ok(Some(Arc::clone(input).replace_children(
+            vec![reader],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )?));
     }
 
     if let Some(projection) = input.downcast_ref::<ProjectionExec>() {

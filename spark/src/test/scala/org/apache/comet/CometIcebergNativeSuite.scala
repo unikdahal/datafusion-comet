@@ -1146,7 +1146,8 @@ class CometIcebergNativeSuite
             assert(
               pruned > 0,
               s"no file rejected for $query: " +
-                s"${scans.map(_.metrics.map { case (k, v) => k -> v.value })}")
+                s"${scans.map(_.metrics.map { case (k, v) => k -> v.value })}\n" +
+                s"${df.queryExecution.executedPlan}")
           }
         }
       }
