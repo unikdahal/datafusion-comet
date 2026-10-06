@@ -48,7 +48,9 @@ conjunctions. Parquet remaps columns through its scan schema adapter; Iceberg re
 probe column through the task field ID before creating the runtime predicate. The original null
 checks and residual runtime filter remain in place.
 The original join still verifies matches, including any hash collisions admitted by the filter.
-Standalone projections, other filter expressions, and limits prevent reader attachment.
+Standalone projections and limits prevent reader attachment. Parquet readers attach only through
+direct-column `IS NOT NULL` checks; native Iceberg readers also attach through other deterministic
+filters, because a row the runtime predicate rejects can never reach the join's output.
 
 For native Parquet, schema-conversion safeguards still apply: runtime reader pruning is disabled
 for each file whose projected or statically filtered columns require schema adaptations beyond

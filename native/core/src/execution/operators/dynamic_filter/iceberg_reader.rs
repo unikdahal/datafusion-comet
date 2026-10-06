@@ -30,7 +30,6 @@ use iceberg::expr::{Predicate, Reference};
 use iceberg::spec::Datum;
 use iceberg::{Error, ErrorKind, Result as IcebergResult};
 
-use super::parquet_reader::is_direct_column_null_checks;
 use crate::execution::operators::{IcebergScanExec, RuntimeScanOrder};
 
 #[derive(Debug)]
@@ -109,10 +108,42 @@ pub(super) fn reaches_iceberg_reader(input: &Arc<dyn ExecutionPlan>) -> bool {
     }
     if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
         return !filter.has_projection()
-            && is_direct_column_null_checks(filter.predicate())
+            && is_deterministic(filter.predicate())
             && reaches_iceberg_reader(filter.input());
     }
     input.is::<IcebergScanExec>()
+}
+
+/// Whether `expr` is built only from expressions known to be deterministic.
+///
+/// The reader may attach through a filter between the scan and the producer: a row whose key
+/// the runtime predicate rejects can never reach the producer's result, whatever the filter
+/// does with it. That holds only if skipping rows cannot change what the filter returns for the
+/// others, so volatile functions (`rand`, `uuid`, `monotonically_increasing_id`, ...), JVM
+/// UDFs and any expression not listed here keep the filter in the way.
+fn is_deterministic(expr: &Arc<dyn PhysicalExpr>) -> bool {
+    use datafusion::logical_expr::Volatility;
+    use datafusion::physical_expr::expressions::{
+        CaseExpr, CastExpr, LikeExpr, NegativeExpr, NotExpr, TryCastExpr,
+    };
+    use datafusion::physical_expr::ScalarFunctionExpr;
+
+    let deterministic_node = expr.is::<Column>()
+        || expr.is::<Literal>()
+        || expr.is::<BinaryExpr>()
+        || expr.is::<IsNullExpr>()
+        || expr.is::<IsNotNullExpr>()
+        || expr.is::<NotExpr>()
+        || expr.is::<NegativeExpr>()
+        || expr.is::<InListExpr>()
+        || expr.is::<CastExpr>()
+        || expr.is::<TryCastExpr>()
+        || expr.is::<CaseExpr>()
+        || expr.is::<LikeExpr>()
+        || expr
+            .downcast_ref::<ScalarFunctionExpr>()
+            .is_some_and(|function| function.fun().signature().volatility != Volatility::Volatile);
+    deterministic_node && expr.children().iter().all(|child| is_deterministic(child))
 }
 
 /// Attaches `predicate` to the Iceberg scan below `input`. With `order`, the scan also reads
@@ -127,7 +158,7 @@ pub(super) fn try_attach_iceberg_reader_filter(
     }
 
     if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
-        if filter.has_projection() || !is_direct_column_null_checks(filter.predicate()) {
+        if filter.has_projection() || !is_deterministic(filter.predicate()) {
             return Ok(None);
         }
         let Some(reader) =
@@ -838,6 +869,39 @@ mod tests {
         )
         .unwrap();
         assert!(extract_iceberg_predicate(&many, 0, "id").is_none());
+    }
+
+    #[test]
+    fn reader_attachment_passes_only_deterministic_filters() {
+        use datafusion::physical_expr::expressions::NotExpr;
+        use datafusion_comet_spark_expr::RandExpr;
+
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let value: Arc<dyn PhysicalExpr> = Arc::new(Column::new("value", 1));
+        let modulo: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&value),
+                Operator::Modulo,
+                lit(3_i32),
+            )),
+            Operator::Eq,
+            lit(0_i32),
+        ));
+        let deterministic: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(NotExpr::new(Arc::new(IsNullExpr::new(Arc::clone(&key))))),
+            Operator::And,
+            Arc::clone(&modulo),
+        ));
+        assert!(is_deterministic(&deterministic));
+
+        // A volatile expression anywhere below the filter keeps it in the way.
+        let random: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(RandExpr::new(42)),
+            Operator::Lt,
+            lit(0.5_f64),
+        ));
+        let mixed: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(modulo, Operator::And, random));
+        assert!(!is_deterministic(&mixed));
     }
 
     #[test]

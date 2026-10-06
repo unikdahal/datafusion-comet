@@ -1219,7 +1219,7 @@ object CometScanRule extends Logging {
    * Exact scan columns that can receive a runtime predicate from an eligible producer in the same
    * native stage. This intentionally mirrors the reader-attachment shapes instead of walking
    * every descendant below a producer: joins mark only their probe input, TopK requires a direct
-   * scan, and MIN/MAX / joins may cross only direct-column IS NOT NULL filters.
+   * scan, and MIN/MAX / joins may cross deterministic filters.
    *
    * The native planner remains the final eligibility check. This pass only decides which Iceberg
    * manifest columns are worth retaining on the driver for whole-file pruning.
@@ -1227,7 +1227,7 @@ object CometScanRule extends Logging {
   def runtimeFilterColumns(
       plan: SparkPlan,
       conf: SQLConf): java.util.IdentityHashMap[SparkPlan, Set[String]] = {
-    import org.apache.spark.sql.catalyst.expressions.{And, IsNotNull, SortOrder}
+    import org.apache.spark.sql.catalyst.expressions.SortOrder
     import org.apache.spark.sql.catalyst.expressions.aggregate.{Max, Min, Partial}
     import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
     import org.apache.spark.sql.catalyst.plans.{Inner, LeftSemi}
@@ -1252,11 +1252,9 @@ object CometScanRule extends Logging {
       case _ => None
     }
 
-    def directNullChecks(expression: Expression): Boolean = expression match {
-      case IsNotNull(_: Attribute) => true
-      case And(left, right) => directNullChecks(left) && directNullChecks(right)
-      case _ => false
-    }
+    // The native Iceberg reader attaches through deterministic filters (a row the runtime
+    // predicate rejects never reaches the producer), so their scan inputs need statistics too.
+    def passableFilter(expression: Expression): Boolean = expression.deterministic
 
     def record(scan: BatchScanExec, key: Attribute): Unit = {
       scan.output
@@ -1267,12 +1265,12 @@ object CometScanRule extends Logging {
         }
     }
 
-    def readerInput(node: SparkPlan, key: Attribute, allowNullFilters: Boolean): Unit =
+    def readerInput(node: SparkPlan, key: Attribute, allowFilters: Boolean): Unit =
       node match {
         case scan: BatchScanExec =>
           record(scan, key)
-        case filter: FilterExec if allowNullFilters && directNullChecks(filter.condition) =>
-          readerInput(filter.child, key, allowNullFilters = true)
+        case filter: FilterExec if allowFilters && passableFilter(filter.condition) =>
+          readerInput(filter.child, key, allowFilters = true)
         case _ =>
       }
 
@@ -1288,14 +1286,14 @@ object CometScanRule extends Logging {
           }
           probe.foreach { case (input, expression) =>
             directKeyAttribute(expression)
-              .foreach(key => readerInput(input, key, allowNullFilters = true))
+              .foreach(key => readerInput(input, key, allowFilters = true))
           }
 
         case limit: TakeOrderedAndProjectExec
             if topK && limit.limit > 0 && limit.sortOrder.nonEmpty &&
               !SortOrder.orderingSatisfies(limit.child.outputOrdering, limit.sortOrder) =>
           directKeyAttribute(limit.sortOrder.head.child)
-            .foreach(key => readerInput(limit.child, key, allowNullFilters = false))
+            .foreach(key => readerInput(limit.child, key, allowFilters = false))
 
         case aggregate: BaseAggregateExec
             if minMax && aggregate.groupingExpressions.isEmpty &&
@@ -1306,7 +1304,7 @@ object CometScanRule extends Logging {
             (function.isInstanceOf[Min] || function.isInstanceOf[Max])) {
             function.children.headOption
               .flatMap(directKeyAttribute)
-              .foreach(key => readerInput(aggregate.child, key, allowNullFilters = true))
+              .foreach(key => readerInput(aggregate.child, key, allowFilters = true))
           }
 
         case _ =>

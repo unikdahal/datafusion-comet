@@ -1125,6 +1125,9 @@ class CometIcebergNativeSuite
             "SELECT d, v FROM runtime_temporal ORDER BY d, v LIMIT 5",
           CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key ->
             "SELECT max(ts) FROM runtime_temporal",
+          // A deterministic filter between the scan and the aggregate does not block pruning.
+          CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key ->
+            "SELECT min(v) FROM runtime_temporal WHERE d > DATE'2023-12-31'",
           CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key ->
             """SELECT /*+ BROADCAST(x) */ count(*), sum(f.v) FROM runtime_temporal f
               JOIN runtime_temporal_dates x ON f.d = x.d""")
