@@ -64,7 +64,11 @@ def load(paths):
     for path in paths:
         for line in open(path, encoding="utf-8"):
             if line.strip():
-                records.append(json.loads(line))
+                record = json.loads(line)
+                # Table names repeat across suites with different row counts: key them apart.
+                if record["suite"] in ("join", "topk_minmax", "layouts"):
+                    record["query"] = f"{record['suite']}/{record['query']}"
+                records.append(record)
     return records
 
 
