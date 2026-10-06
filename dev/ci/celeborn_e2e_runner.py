@@ -123,6 +123,7 @@ def main():
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--samples", type=int, default=5)
     args = parser.parse_args()
+    args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).resolve().parent
     scenario = json.loads((source / "celeborn_e2e_scenarios.json").read_text())[args.scenario]

@@ -1,5 +1,9 @@
 name: Celeborn end-to-end performance
 on:
+  push:
+    branches: [feature/async-buffer-shuffle]
+    paths:
+      - '.github/workflows/celeborn-e2e.yml'
   workflow_dispatch:
     inputs:
       scenarios:
@@ -43,7 +47,7 @@ jobs:
       - name: Check benchmark scripts and select scenarios
         id: matrix
         env:
-          SCENARIOS: ${{ inputs.scenarios }}
+          SCENARIOS: ${{ inputs.scenarios || 'small-numeric' }}
         run: |
           python -m py_compile dev/ci/celeborn_e2e_*.py
           python - <<'EOF'
@@ -217,7 +221,7 @@ jobs:
         run: |
           python -u dev/ci/celeborn_e2e_runner.py --scenario '${{ matrix.scenario }}' \
             --artifacts artifacts --output results \
-            --forks '${{ inputs.forks }}' --warmups '${{ inputs.warmups }}' --samples '${{ inputs.samples }}' \
+            --forks '${{ inputs.forks || 1 }}' --warmups '${{ inputs.warmups || 1 }}' --samples '${{ inputs.samples || 1 }}' \
             2>&1 | tee results/orchestration.log
       - uses: actions/upload-artifact@v4
         if: always()
