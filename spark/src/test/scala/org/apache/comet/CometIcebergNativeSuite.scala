@@ -1114,10 +1114,17 @@ class CometIcebergNativeSuite
           .option("split-size", "1073741824")
           .load(table)
           .createOrReplaceTempView("runtime_temporal")
-        val dates = spark
-          .range(1)
-          .selectExpr("DATE'2024-01-03' AS d")
-        dates.createOrReplaceTempView("runtime_temporal_dates")
+        // Several rows, so Spark cannot fold the build side into a static filter on the scan.
+        withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+          spark
+            .range(3)
+            .selectExpr("date_add(DATE'2024-01-03', CAST(id AS INT)) AS d")
+            .write
+            .parquet(new File(warehouseDir, "runtime_temporal_dates").getAbsolutePath)
+        }
+        spark.read
+          .parquet(new File(warehouseDir, "runtime_temporal_dates").getAbsolutePath)
+          .createOrReplaceTempView("runtime_temporal_dates")
         val queries = Seq(
           CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key ->
             "SELECT ts, v FROM runtime_temporal ORDER BY ts DESC LIMIT 5",
