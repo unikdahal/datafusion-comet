@@ -38,6 +38,8 @@ struct IcebergRuntimePredicateProvider {
     predicate: Arc<DynamicFilterPhysicalExpr>,
     probe_column_index: usize,
     iceberg_field_name: String,
+    /// The bound tightens toward large values (descending top-k, MAX).
+    largest_first: bool,
 }
 
 impl IcebergRuntimePredicateProvider {
@@ -50,13 +52,23 @@ impl IcebergRuntimePredicateProvider {
             predicate,
             probe_column_index,
             iceberg_field_name,
+            largest_first: false,
         }
+    }
+
+    fn with_largest_first(mut self, largest_first: bool) -> Self {
+        self.largest_first = largest_first;
+        self
     }
 }
 
 impl RuntimePredicateProvider for IcebergRuntimePredicateProvider {
     fn generation(&self) -> u64 {
         self.predicate.snapshot_generation()
+    }
+
+    fn prefers_largest_first(&self) -> bool {
+        self.largest_first
     }
 
     fn snapshot(&self) -> IcebergResult<RuntimePredicateSnapshot> {
@@ -156,12 +168,14 @@ pub(super) fn try_attach_iceberg_reader_filter(
     else {
         return Ok(None);
     };
-    let provider: Arc<dyn RuntimePredicateProvider> =
-        Arc::new(IcebergRuntimePredicateProvider::new(
+    let provider: Arc<dyn RuntimePredicateProvider> = Arc::new(
+        IcebergRuntimePredicateProvider::new(
             Arc::clone(&predicate),
             column.index(),
             iceberg_field_name,
-        ));
+        )
+        .with_largest_first(matches!(order, Some(RuntimeScanOrder::Descending { .. }))),
+    );
     Ok(Some(Arc::new(scan.with_runtime_predicate_provider(
         provider,
         order.map(|order| (iceberg_field_id, order)),
