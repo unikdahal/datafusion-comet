@@ -155,6 +155,34 @@
     "skew": 0,
     "batch": 65536
   },
+  "skewed-more-memory": {
+    "rows": 2000000,
+    "width": 128,
+    "entropy": "hex",
+    "partitions": 64,
+    "codec": "lz4",
+    "admission": "64m",
+    "frame": "8m",
+    "cores": 4,
+    "replicate": false,
+    "skew": 80,
+    "batch": 8192,
+    "offheap": "2g"
+  },
+  "skewed-spark-sort": {
+    "rows": 2000000,
+    "width": 128,
+    "entropy": "hex",
+    "partitions": 64,
+    "codec": "lz4",
+    "admission": "64m",
+    "frame": "8m",
+    "cores": 4,
+    "replicate": false,
+    "skew": 80,
+    "batch": 8192,
+    "native_sort": false
+  },
   "allocation-wide": {
     "rows": 2000000,
     "width": 256,

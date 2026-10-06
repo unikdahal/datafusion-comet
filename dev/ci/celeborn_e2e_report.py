@@ -89,8 +89,8 @@ def main():
                      "| Scenario | Original MiB | Heap MiB | Direct MiB | Heap change | Direct change |",
                      "| --- | ---: | ---: | ---: | ---: | ---: |"]
     configuration_lines = ["", "## Workload configuration", "",
-                           "| Scenario | Input rows | Payload bytes/row | Payload | Partitions | Codec | Admission | Frame | Batch rows | Cores | Replicas | Skew percent |",
-                           "| --- | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | --- | ---: |"]
+                           "| Scenario | Input rows | Payload bytes/row | Payload | Partitions | Codec | Admission | Frame | Batch rows | Cores | Replicas | Skew percent | Offheap | Native sort |",
+                           "| --- | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | --- | ---: | --- | --- |"]
     allocation_lines = ["", "## Complete-query Java heap allocation", "",
                         "Public JVM allocation counters surround the collect action. Counters for surviving threads are summed; if threads end during the interval, their allocation is omitted and the value is a lower bound. The ended-thread count includes threads created and terminated during the interval. This measures allocation traffic, not simultaneous live memory or native allocation.", "",
                         "| Scenario / query | Original allocated MiB | Heap allocated MiB | Direct allocated MiB | Direct vs heap | Maximum ended threads O/H/D |",
@@ -194,7 +194,7 @@ def main():
                     residency_lines.append(f"| {name} / {mode} / {label} | " + " | ".join(f"{v:.1f}" for v in values) + " |")
         o, h, d = [median([fork["max_rss_bytes"] for fork in process[mode]]) / 1048576 for mode in process]
         process_lines.append(f"| {name} | {o:.1f} | {h:.1f} | {d:.1f} | {(h/o-1)*100:+.1f}% | {(d/o-1)*100:+.1f}% |")
-        configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config.get('batch', 8192)} | {config['cores']} | {config['replicate']} | {config['skew']} |")
+        configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config.get('batch', 8192)} | {config['cores']} | {config['replicate']} | {config['skew']} | {config.get('offheap', '1g')} | {config.get('native_sort', True)} |")
         result[name] = summary
     assert result
     lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + live_memory_lines + residency_lines + configuration_lines)
