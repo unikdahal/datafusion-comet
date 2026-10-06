@@ -64,7 +64,7 @@ impl TopKReaderFilterExec {
             || !config.optimizer.enable_topk_dynamic_filter_pushdown
             || !matches!(sort.fetch(), Some(fetch) if fetch > 0)
             || sort.input().output_partitioning().partition_count() != 1
-            || sort.expr().len() != 1
+            || sort.expr().is_empty()
         {
             return Ok(None);
         }
@@ -72,7 +72,11 @@ impl TopKReaderFilterExec {
         if !key.is::<Column>()
             || !matches!(
                 key.data_type(sort.input().schema().as_ref())?,
-                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+                DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::Date32
             )
         {
             return Ok(None);
@@ -95,8 +99,14 @@ impl TopKReaderFilterExec {
     }
 
     fn build_runtime_sort(&self) -> Result<RuntimeTopK> {
+        // Like DataFusion's own pushdown, the filter lists every sort key. A multi-key filter
+        // only reaches readers that bound the first key (see the Iceberg extraction).
         let predicate = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![Arc::clone(&self.template.expr()[0].expr)],
+            self.template
+                .expr()
+                .iter()
+                .map(|order| Arc::clone(&order.expr))
+                .collect(),
             lit(true),
         ));
         let reader = try_attach_topk_reader_filter(

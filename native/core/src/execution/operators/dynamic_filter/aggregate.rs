@@ -86,7 +86,7 @@ impl IcebergMinMaxFilterExec {
         if !argument.is::<Column>()
             || !matches!(
                 argument.data_type(aggregate.input().schema().as_ref())?,
-                DataType::Int32 | DataType::Int64
+                DataType::Int32 | DataType::Int64 | DataType::Date32
             )
         {
             return Ok(None);

@@ -128,19 +128,19 @@ impl DynamicFilterJoinExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // DataFusion can materialize one IN-list literal per build row,
-        // despite admitting the list by packed-array bytes and distinct-key count.
-        // Avoid that unreserved allocation. Map membership
-        // reuses the join's already-reserved hash table and preserves duplicates.
+        // DataFusion materializes one IN-list literal per build row, although it admits the
+        // list by packed-array bytes and distinct-key count. Admit only small lists, which
+        // the Iceberg reader can turn into a membership predicate; a larger build side keeps
+        // reusing the join's already-reserved hash table and preserves duplicates.
         let mut config = context.session_config().clone();
         config
             .options_mut()
             .optimizer
-            .hash_join_inlist_pushdown_max_size = 0;
+            .hash_join_inlist_pushdown_max_size = IN_LIST_PUSHDOWN_MAX_BYTES;
         config
             .options_mut()
             .optimizer
-            .hash_join_inlist_pushdown_max_distinct_values = 0;
+            .hash_join_inlist_pushdown_max_distinct_values = IN_LIST_PUSHDOWN_MAX_DISTINCT;
         let context = Arc::new(TaskContext::new(
             context.task_id(),
             context.session_id(),
@@ -274,16 +274,26 @@ impl ExecutionPlan for DynamicFilterJoinExec {
     }
 }
 
+/// Largest packed build-side key array, and most distinct keys, DataFusion may turn into an
+/// IN list. At most a few thousand literals per task, so the unreserved allocation stays small.
+const IN_LIST_PUSHDOWN_MAX_BYTES: usize = 16 * 1024;
+const IN_LIST_PUSHDOWN_MAX_DISTINCT: usize = 1024;
+
 fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Option<&'static str>> {
     if !config.optimizer.enable_dynamic_filter_pushdown
         || !config.optimizer.enable_join_dynamic_filter_pushdown
     {
         return Ok(Some("disabled by DataFusion session options"));
     }
-    if join.join_type() != &JoinType::Inner
-        || join.null_equality() != NullEquality::NullEqualsNothing
+    // The build side is the left input here. A probe row without a build match never reaches
+    // the output of these join types, so dropping it early cannot change the result. Outer
+    // and anti joins on the probe side emit such rows and stay unfiltered.
+    if !matches!(
+        join.join_type(),
+        JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi
+    ) || join.null_equality() != NullEquality::NullEqualsNothing
     {
-        return Ok(Some("only ordinary inner equijoins are supported"));
+        return Ok(Some("only inner and semi equijoins are supported"));
     }
     if !matches!(
         join.partition_mode(),
@@ -315,10 +325,10 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
     if build_type != probe_type
         || !matches!(
             build_type,
-            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 | DataType::Date32
         )
     {
-        return Ok(Some("requires matching signed integer keys"));
+        return Ok(Some("requires matching integer or date keys"));
     }
     Ok(None)
 }

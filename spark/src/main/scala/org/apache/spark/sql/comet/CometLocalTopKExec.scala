@@ -19,11 +19,13 @@
 
 package org.apache.spark.sql.comet
 
+import scala.jdk.CollectionConverters._
+
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.types.{ByteType, IntegerType, LongType, ShortType}
+import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType}
 
 import com.google.common.base.Objects
 
@@ -40,24 +42,35 @@ object CometLocalTopKExec {
       return None
     }
 
-    // Support one direct signed integer column in a native Parquet or Iceberg scan.
-    // Other plans retain the existing TopKInput execution path.
+    // Support a direct signed integer or date first key in a native Parquet or Iceberg scan.
+    // An Iceberg scan may also carry further direct-column keys: only the first key bounds the
+    // reader. Other plans retain the existing TopKInput execution path.
+    def firstKeyEligible(scan: CometLeafExec, order: SortOrder): Boolean = {
+      order.child.isInstanceOf[Attribute] && (scan match {
+        case _: CometNativeScanExec =>
+          order.dataType match {
+            case ByteType | ShortType | IntegerType | LongType => true
+            case _ => false
+          }
+        case _: CometIcebergNativeScanExec =>
+          order.dataType == IntegerType || order.dataType == LongType ||
+          order.dataType == DateType
+        case _ => false
+      })
+    }
     (op.child, op.sortOrder) match {
-      case (scan: CometLeafExec, Seq(order))
-          if (scan.isInstanceOf[CometNativeScanExec] ||
-            (scan.isInstanceOf[CometIcebergNativeScanExec] &&
-              (order.dataType == IntegerType || order.dataType == LongType))) &&
-            order.child.isInstanceOf[Attribute] && (order.dataType match {
-              case ByteType | ShortType | IntegerType | LongType => true
-              case _ => false
-            }) =>
-        exprToProto(order, scan.output).map { sortOrder =>
+      case (scan: CometLeafExec, orders)
+          if orders.nonEmpty && firstKeyEligible(scan, orders.head) &&
+            (orders.size == 1 || (scan.isInstanceOf[CometIcebergNativeScanExec] &&
+              orders.forall(_.child.isInstanceOf[Attribute]))) =>
+        val protos = orders.map(order => exprToProto(order, scan.output))
+        Some(protos).filter(_.forall(_.isDefined)).map(_.flatten).map { sortOrders =>
           // Spark's physical limit already includes the offset. Each partition retains that
           // many candidates; only the final TopK applies the offset after the shuffle.
           val dynamicFilterEnabled = CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get(op.conf)
           val sort = Sort
             .newBuilder()
-            .addSortOrders(sortOrder)
+            .addAllSortOrders(sortOrders.asJava)
             .setFetch(op.limit)
             .setSkip(0)
             .setDynamicFilterEnabled(dynamicFilterEnabled)

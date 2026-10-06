@@ -53,6 +53,10 @@ pub(super) fn try_attach_topk_reader_filter(
     )? {
         return Ok(Some(scan));
     }
+    // The Parquet reader filters on a single key.
+    if predicate.children().len() != 1 {
+        return Ok(None);
+    }
     let Some(scan) = input.downcast_ref::<DataSourceExec>() else {
         return Ok(None);
     };

@@ -397,6 +397,79 @@ fn assert_skipped(join: HashJoinExec, config: &ConfigOptions) {
         .is_empty());
 }
 
+#[tokio::test]
+async fn semi_joins_are_filtered_without_changing_results() {
+    let session = SessionContext::new();
+    let config = ConfigOptions::default();
+    for join_type in [JoinType::LeftSemi, JoinType::RightSemi] {
+        let build = input(
+            vec![Some(-5), Some(20), Some(20), Some(90)],
+            &DataType::Int32,
+            1,
+        );
+        let probe = input(
+            (-100..=100).map(Some).chain([None]).collect(),
+            &DataType::Int32,
+            0,
+        );
+        let plain: Arc<dyn ExecutionPlan> = Arc::new(
+            join(build, probe, false)
+                .downcast_ref::<HashJoinExec>()
+                .unwrap()
+                .builder()
+                .with_type(join_type)
+                .build()
+                .unwrap(),
+        );
+        let attached =
+            PhysicalPlanner::apply_join_dynamic_filter(Arc::clone(&plain), true, &config).unwrap();
+        assert!(
+            attached.is::<DynamicFilterJoinExec>(),
+            "{join_type} must be filtered"
+        );
+        let expected = collect(plain, session.task_ctx()).await.unwrap();
+        let actual = collect(Arc::clone(&attached), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(
+            batches_to_sort_string(&actual),
+            batches_to_sort_string(&expected)
+        );
+        assert!(metric(&attached, "dynamic_filter_join_rows_pruned") >= 195);
+    }
+}
+
+#[tokio::test]
+async fn small_build_sides_publish_an_in_list_and_larger_ones_a_hash_lookup() {
+    let session = SessionContext::new();
+    let plan = |keys: Vec<i64>| {
+        let build: ArrayRef = Arc::new(Int64Array::from(keys));
+        let probe: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        single_key_join(build, probe, PartitionMode::CollectLeft)
+    };
+    for (keys, expect_list) in [
+        (vec![1, 2], true),
+        ((0..100_000).collect::<Vec<i64>>(), false),
+    ] {
+        let join = plan(keys);
+        let wrapper =
+            DynamicFilterJoinExec::new(&join, session.copied_config().options().as_ref().clone())
+                .unwrap();
+        let producer = wrapper.build_runtime_join().unwrap();
+        let filter = produced_join_filter(&producer.join);
+        let mut stream = wrapper
+            .execute_runtime_join(producer.join, 0, session.task_ctx())
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let published = filter.current().unwrap().to_string();
+        assert_eq!(
+            !published.contains("hash_lookup"),
+            expect_list,
+            "unexpected filter {published}"
+        );
+    }
+}
+
 #[test]
 fn skips_unsupported_joins_and_session_disables() {
     let default = ConfigOptions::default();
@@ -404,8 +477,6 @@ fn skips_unsupported_joins_and_session_disables() {
         JoinType::Left,
         JoinType::Right,
         JoinType::Full,
-        JoinType::LeftSemi,
-        JoinType::RightSemi,
         JoinType::LeftAnti,
         JoinType::RightAnti,
         JoinType::LeftMark,

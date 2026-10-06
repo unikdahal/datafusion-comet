@@ -1209,7 +1209,7 @@ object CometScanRule extends Logging {
     import org.apache.spark.sql.catalyst.expressions.{And, IsNotNull, SortOrder}
     import org.apache.spark.sql.catalyst.expressions.aggregate.{Max, Min, Partial}
     import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
-    import org.apache.spark.sql.catalyst.plans.Inner
+    import org.apache.spark.sql.catalyst.plans.{Inner, LeftSemi}
     import org.apache.spark.sql.execution.{FilterExec, TakeOrderedAndProjectExec}
     import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
     import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
@@ -1222,8 +1222,10 @@ object CometScanRule extends Logging {
     val minMax = COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get(conf)
     if (!joins && !topK && !minMax) return inputs
 
-    def directIntegerAttribute(expression: Expression): Option[Attribute] = expression match {
-      case attr: Attribute if attr.dataType == IntegerType || attr.dataType == LongType =>
+    def directKeyAttribute(expression: Expression): Option[Attribute] = expression match {
+      case attr: Attribute
+          if attr.dataType == IntegerType || attr.dataType == LongType ||
+            attr.dataType == DateType =>
         Some(attr)
       case _ => None
     }
@@ -1255,22 +1257,22 @@ object CometScanRule extends Logging {
     def visit(node: SparkPlan): Unit = {
       node match {
         case join: HashJoin
-            if joins && join.joinType == Inner && join.leftKeys.size == 1 &&
-              join.rightKeys.size == 1 =>
+            if joins && (join.joinType == Inner || join.joinType == LeftSemi) &&
+              join.leftKeys.size == 1 && join.rightKeys.size == 1 =>
           val probe = join.buildSide match {
             case BuildLeft => Some((join.right, join.rightKeys.head))
             case BuildRight => Some((join.left, join.leftKeys.head))
             case _ => None
           }
           probe.foreach { case (input, expression) =>
-            directIntegerAttribute(expression)
+            directKeyAttribute(expression)
               .foreach(key => readerInput(input, key, allowNullFilters = true))
           }
 
         case limit: TakeOrderedAndProjectExec
-            if topK && limit.limit > 0 && limit.sortOrder.size == 1 &&
+            if topK && limit.limit > 0 && limit.sortOrder.nonEmpty &&
               !SortOrder.orderingSatisfies(limit.child.outputOrdering, limit.sortOrder) =>
-          directIntegerAttribute(limit.sortOrder.head.child)
+          directKeyAttribute(limit.sortOrder.head.child)
             .foreach(key => readerInput(limit.child, key, allowNullFilters = false))
 
         case aggregate: BaseAggregateExec
@@ -1281,7 +1283,7 @@ object CometScanRule extends Logging {
           if (expression.mode == Partial && !expression.isDistinct && expression.filter.isEmpty &&
             (function.isInstanceOf[Min] || function.isInstanceOf[Max])) {
             function.children.headOption
-              .flatMap(directIntegerAttribute)
+              .flatMap(directKeyAttribute)
               .foreach(key => readerInput(aggregate.child, key, allowNullFilters = true))
           }
 

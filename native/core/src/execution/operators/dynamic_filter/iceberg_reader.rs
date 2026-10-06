@@ -20,7 +20,7 @@ use std::sync::Arc;
 use datafusion::common::{Result, ScalarValue};
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::expressions::{
-    BinaryExpr, Column, DynamicFilterPhysicalExpr, IsNotNullExpr, IsNullExpr, Literal,
+    BinaryExpr, Column, DynamicFilterPhysicalExpr, InListExpr, IsNotNullExpr, IsNullExpr, Literal,
 };
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ExecutionPlan;
@@ -132,11 +132,12 @@ pub(super) fn try_attach_iceberg_reader_filter(
     let Some(scan) = input.downcast_ref::<IcebergScanExec>() else {
         return Ok(None);
     };
+    // A multi-key TopK filter lists every sort key; only the first one bounds the scan.
     let children = predicate.children();
-    let [child] = children.as_slice() else {
-        return Ok(None);
-    };
-    let Some(column) = child.downcast_ref::<Column>() else {
+    let Some(column) = children
+        .first()
+        .and_then(|child| child.downcast_ref::<Column>())
+    else {
         return Ok(None);
     };
 
@@ -181,21 +182,13 @@ fn extract_iceberg_predicate(
             };
         }
         if binary.op() == &Operator::Or {
-            // DataFusion's single-key NULLS FIRST TopK emits exactly
-            // IS NULL(key) OR key < / > threshold. Both arms must be
-            // translated completely; an arbitrary OR still fails open.
-            let null = binary.left().downcast_ref::<IsNullExpr>()?;
-            if null.arg().downcast_ref::<Column>()?.index() != probe_column_index {
-                return None;
-            }
-            let comparison = binary.right().downcast_ref::<BinaryExpr>()?;
-            if !matches!(comparison.op(), Operator::Lt | Operator::Gt) {
-                return None;
-            }
-            return extract_bound(comparison, probe_column_index, iceberg_field_name)
-                .map(|bound| Reference::new(iceberg_field_name).is_null().or(bound));
+            return extract_disjunction(binary, probe_column_index, iceberg_field_name);
         }
         return extract_bound(binary, probe_column_index, iceberg_field_name);
+    }
+
+    if let Some(list) = expr.downcast_ref::<InListExpr>() {
+        return extract_in_list(list, probe_column_index, iceberg_field_name);
     }
 
     if let Some(check) = expr.downcast_ref::<IsNullExpr>() {
@@ -212,6 +205,129 @@ fn extract_iceberg_predicate(
             ScalarValue::Boolean(Some(false)) => Some(Predicate::AlwaysFalse),
             _ => None,
         })
+}
+
+/// The largest `IN` list translated into an Iceberg predicate. DataFusion only publishes a list
+/// for small build sides; larger ones stay hash lookups on the probe side.
+const MAX_IN_LIST_LITERALS: usize = 1024;
+
+/// `key IN (v1, v2, ...)` over the probe column, or `None` if any part is not a plain literal.
+fn extract_in_list(
+    list: &InListExpr,
+    probe_column_index: usize,
+    iceberg_field_name: &str,
+) -> Option<Predicate> {
+    if list.negated() || list.is_empty() || list.len() > MAX_IN_LIST_LITERALS {
+        return None;
+    }
+    if list.expr().downcast_ref::<Column>()?.index() != probe_column_index {
+        return None;
+    }
+    let datums = list
+        .list()
+        .iter()
+        .map(|item| {
+            item.downcast_ref::<Literal>()
+                .and_then(|literal| scalar_to_datum(literal.value()))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Reference::new(iceberg_field_name).is_in(datums))
+}
+
+/// A leaf of `a OR b OR ...` with nested ORs flattened left to right.
+fn flatten_or<'a>(expr: &'a Arc<dyn PhysicalExpr>, arms: &mut Vec<&'a Arc<dyn PhysicalExpr>>) {
+    match expr.downcast_ref::<BinaryExpr>() {
+        Some(binary) if binary.op() == &Operator::Or => {
+            flatten_or(binary.left(), arms);
+            flatten_or(binary.right(), arms);
+        }
+        _ => arms.push(expr),
+    }
+}
+
+/// Whether the leftmost conjunct of `arm` is `column = literal` on the probe column.
+fn starts_with_equality(
+    arm: &Arc<dyn PhysicalExpr>,
+    probe_column_index: usize,
+    literal: &ScalarValue,
+) -> bool {
+    let Some(binary) = arm.downcast_ref::<BinaryExpr>() else {
+        return false;
+    };
+    match binary.op() {
+        Operator::And => starts_with_equality(binary.left(), probe_column_index, literal),
+        Operator::Eq => {
+            binary
+                .left()
+                .downcast_ref::<Column>()
+                .is_some_and(|column| column.index() == probe_column_index)
+                && binary
+                    .right()
+                    .downcast_ref::<Literal>()
+                    .is_some_and(|value| value.value() == literal)
+        }
+        _ => false,
+    }
+}
+
+/// The two OR shapes DataFusion's TopK produces, translated on the first sort key only:
+///
+/// * single key: `key < t` or `key IS NULL OR key < t` (also `>`), kept exact;
+/// * several keys: those arms followed by one `key = t AND ...` arm per further key. Every
+///   further arm implies `key = t`, so the first key alone is bounded by `key <= t`
+///   (`>=` for descending), plus `OR key IS NULL` when nulls sort first.
+///
+/// Any other OR fails open.
+fn extract_disjunction(
+    binary: &BinaryExpr,
+    probe_column_index: usize,
+    iceberg_field_name: &str,
+) -> Option<Predicate> {
+    let mut arms = Vec::new();
+    flatten_or(binary.left(), &mut arms);
+    flatten_or(binary.right(), &mut arms);
+    let mut arms = arms.into_iter();
+
+    let mut first = arms.next()?;
+    let mut with_null = false;
+    if let Some(null) = first.downcast_ref::<IsNullExpr>() {
+        if null.arg().downcast_ref::<Column>()?.index() != probe_column_index {
+            return None;
+        }
+        with_null = true;
+        first = arms.next()?;
+    }
+    let comparison = first.downcast_ref::<BinaryExpr>()?;
+    if !matches!(comparison.op(), Operator::Lt | Operator::Gt) {
+        return None;
+    }
+    let threshold = comparison.right().downcast_ref::<Literal>()?;
+    let rest: Vec<_> = arms.collect();
+    let bound = if rest.is_empty() {
+        extract_bound(comparison, probe_column_index, iceberg_field_name)?
+    } else {
+        if !rest
+            .iter()
+            .all(|arm| starts_with_equality(arm, probe_column_index, threshold.value()))
+        {
+            return None;
+        }
+        let column = comparison.left().downcast_ref::<Column>()?;
+        if column.index() != probe_column_index {
+            return None;
+        }
+        let datum = scalar_to_datum(threshold.value())?;
+        let reference = Reference::new(iceberg_field_name);
+        match comparison.op() {
+            Operator::Lt => reference.less_than_or_equal_to(datum),
+            _ => reference.greater_than_or_equal_to(datum),
+        }
+    };
+    Some(if with_null {
+        Reference::new(iceberg_field_name).is_null().or(bound)
+    } else {
+        bound
+    })
 }
 
 fn extract_bound(
@@ -242,6 +358,7 @@ fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
         ScalarValue::Int16(Some(value)) => Some(Datum::int(i32::from(*value))),
         ScalarValue::Int32(Some(value)) => Some(Datum::int(*value)),
         ScalarValue::Int64(Some(value)) => Some(Datum::long(*value)),
+        ScalarValue::Date32(Some(days)) => Some(Datum::date(*days)),
         _ => None,
     }
 }
@@ -565,6 +682,148 @@ mod tests {
                     .greater_than_or_equal_to(Datum::int(100))
                     .and(Reference::new("id").less_than_or_equal_to(Datum::int(103)))
             )
+        );
+    }
+
+    #[test]
+    fn multi_key_topk_filter_bounds_only_the_first_key_inclusively() {
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let second: Arc<dyn PhysicalExpr> = Arc::new(Column::new("second", 1));
+        let third: Arc<dyn PhysicalExpr> = Arc::new(Column::new("third", 2));
+        let binary = |left: &Arc<dyn PhysicalExpr>, op, right: i32| -> Arc<dyn PhysicalExpr> {
+            Arc::new(BinaryExpr::new(Arc::clone(left), op, lit(right)))
+        };
+        let and = |left, right| -> Arc<dyn PhysicalExpr> {
+            Arc::new(BinaryExpr::new(left, Operator::And, right))
+        };
+        let or = |left, right| -> Arc<dyn PhysicalExpr> {
+            Arc::new(BinaryExpr::new(left, Operator::Or, right))
+        };
+        // ORDER BY key, second, third LIMIT n, as DataFusion builds it after its heap fills.
+        let tie = binary(&key, Operator::Eq, 10);
+        let tie_second = and(Arc::clone(&tie), binary(&second, Operator::Eq, 5));
+        let filter = or(
+            or(
+                binary(&key, Operator::Lt, 10),
+                and(Arc::clone(&tie), binary(&second, Operator::Lt, 5)),
+            ),
+            and(tie_second, binary(&third, Operator::Lt, 3)),
+        );
+        assert_eq!(
+            extract_iceberg_predicate(&filter, 0, "id"),
+            Some(Reference::new("id").less_than_or_equal_to(Datum::int(10)))
+        );
+
+        // Descending, nulls first: the null arm stays and the bound flips.
+        let nulls: Arc<dyn PhysicalExpr> = Arc::new(IsNullExpr::new(Arc::clone(&key)));
+        let filter = or(
+            or(nulls, binary(&key, Operator::Gt, 10)),
+            and(Arc::clone(&tie), binary(&second, Operator::Gt, 5)),
+        );
+        assert_eq!(
+            extract_iceberg_predicate(&filter, 0, "id"),
+            Some(
+                Reference::new("id")
+                    .is_null()
+                    .or(Reference::new("id").greater_than_or_equal_to(Datum::int(10)))
+            )
+        );
+
+        // A tie arm on another threshold, another column, or no tie at all fails open.
+        let other_threshold = and(
+            binary(&key, Operator::Eq, 11),
+            binary(&second, Operator::Lt, 5),
+        );
+        let other_column = and(
+            binary(&second, Operator::Eq, 10),
+            binary(&second, Operator::Lt, 5),
+        );
+        let no_tie = binary(&second, Operator::Lt, 5);
+        for arm in [other_threshold, other_column, no_tie] {
+            let filter = or(binary(&key, Operator::Lt, 10), arm);
+            assert!(extract_iceberg_predicate(&filter, 0, "id").is_none());
+        }
+    }
+
+    #[test]
+    fn small_exact_membership_becomes_an_in_predicate() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::physical_expr::expressions::in_list;
+
+        let schema = Schema::new(vec![Field::new("key", DataType::Int32, false)]);
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let list = in_list(
+            Arc::clone(&key),
+            vec![lit(7_i32), lit(3_i32), lit(7_i32)],
+            &false,
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_iceberg_predicate(&list, 0, "id"),
+            Some(Reference::new("id").is_in([Datum::int(3), Datum::int(7)]))
+        );
+
+        // Bounds and membership combine.
+        let range: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::clone(&key),
+            Operator::GtEq,
+            lit(3_i32),
+        ));
+        let both: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(range, Operator::And, list));
+        assert_eq!(
+            extract_iceberg_predicate(&both, 0, "id"),
+            Some(
+                Reference::new("id")
+                    .greater_than_or_equal_to(Datum::int(3))
+                    .and(Reference::new("id").is_in([Datum::int(3), Datum::int(7)]))
+            )
+        );
+
+        // Negated lists, other columns, nulls and unsupported literals fail open.
+        let negated = in_list(Arc::clone(&key), vec![lit(1_i32)], &true, &schema).unwrap();
+        assert!(extract_iceberg_predicate(&negated, 0, "id").is_none());
+        let other_column = in_list(
+            Arc::new(Column::new("other", 1)),
+            vec![lit(1_i32)],
+            &false,
+            &Schema::new(vec![
+                Field::new("key", DataType::Int32, false),
+                Field::new("other", DataType::Int32, false),
+            ]),
+        )
+        .unwrap();
+        assert!(extract_iceberg_predicate(&other_column, 0, "id").is_none());
+        let with_null = in_list(
+            Arc::clone(&key),
+            vec![lit(1_i32), lit(ScalarValue::Int32(None))],
+            &false,
+            &schema,
+        )
+        .unwrap();
+        assert!(extract_iceberg_predicate(&with_null, 0, "id").is_none());
+        // More literals than the cap is not translated.
+        let many = in_list(
+            key,
+            (0..=MAX_IN_LIST_LITERALS as i32).map(lit).collect(),
+            &false,
+            &schema,
+        )
+        .unwrap();
+        assert!(extract_iceberg_predicate(&many, 0, "id").is_none());
+    }
+
+    #[test]
+    fn date_bounds_become_date_predicates() {
+        let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new("day", 0));
+        let expression: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            column,
+            Operator::GtEq,
+            lit(ScalarValue::Date32(Some(19_000))),
+        ));
+        assert_eq!(
+            extract_iceberg_predicate(&expression, 0, "day"),
+            Some(Reference::new("day").greater_than_or_equal_to(Datum::date(19_000)))
         );
     }
 }

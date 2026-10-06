@@ -2970,7 +2970,10 @@ impl PhysicalPlanner {
                 let func = min_max_udaf(&datatype, false);
                 let child: Arc<dyn PhysicalExpr> = if direct_minmax
                     && child.is::<Column>()
-                    && matches!(datatype, DataType::Int32 | DataType::Int64)
+                    && matches!(
+                        datatype,
+                        DataType::Int32 | DataType::Int64 | DataType::Date32
+                    )
                     && child.data_type(schema.as_ref())? == datatype
                 {
                     child
@@ -2992,7 +2995,10 @@ impl PhysicalPlanner {
                 let func = min_max_udaf(&datatype, true);
                 let child: Arc<dyn PhysicalExpr> = if direct_minmax
                     && child.is::<Column>()
-                    && matches!(datatype, DataType::Int32 | DataType::Int64)
+                    && matches!(
+                        datatype,
+                        DataType::Int32 | DataType::Int64 | DataType::Date32
+                    )
                     && child.data_type(schema.as_ref())? == datatype
                 {
                     child
