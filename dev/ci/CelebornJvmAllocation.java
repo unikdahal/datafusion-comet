@@ -19,8 +19,9 @@
 
 package org.apache.comet.benchmark;
 
-import com.sun.management.ThreadMXBean;
 import java.lang.management.ManagementFactory;
+
+import com.sun.management.ThreadMXBean;
 
 /** Public JVM allocation counters for complete query measurements. */
 public final class CelebornJvmAllocation {

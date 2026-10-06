@@ -67,9 +67,17 @@ def main():
              "Every query rebuilds its exchanges; exchange reuse and AQE are disabled. The mode order rotates between independent JVM forks. Warmups are excluded. Result digests match vanilla Spark. Native plans and current-app worker frame samples prove the intended paths; manifests verify source and binary hashes.", "",
              "RSS is resident process memory, not the framing allocation. Driver RSS includes native memory; combined RSS sums the Spark JVM, master and both workers (shared mappings may be counted twice). The per-query peak is sampled every 100 ms. A separate process-lifetime high-water RSS is obtained with /usr/bin/time. Worker storage is cleared between fresh service/JVM runs.", "",
              "Three independent JVM forks provide limited information about runner variability. Paired fork ranges and exploratory bootstrap bounds are retained in JSON; these results are diagnostic measurements on one host, not a multi-machine deployment or a production guarantee.", "",
-             "## Query speed", "", "Lower seconds is faster. Percent change is measured against the original; negative means faster.", "",
-             "| Scenario / query | Original s | Heap s | Direct s | Heap change | Direct change | Direct vs heap |",
+             "## Query speed", "", "Median complete-query seconds across measured samples, excluding warmups. Lower seconds is faster. Speedup is original seconds divided by candidate seconds: 2x means half the elapsed time. Direct vs heap is elapsed-time change; negative means faster.", "",
+             "| Scenario / query | Original s | Heap s | Direct s | Heap speedup | Direct speedup | Direct vs heap |",
              "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    consistency_lines = ["", "## Speed consistency across fresh JVMs", "",
+                         "Elapsed-time ratios use paired medians from each independent JVM fork. The range shows the fastest and slowest candidate/reference ratio; below 1 is faster. The geometric mean gives every fork equal weight. Three forks do not establish a production latency distribution.", "",
+                         "| Scenario / query | Heap/original mean ratio | Fork range | Direction | Direct/heap mean ratio | Fork range | Direction |",
+                         "| --- | ---: | --- | --- | ---: | --- | --- |"]
+    cpu_lines = ["", "## Query CPU and shuffle-write time", "",
+                 "O/H/D means Original/Heap/Direct. Median process CPU seconds during the query include Spark JVM native threads. Combined CPU adds the master and both workers using each individual sample. CPU seconds can exceed elapsed seconds because threads execute concurrently. Task shuffle-write seconds sum across tasks and are not an additive component of query elapsed time.", "",
+                 "| Scenario / query | Spark CPU s O/H/D | Combined CPU s O/H/D | Task shuffle-write s O/H/D |",
+                 "| --- | --- | --- | --- |"]
     memory_lines = ["", "## Query memory", "", "Median of the measured query's peak Spark JVM RSS, in MiB. Lower is less resident memory.", "",
                     "| Scenario / query | Original MiB | Heap MiB | Direct MiB | Heap change | Direct change |",
                     "| --- | ---: | ---: | ---: | ---: | ---: |"]
@@ -122,7 +130,7 @@ def main():
                     frames[mode].extend(frame["payload_bytes"] for frame in frame_records)
                 entries[mode].append(record["queries"])
                 process[mode].append(resources(target / "process-resources.txt"))
-        summary = {"config": config, "protocol": protocol, "queries": {}, "process": process, "frames": {mode: {"samples": len(values), "min": min(values), "median": median(values), "max": max(values)} for mode, values in frames.items()}}
+        summary = {"config": config, "protocol": protocol, "benchmark_source": (directory / "benchmark-source.txt").read_text().strip(), "queries": {}, "process": process, "frames": {mode: {"samples": len(values), "min": min(values), "median": median(values), "max": max(values)} for mode, values in frames.items()}}
         for query_name in reference:
             query_summary = {"sha256": reference[query_name]["sha256"], "rows": reference[query_name]["rows"]}
             for mode in entries:
@@ -131,13 +139,23 @@ def main():
                      ["seconds", "cpu_seconds", "driver_rss_bytes", "service_rss_bytes", "combined_rss_bytes", "gc_ms", "gc_count"]},
                      "task_metrics": {key: median([s["task_metrics"][key] for s in samples]) for key in samples[0]["task_metrics"]},
                      "fork_median_seconds": [median([s["seconds"] for s in fork[query_name]["samples"] if not s["warmup"]]) for fork in entries[mode]]}
+                query_summary[mode]["combined_cpu_seconds"] = median([s["cpu_seconds"] + s.get("service_cpu_seconds", 0) for s in samples])
+                for key in ["service_cpu_seconds", "driver_threads", "jvm_heap_used_after_bytes", "jvm_heap_committed_after_bytes"]:
+                    if key in samples[0]:
+                        query_summary[mode][key] = median([s[key] for s in samples])
                 if "jvm_allocated_bytes" in samples[0]:
                     query_summary[mode]["jvm_allocated_bytes"] = median([s["jvm_allocated_bytes"] for s in samples])
                     query_summary[mode]["allocation_threads_ended"] = max(s["allocation_threads_ended"] for s in samples)
             for ref, candidate in [("original", "heap"), ("original", "direct"), ("heap", "direct")]:
                 query_summary[candidate + "_vs_" + ref] = comparison(query_summary[ref]["fork_median_seconds"], query_summary[candidate]["fork_median_seconds"])
             original, heap, direct = [query_summary[mode] for mode in entries]
-            lines.append(f"| {name} / {query_name} | {original['seconds']:.3f} | {heap['seconds']:.3f} | {direct['seconds']:.3f} | {(heap['seconds']/original['seconds']-1)*100:+.1f}% | {(direct['seconds']/original['seconds']-1)*100:+.1f}% | {(direct['seconds']/heap['seconds']-1)*100:+.1f}% |")
+            lines.append(f"| {name} / {query_name} | {original['seconds']:.3f} | {heap['seconds']:.3f} | {direct['seconds']:.3f} | {original['seconds']/heap['seconds']:.2f}x | {original['seconds']/direct['seconds']:.2f}x | {(direct['seconds']/heap['seconds']-1)*100:+.1f}% |")
+            h_ratio, d_ratio = query_summary["heap_vs_original"], query_summary["direct_vs_heap"]
+            consistency_lines.append(f"| {name} / {query_name} | {h_ratio['ratio']:.3f} | {h_ratio['ratio_min']:.3f}-{h_ratio['ratio_max']:.3f} | {h_ratio['direction']} | {d_ratio['ratio']:.3f} | {d_ratio['ratio_min']:.3f}-{d_ratio['ratio_max']:.3f} | {d_ratio['direction']} |")
+            spark_cpu = "/".join(f"{v['cpu_seconds']:.2f}" for v in [original, heap, direct])
+            combined_cpu = "/".join(f"{v['combined_cpu_seconds']:.2f}" for v in [original, heap, direct])
+            write_time = "/".join(f"{v['task_metrics']['Shuffle Write Time']/1e9:.3f}" for v in [original, heap, direct])
+            cpu_lines.append(f"| {name} / {query_name} | {spark_cpu} | {combined_cpu} | {write_time} |")
             o, h, d = [v["driver_rss_bytes"] / 1048576 for v in [original, heap, direct]]
             memory_lines.append(f"| {name} / {query_name} | {o:.1f} | {h:.1f} | {d:.1f} | {(h/o-1)*100:+.1f}% | {(d/o-1)*100:+.1f}% |")
             diagnostic_lines.append(f"| {name} / {query_name} | {original['task_metrics']['Shuffle Bytes Written']/1048576:.1f} | {heap['task_metrics']['Shuffle Bytes Written']/1048576:.1f} | {direct['task_metrics']['Shuffle Bytes Written']/1048576:.1f} | {original['gc_ms']:.0f} | {heap['gc_ms']:.0f} | {direct['gc_ms']:.0f} |")
@@ -151,7 +169,7 @@ def main():
         configuration_lines.append(f"| {name} | {config['rows']:,} | {config['width']} | {config['entropy']} | {config['partitions']} | {config['codec']} | {config['admission']} | {config['frame']} | {config.get('batch', 8192)} | {config['cores']} | {config['replicate']} | {config['skew']} |")
         result[name] = summary
     assert result
-    lines.extend(memory_lines + process_lines + diagnostic_lines + allocation_lines + configuration_lines)
+    lines.extend(consistency_lines + cpu_lines + memory_lines + process_lines + diagnostic_lines + allocation_lines + configuration_lines)
     lines.extend(["", "## Binary manifests", "", "```json", json.dumps(manifests, indent=2), "```", ""])
     (args.output / "performance.md").write_text("\n".join(lines))
     (args.output / "performance.json").write_text(json.dumps({"manifests": manifests, "scenarios": result}, indent=2) + "\n")

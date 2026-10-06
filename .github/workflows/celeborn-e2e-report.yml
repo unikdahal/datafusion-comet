@@ -1,0 +1,80 @@
+name: Celeborn performance report
+on:
+  workflow_dispatch:
+    inputs:
+      performance_run:
+        description: Successful end-to-end performance run ID
+        type: string
+        required: true
+      allocation_run:
+        description: Optional successful allocation diagnostic run ID
+        type: string
+        default: ''
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check diagnostic source formatting and compilation
+        run: |
+          python -m py_compile dev/ci/celeborn_e2e_*.py
+          curl --fail --silent --show-error --location \
+            https://repo.maven.apache.org/maven2/com/google/googlejavaformat/google-java-format/1.22.0/google-java-format-1.22.0-all-deps.jar \
+            --output /tmp/google-java-format.jar
+          java -jar /tmp/google-java-format.jar --skip-sorting-imports --dry-run --set-exit-if-changed dev/ci/CelebornJvmAllocation.java
+          javac -d /tmp/allocation-classes dev/ci/CelebornJvmAllocation.java
+      - name: Verify source workflow results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PERFORMANCE_RUN: ${{ inputs.performance_run }}
+          ALLOCATION_RUN: ${{ inputs.allocation_run }}
+        run: |
+          python - <<'EOF'
+          import json, os, subprocess
+          runs = {}
+          for role in ['PERFORMANCE_RUN', 'ALLOCATION_RUN']:
+              run = os.environ[role]
+              if not run:
+                  continue
+              assert run.isdigit()
+              record = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{run}'], text=True))
+              assert record['status'] == 'completed' and record['conclusion'] == 'success', (role, record['status'], record['conclusion'])
+              assert record['path'] == '.github/workflows/celeborn-e2e.yml'
+              runs[role] = {key: record[key] for key in ['id', 'head_sha', 'html_url', 'created_at', 'status', 'conclusion']}
+          os.makedirs('report', exist_ok=True)
+          with open('report/source-runs.json', 'w') as output:
+              json.dump(runs, output, indent=2)
+          EOF
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.performance_run }}
+          pattern: e2e-*
+          path: evidence
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.allocation_run }}
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.allocation_run }}
+          pattern: e2e-*
+          path: evidence
+      - name: Publish complete speed, memory and CPU report
+        run: |
+          python dev/ci/celeborn_e2e_report.py --artifacts evidence --output report
+          cat report/performance.md >> "$GITHUB_STEP_SUMMARY"
+          git rev-parse HEAD > report/report-source.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: complete-performance-report
+          path: report/**
