@@ -122,8 +122,9 @@ case class CometScanRule(session: SparkSession)
   /**
    * Whether this V2 scan reads an Iceberg metadata table, which Comet does not support.
    *
-   * Matches on the table-name suffix, so it is only meaningful once contribs have had their turn
-   * -- see the call site in `transformV2Scan`.
+   * Prefer the Iceberg table's actual type. If reflection cannot reach the table, fall back to a
+   * delimiter-aware name check so ordinary data tables such as `user_files`, `snapshots`, and
+   * `order_history` are not mistaken for metadata tables.
    */
   private def isIcebergMetadataTable(scanExec: BatchScanExec): Boolean = {
     // List of Iceberg metadata tables:
@@ -142,12 +143,25 @@ case class CometScanRule(session: SparkSession)
       "all_entries",
       "all_manifests")
 
-    // Match case-insensitively: metadata tables surface lowercase via the path form
-    // (...metadata.json#all_manifests) but uppercase via the catalog-identifier form
-    // (db.table.ALL_DATA_FILES), and the latter must hit this gate too rather than fall through
-    // to reflection that fails on the metadata-table class.
-    val name = scanExec.table.name().toLowerCase(Locale.ROOT)
-    metadataTableSuffix.exists(name.endsWith)
+    // This guard runs for every V2 scan after contribs decline it. Do not use Iceberg-specific
+    // naming heuristics for unrelated data sources.
+    if (!scanExec.scan.getClass.getName.startsWith("org.apache.iceberg.")) {
+      return false
+    }
+
+    IcebergReflection.getTable(scanExec.scan) match {
+      case Some(table) if table != null =>
+        IcebergReflection.classNameInHierarchy(
+          table.getClass,
+          Set("org.apache.iceberg.BaseMetadataTable"))
+
+      case _ =>
+        // Reflection is best-effort across Iceberg versions. When it fails, preserve the fallback
+        // but require a real metadata-table delimiter instead of an arbitrary suffix match.
+        val name = scanExec.table.name().toLowerCase(Locale.ROOT)
+        metadataTableSuffix.exists(suffix =>
+          name.endsWith("." + suffix) || name.endsWith("#" + suffix))
+    }
   }
 
   private def transformV1Scan(plan: SparkPlan, scanExec: FileSourceScanExec): SparkPlan = {
