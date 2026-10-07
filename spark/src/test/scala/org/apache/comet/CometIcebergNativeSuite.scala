@@ -178,20 +178,54 @@ class CometIcebergNativeSuite
         CometConf.COMET_EXEC_ENABLED.key -> "true",
         CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
 
-        // Each name ends with a metadata table name but is an ordinary data table.
-        for (table <- Seq("user_files", "snapshots", "order_history")) {
-          spark.sql(s"CREATE TABLE hadoop_catalog.db.$table (id INT, name STRING) USING iceberg")
-          spark.sql(s"INSERT INTO hadoop_catalog.db.$table VALUES (1, 'a'), (2, 'b')")
-          checkIcebergNativeScan(s"SELECT * FROM hadoop_catalog.db.$table ORDER BY id")
-        }
+        val tables = Seq("user_files", "snapshots", "order_history")
+        try {
+          // Each name ends with a metadata-table word but is an ordinary data table.
+          for (table <- tables) {
+            spark.sql(s"CREATE TABLE hadoop_catalog.db.$table (id INT, name STRING) USING iceberg")
+            spark.sql(s"INSERT INTO hadoop_catalog.db.$table VALUES (1, 'a'), (2, 'b')")
+            checkIcebergNativeScan(s"SELECT * FROM hadoop_catalog.db.$table ORDER BY id")
+          }
 
-        // A real metadata table still falls back, and still answers correctly.
-        checkIcebergNativeScanFallback(
-          "SELECT count(*) FROM hadoop_catalog.db.user_files.files",
-          "Iceberg Metadata tables are not supported")
+          // Pin the reflection contract used by CometScanRule. Every supported Iceberg SparkScan
+          // must expose its underlying Table via SparkScan.table(). If an Iceberg upgrade changes
+          // that contract, fail the compatibility matrix rather than reintroducing name heuristics.
+          val dataScan = spark
+            .sql("SELECT * FROM hadoop_catalog.db.user_files")
+            .queryExecution
+            .executedPlan
+            .collectFirst { case scan: BatchScanExec => scan }
+            .getOrElse(fail("Expected an Iceberg BatchScanExec"))
+          assert(
+            IcebergReflection.getTable(dataScan.scan).isDefined,
+            s"Supported Iceberg scan ${dataScan.scan.getClass.getName} must expose table()")
 
-        for (table <- Seq("user_files", "snapshots", "order_history")) {
-          spark.sql(s"DROP TABLE hadoop_catalog.db.$table")
+          // Pin metadata scans too: they must expose a BaseMetadataTable, which is the only
+          // discriminator CometScanRule relies on.
+          for (metadataTable <- Seq("files", "snapshots", "refs")) {
+            val query = s"SELECT count(*) FROM hadoop_catalog.db.user_files.$metadataTable"
+            val metadataScan = spark
+              .sql(query)
+              .queryExecution
+              .executedPlan
+              .collectFirst { case scan: BatchScanExec => scan }
+              .getOrElse(fail(s"Expected an Iceberg metadata BatchScanExec for $metadataTable"))
+            val icebergTable = IcebergReflection
+              .getTable(metadataScan.scan)
+              .getOrElse(
+                fail(
+                  s"Supported Iceberg metadata scan ${metadataScan.scan.getClass.getName} " +
+                    "must expose table()"))
+            assert(
+              IcebergReflection.classNameInHierarchy(
+                icebergTable.getClass,
+                Set("org.apache.iceberg.BaseMetadataTable")),
+              s"$metadataTable must resolve to an Iceberg BaseMetadataTable")
+
+            checkIcebergNativeScanFallback(query, "Iceberg Metadata tables are not supported")
+          }
+        } finally {
+          tables.foreach(table => spark.sql(s"DROP TABLE IF EXISTS hadoop_catalog.db.$table"))
         }
       }
     }
