@@ -82,8 +82,8 @@ aws-sdk-sts = { version = "1.114.0", default-features = false }
 # version requirement once a release ships on arrow 59. Bump policy: #5645.
 # This revision is the head of the iceberg-rust runtime pruning branch for Arrow 59, which adds
 # execution-time predicate support to the Arrow reader on top of upstream main.
-iceberg = { git = "https://github.com/unikdahal/iceberg-rust", rev = "c9bfeb5f988b120c8b5c6c279453ae086451f333" }
-iceberg-storage-opendal = { git = "https://github.com/unikdahal/iceberg-rust", rev = "c9bfeb5f988b120c8b5c6c279453ae086451f333", features = ["opendal-memory", "opendal-fs", "opendal-s3", "opendal-gcs", "opendal-oss", "opendal-azdls"] }
+iceberg = { git = "https://github.com/unikdahal/iceberg-rust", rev = "1ee145253241f7f1c5744cf99b6706e3956580b5" }
+iceberg-storage-opendal = { git = "https://github.com/unikdahal/iceberg-rust", rev = "1ee145253241f7f1c5744cf99b6706e3956580b5", features = ["opendal-memory", "opendal-fs", "opendal-s3", "opendal-gcs", "opendal-oss", "opendal-azdls"] }
 reqsign-core = "3"
 
 [profile.release]
