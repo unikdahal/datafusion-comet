@@ -149,3 +149,7 @@ harness = false
 [[bench]]
 name = "parquet_timestamp_conversion"
 harness = false
+
+[[bench]]
+name = "mergerows_cardinality_designs"
+harness = false
