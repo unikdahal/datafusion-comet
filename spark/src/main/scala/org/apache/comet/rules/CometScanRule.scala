@@ -105,11 +105,9 @@ case class CometScanRule(session: SparkSession)
 
       // data source V2
       //
-      // NOTE: the Iceberg metadata-table bailout is NOT here either, for the same reason. It
-      // matches on a table-name suffix (`files`, `snapshots`, ...), which a contrib's own table
-      // could legitimately end with; rejecting here would decline such a scan before the contrib
-      // is ever offered it. `transformV2Scan` applies the guard right after its contrib hook
-      // declines.
+      // NOTE: the Iceberg metadata-table bailout is NOT here. Keep the contrib hook first so an
+      // out-of-tree implementation can claim its own scan before Comet applies built-in Iceberg
+      // eligibility checks. `transformV2Scan` applies the guard immediately after contribs decline.
       case scanExec: BatchScanExec =>
         transformV2Scan(scanExec)
     }
@@ -120,47 +118,22 @@ case class CometScanRule(session: SparkSession)
   }
 
   /**
-   * Whether this V2 scan reads an Iceberg metadata table, which Comet does not support.
+   * Classifies an Iceberg V2 scan using the underlying Iceberg Table object.
    *
-   * Prefer the Iceberg table's actual type. If reflection cannot reach the table, fall back to a
-   * delimiter-aware name check so ordinary data tables such as `user_files`, `snapshots`, and
-   * `order_history` are not mistaken for metadata tables.
+   * Every Iceberg SparkScan version supported by Comet exposes a protected table() accessor.
+   * Keep that as an explicit compatibility contract rather than guessing from table names. If a
+   * future Iceberg version changes the contract, return None so the caller falls back to Spark;
+   * the Iceberg suite pins the contract and will fail in CI for supported versions.
    */
-  private def isIcebergMetadataTable(scanExec: BatchScanExec): Boolean = {
-    // List of Iceberg metadata tables:
-    // https://iceberg.apache.org/docs/latest/spark-queries/#inspecting-tables
-    val metadataTableSuffix = Set(
-      "history",
-      "metadata_log_entries",
-      "snapshots",
-      "entries",
-      "files",
-      "manifests",
-      "partitions",
-      "position_deletes",
-      "all_data_files",
-      "all_delete_files",
-      "all_entries",
-      "all_manifests")
-
-    // This guard runs for every V2 scan after contribs decline it. Do not use Iceberg-specific
-    // naming heuristics for unrelated data sources.
+  private def isIcebergMetadataTable(scanExec: BatchScanExec): Option[Boolean] = {
     if (!scanExec.scan.getClass.getName.startsWith("org.apache.iceberg.")) {
-      return false
-    }
-
-    IcebergReflection.getTable(scanExec.scan) match {
-      case Some(table) if table != null =>
+      Some(false)
+    } else {
+      IcebergReflection.getTable(scanExec.scan).map { table =>
         IcebergReflection.classNameInHierarchy(
           table.getClass,
           Set("org.apache.iceberg.BaseMetadataTable"))
-
-      case _ =>
-        // Reflection is best-effort across Iceberg versions. When it fails, preserve the fallback
-        // but require a real metadata-table delimiter instead of an arbitrary suffix match.
-        val name = scanExec.table.name().toLowerCase(Locale.ROOT)
-        metadataTableSuffix.exists(suffix =>
-          name.endsWith("." + suffix) || name.endsWith("#" + suffix))
+      }
     }
   }
 
@@ -404,12 +377,18 @@ case class CometScanRule(session: SparkSession)
       case None => // proceed with vanilla logic
     }
 
-    // Iceberg metadata tables are matched by table-name suffix (`files`, `snapshots`, ...), which
-    // a contrib's own table could legitimately end with. Running the check here -- after the
-    // contrib hook has declined -- means a contrib that owns such a table still gets to claim it,
-    // while the fallback for a genuine Iceberg metadata table is unchanged.
-    if (isIcebergMetadataTable(scanExec)) {
-      return withFallbackReason(scanExec, "Iceberg Metadata tables are not supported")
+    // Classify Iceberg metadata tables by the actual Iceberg Table type, after contribs have had
+    // the opportunity to claim the scan. Reflection is a compatibility contract for supported
+    // Iceberg versions: if it unexpectedly fails, fail closed to Spark rather than guessing from
+    // the table name and potentially native-reading an unsupported metadata table.
+    isIcebergMetadataTable(scanExec) match {
+      case Some(true) =>
+        return withFallbackReason(scanExec, "Iceberg Metadata tables are not supported")
+      case None =>
+        return withFallbackReason(
+          scanExec,
+          "Unable to inspect Iceberg table type; falling back to Spark")
+      case Some(false) => // not an Iceberg metadata table
     }
 
     // NOTE: there is no blanket metadata-column guard here. Comet's built-in V2 paths handle
