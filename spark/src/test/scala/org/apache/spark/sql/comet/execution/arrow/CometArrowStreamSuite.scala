@@ -1276,6 +1276,42 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
     }
   }
 
+  test("nested struct column slices reuse validation across child runs") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val elementType = StructType(Seq(StructField("id", IntegerType)))
+    val arrayType = ArrayType(elementType, containsNull = false)
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("items", arrayType))), "UTC")
+    val items = new OnHeapColumnVector(5, arrayType)
+    val input = new ColumnarBatch(Array[ColumnVector](items), 5)
+    try {
+      // Leave gaps in the child vector so writeChildRuns dispatches multiple slices to the same
+      // nested StructWriter. Schema validation is batch-scoped and must not depend on run shape.
+      items.putArray(0, 0, 1)
+      items.putArray(1, 1, 0)
+      items.putArray(2, 2, 1)
+      items.putNull(3)
+      items.putArray(4, 4, 1)
+      val elements = items.getChild(0)
+      Seq((0, 10), (2, 20), (4, 30)).foreach { case (row, value) =>
+        elements.putNotNull(row)
+        elements.getChild(0).putInt(row, value)
+      }
+
+      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      try {
+        batch.column(0).getArray(0).getStruct(0, 1).getInt(0) shouldBe 10
+        batch.column(0).getArray(1).numElements() shouldBe 0
+        batch.column(0).getArray(2).getStruct(0, 1).getInt(0) shouldBe 20
+        batch.column(0).isNullAt(3) shouldBe true
+        batch.column(0).getArray(4).getStruct(0, 1).getInt(0) shouldBe 30
+      } finally batch.close()
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
   test("nested array structs cannot trim trailing fields") {
     val allocator = new RootAllocator(Long.MaxValue)
     val sourceInner =
