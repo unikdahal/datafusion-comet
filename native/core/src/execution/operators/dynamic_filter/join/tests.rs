@@ -1636,8 +1636,10 @@ fn wrapper_preserves_join_statistics_and_distribution() {
     }
 }
 
-#[test]
-fn iceberg_reader_attachment_keeps_exact_consumer() {
+#[tokio::test]
+async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
+    use std::collections::HashMap;
+
     use iceberg::scan::FileScanTask;
     use iceberg::spec::{
         DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
@@ -1652,11 +1654,43 @@ fn iceberg_reader_attachment_keeps_exact_consumer() {
             .build()
             .unwrap(),
     );
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let physical_schema = Arc::new(Schema::new(
+        ["key", "payload"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Field::new(name, DataType::Int32, true).with_metadata(HashMap::from([(
+                    parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+                    (index + 1).to_string(),
+                )]))
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&physical_schema),
+        vec![
+            Arc::new(Int32Array::from(vec![
+                Some(99),
+                Some(100),
+                Some(101),
+                Some(102),
+                Some(103),
+                Some(103),
+                None,
+            ])),
+            Arc::new(Int32Array::from_iter_values(0..7)),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(file.reopen().unwrap(), physical_schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
     let task = FileScanTask::builder()
-        .with_file_size_in_bytes(1024)
+        .with_file_size_in_bytes(file.as_file().metadata().unwrap().len())
         .with_start(0)
         .with_length(0)
-        .with_data_file_path("/tmp/attachment-only.parquet".into())
+        .with_data_file_path(file.path().to_string_lossy().into_owned())
         .with_data_file_format(DataFileFormat::Parquet)
         .with_schema(schema)
         .with_project_field_ids(vec![1, 2])
@@ -1665,7 +1699,7 @@ fn iceberg_reader_attachment_keeps_exact_consumer() {
         .unwrap();
     let probe: Arc<dyn ExecutionPlan> = Arc::new(
         crate::execution::operators::IcebergScanExec::new(
-            "/tmp/metadata.json".into(),
+            file.path().to_string_lossy().into_owned(),
             Arc::new(Schema::new(vec![
                 Field::new("key", DataType::Int32, true),
                 Field::new("payload", DataType::Int32, true),
@@ -1677,7 +1711,8 @@ fn iceberg_reader_attachment_keeps_exact_consumer() {
         )
         .unwrap(),
     );
-    let build = input(vec![Some(100), Some(103)], &DataType::Int32, 1);
+    let build = input(vec![Some(100), Some(103), Some(103)], &DataType::Int32, 1);
+    let plain = join(Arc::clone(&build), Arc::clone(&probe), false);
     let plan = join(build, probe, false);
     let wrapper = DynamicFilterJoinExec::try_new(
         plan.downcast_ref::<HashJoinExec>().unwrap(),
@@ -1687,6 +1722,30 @@ fn iceberg_reader_attachment_keeps_exact_consumer() {
     .unwrap();
     let runtime = wrapper.build_runtime_join().unwrap();
     assert!(runtime.reader_filter_attached);
-    assert!(runtime.join.right().is::<DynamicFilterExec>());
-    assert!(runtime.join.right().children()[0].is::<crate::execution::operators::IcebergScanExec>());
+    assert!(runtime
+        .join
+        .right()
+        .is::<crate::execution::operators::IcebergScanExec>());
+    let session = SessionContext::new();
+    let expected = collect(plain, session.task_ctx()).await.unwrap();
+    let filtered: Arc<dyn ExecutionPlan> = Arc::new(wrapper);
+    let actual = collect(Arc::clone(&filtered), session.task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        row_count(&actual),
+        5,
+        "duplicates must retain join multiplicity"
+    );
+    assert_eq!(
+        batches_to_sort_string(&actual),
+        batches_to_sort_string(&expected)
+    );
+    assert_eq!(metric(&filtered, "dynamic_filter_join_filters_attached"), 1);
+    assert!(filtered.metrics().unwrap().iter().all(|metric| {
+        !metric
+            .value()
+            .name()
+            .starts_with("dynamic_filter_join_rows_")
+    }));
 }

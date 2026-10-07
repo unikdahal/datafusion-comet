@@ -100,21 +100,34 @@ impl DynamicFilterJoinExec {
         } else {
             None
         };
-        let reader = match parquet_reader {
-            Some(reader) => Some(reader),
-            None => try_attach_iceberg_reader_filter(
-                self.template.right(),
-                Arc::clone(&predicate),
-                None,
-            )?,
+        let (reader, iceberg_reader) = match parquet_reader {
+            Some(reader) => (Some(reader), false),
+            None => {
+                let reader = try_attach_iceberg_reader_filter(
+                    self.template.right(),
+                    Arc::clone(&predicate),
+                    None,
+                )?;
+                let attached = reader.is_some();
+                (reader, attached)
+            }
         };
         let reader_filter_attached = reader.is_some();
-        let consumer = Arc::new(DynamicFilterExec::new(
-            reader.unwrap_or_else(|| Arc::clone(self.template.right())),
-            Arc::clone(&predicate),
-            self.metrics.clone(),
-            "dynamic_filter_join",
-        ));
+        let input = reader.unwrap_or_else(|| Arc::clone(self.template.right()));
+        let consumer: Arc<dyn ExecutionPlan> = if iceberg_reader {
+            // The reader rejects files, row groups and pages before decoding.
+            // HashJoinExec then verifies the surviving rows exactly. A second
+            // membership lookup on decoded batches cannot save any further IO
+            // and would copy payload arrays only to probe the hash table again.
+            input
+        } else {
+            Arc::new(DynamicFilterExec::new(
+                input,
+                Arc::clone(&predicate),
+                self.metrics.clone(),
+                "dynamic_filter_join",
+            ))
+        };
         // In particular, do not share CollectLeft's cached build future with the
         // template, another execution, or a reset plan.
         let join = self
