@@ -1,11 +1,17 @@
 {
   "_license": "Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements. See the NOTICE file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0 (the License); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 . Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an AS IS BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.",
   "baseline": {
-    "comet": "26545ae58ee8386529a27518440920975b431d68",
+    "comet": "8c5d76b60bcd6db029e78e7b2603d873ad8a2fac",
     "iceberg": "c9bfeb5f988b120c8b5c6c279453ae086451f333"
   },
   "candidate": {
-    "comet": "3e345725f5fd0d337adebe2e9538d19afeccd4e2",
+    "comet": "b73a6835b263381cb707d17dcd08f72fdeb66c6e",
     "iceberg": "1ee145253241f7f1c5744cf99b6706e3956580b5"
+  },
+  "comparison": {
+    "original_baseline_comet": "26545ae58ee8386529a27518440920975b431d68",
+    "shared_transport_fix": "422cb76f1069c97a03f325a83ba93c0fc577f805",
+    "baseline_transport_fix": "8c5d76b60bcd6db029e78e7b2603d873ad8a2fac",
+    "note": "Both sides include the same sliced Arrow broadcast transport repair; original runtime-pruning code and Iceberg dependency are retained on the baseline."
   }
 }

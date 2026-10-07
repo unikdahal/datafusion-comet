@@ -22,8 +22,13 @@ under the License.
 The workflow `.github/workflows/iceberg_adaptive_benchmark.yml` runs on
 `adaptive-bench/rewrite-*` branches. Implementation commits and the Iceberg dependency are
 fixed in `revisions.json`; benchmark code is kept on its own branch. The baseline is Comet
-`26545ae58ee8386529a27518440920975b431d68` with Iceberg
-`c9bfeb5f988b120c8b5c6c279453ae086451f333`.
+`8c5d76b60bcd6db029e78e7b2603d873ad8a2fac` with Iceberg
+`c9bfeb5f988b120c8b5c6c279453ae086451f333`. It retains the original pruning code
+from `26545ae58ee8386529a27518440920975b431d68` and adds the same broadcast transport
+repair as the candidate: normalize sliced Arrow offsets before serialization and coalescing.
+This shared fix preserves string keys and prevents repeated transmission of unused prefixes.
+The earlier run against the unmodified baseline is retained; this run compares pruning
+implementations with the shared correctness defect repaired on both sides.
 
 Both implementations use Rust 1.99.0, the same release build commands, Spark 3.5.9,
 Iceberg Java 1.8.1 and Java 17. Build artifacts record the exact dependency sources,
