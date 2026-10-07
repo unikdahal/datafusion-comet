@@ -193,7 +193,7 @@ class CometIcebergNativeSuite
           val dataScan = spark
             .sql("SELECT * FROM hadoop_catalog.db.user_files")
             .queryExecution
-            .executedPlan
+            .sparkPlan
             .collectFirst { case scan: BatchScanExec => scan }
             .getOrElse(fail("Expected an Iceberg BatchScanExec"))
           assert(
@@ -207,7 +207,7 @@ class CometIcebergNativeSuite
             val metadataScan = spark
               .sql(query)
               .queryExecution
-              .executedPlan
+              .sparkPlan
               .collectFirst { case scan: BatchScanExec => scan }
               .getOrElse(fail(s"Expected an Iceberg metadata BatchScanExec for $metadataTable"))
             val icebergTable = IcebergReflection
