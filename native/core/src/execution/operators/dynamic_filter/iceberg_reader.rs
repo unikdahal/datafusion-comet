@@ -159,7 +159,19 @@ fn is_deterministic(expr: &Arc<dyn PhysicalExpr>) -> bool {
         || expr.is::<LikeExpr>()
         || expr
             .downcast_ref::<ScalarFunctionExpr>()
-            .is_some_and(|function| function.fun().signature().volatility != Volatility::Volatile);
+            .is_some_and(|function| function.fun().signature().volatility != Volatility::Volatile)
+        // Comet's own Spark-compatible expressions that compute a value from their inputs
+        // only. Its non-deterministic functions (rand, uuid, ...) are deliberately absent.
+        || expr.is::<datafusion_comet_spark_expr::Cast>()
+        || expr.is::<datafusion_comet_spark_expr::IfExpr>()
+        || expr.is::<datafusion_comet_spark_expr::CaseWhenExpr>()
+        || expr.is::<datafusion_comet_spark_expr::CheckOverflow>()
+        || expr.is::<datafusion_comet_spark_expr::NegativeExpr>()
+        || expr.is::<datafusion_comet_spark_expr::WideDecimalBinaryExpr>()
+        || expr.is::<datafusion_comet_spark_expr::DecimalRescaleCheckOverflow>()
+        || expr.is::<datafusion_comet_spark_expr::GetStructField>()
+        || expr.is::<datafusion_comet_spark_expr::RLike>()
+        || expr.is::<datafusion_comet_spark_expr::CheckedBinaryExpr>();
     deterministic_node && expr.children().iter().all(|child| is_deterministic(child))
 }
 
@@ -985,6 +997,17 @@ mod tests {
             Arc::clone(&modulo),
         ));
         assert!(is_deterministic(&deterministic));
+        // Comet builds Spark's `%` with a zero guard from its own IfExpr.
+        let guarded: Arc<dyn PhysicalExpr> = Arc::new(datafusion_comet_spark_expr::IfExpr::new(
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&value),
+                Operator::Eq,
+                lit(0_i32),
+            )),
+            lit(ScalarValue::Int32(None)),
+            Arc::clone(&value),
+        ));
+        assert!(is_deterministic(&guarded));
 
         // A volatile expression anywhere below the filter keeps it in the way.
         let random: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
