@@ -1276,7 +1276,7 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
     }
   }
 
-  test("nested struct column slices reuse validation across child runs") {
+  test("nested struct column slices handle discontiguous child runs") {
     val allocator = new RootAllocator(Long.MaxValue)
     val elementType = StructType(Seq(StructField("id", IntegerType)))
     val arrayType = ArrayType(elementType, containsNull = false)
@@ -1340,10 +1340,10 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
     }
   }
 
-  test("columnar struct trimming rejects an incompatible retained prefix") {
+  test("columnar struct trimming allows renamed compatible retained fields") {
     val allocator = new RootAllocator(Long.MaxValue)
     val sourceType =
-      StructType(Seq(StructField("other", IntegerType), StructField("id", IntegerType)))
+      StructType(Seq(StructField("physical_id", IntegerType), StructField("added", IntegerType)))
     val outputType = StructType(Seq(StructField("id", IntegerType)))
     val arrowSchema =
       Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
@@ -1351,7 +1351,30 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
     val input = new ColumnarBatch(Array[ColumnVector](partition), 1)
     try {
       partition.putNotNull(0)
-      partition.getChild(0).putInt(0, 99)
+      partition.getChild(0).putInt(0, 7)
+      partition.getChild(1).putInt(0, 99)
+
+      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      try batch.column(0).getStruct(0).getInt(0) shouldBe 7
+      finally batch.close()
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("columnar struct trimming rejects an incompatible retained type") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceType =
+      StructType(Seq(StructField("id", StringType), StructField("added", IntegerType)))
+    val outputType = StructType(Seq(StructField("id", IntegerType)))
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    val partition = new OnHeapColumnVector(1, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](partition), 1)
+    try {
+      partition.putNotNull(0)
+      partition.getChild(0).putByteArray(0, UTF8String.fromString("wrong").getBytes)
       partition.getChild(1).putInt(0, 1)
       val error = intercept[IllegalArgumentException] {
         CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
