@@ -267,11 +267,19 @@ object Utils extends CometTypeShim with Logging {
       }
       val provider = batchProviderOpt.getOrElse(dictionaryProvider)
 
-      val writer = new ArrowStreamWriter(root, provider, Channels.newChannel(out))
-      writer.start()
-      writer.writeBatch()
-      root.clear()
-      writer.close()
+      val normalized = normalizeBatchOffsets(root)
+      val writer = new ArrowStreamWriter(normalized, provider, Channels.newChannel(out))
+      try {
+        writer.start()
+        writer.writeBatch()
+      } finally {
+        try {
+          writer.close()
+        } finally {
+          normalized.close()
+          root.clear()
+        }
+      }
 
       if (out.size() > 0) {
         (batch.numRows().toLong, cbbos.toChunkedByteBuffer)
@@ -380,7 +388,12 @@ object Utils extends CometTypeShim with Logging {
                 targetRoot.allocateNew()
               }
               try {
-                VectorSchemaRootAppender.append(targetRoot, sourceRoot)
+                val normalized = normalizeBatchOffsets(sourceRoot)
+                try {
+                  VectorSchemaRootAppender.append(targetRoot, normalized)
+                } finally {
+                  normalized.close()
+                }
               } catch {
                 case e: IllegalArgumentException =>
                   logWarning(
@@ -435,6 +448,19 @@ object Utils extends CometTypeShim with Logging {
     } finally {
       allocator.close()
     }
+  }
+
+  /**
+   * Native arrays can retain nonzero offsets and unused prefixes after slicing. IPC writing would
+   * repeatedly transmit those prefixes, and Arrow's appender assumes zero-based offsets, merging
+   * a prefix into the first appended value. Transfer pairs normalize offsets, including nested
+   * vectors, while sharing the used data buffers. The caller owns the returned root.
+   */
+  private def normalizeBatchOffsets(root: VectorSchemaRoot): VectorSchemaRoot = {
+    val normalized = root.slice(0, root.getRowCount)
+    // A zero-column root cannot infer its row count from vectors.
+    normalized.setRowCount(root.getRowCount)
+    normalized
   }
 
   /**
