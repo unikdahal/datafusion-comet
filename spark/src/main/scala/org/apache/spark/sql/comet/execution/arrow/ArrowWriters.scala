@@ -53,12 +53,17 @@ private[arrow] object ArrowWriter {
         case _ =>
           vector.allocateNew()
       }
-      createFieldWriter(vector)
+      createFieldWriter(vector, allowTrailingStructFields = true)
     }
     new ArrowWriter(root, children.toArray)
   }
 
-  private[sql] def createFieldWriter(vector: ValueVector): ArrowFieldWriter = {
+  private[sql] def createFieldWriter(vector: ValueVector): ArrowFieldWriter =
+    createFieldWriter(vector, allowTrailingStructFields = false)
+
+  private def createFieldWriter(
+      vector: ValueVector,
+      allowTrailingStructFields: Boolean): ArrowFieldWriter = {
     val field = vector.getField()
     (Utils.fromArrowField(field), vector) match {
       case (BooleanType, vector: BitVector) => new BooleanWriter(vector)
@@ -90,7 +95,7 @@ private[arrow] object ArrowWriter {
         val children = (0 until vector.size()).map { ordinal =>
           createFieldWriter(vector.getChildByOrdinal(ordinal))
         }
-        new StructWriter(vector, children.toArray)
+        new StructWriter(vector, children.toArray, allowTrailingStructFields)
       case (NullType, vector: NullVector) => new NullWriter(vector)
       case (_: YearMonthIntervalType, vector: IntervalYearVector) =>
         new IntervalYearWriter(vector)
@@ -1435,8 +1440,12 @@ private[arrow] class ArrayWriter(val valueVector: ListVector, val elementWriter:
 
 private[arrow] class StructWriter(
     val valueVector: StructVector,
-    children: Array[ArrowFieldWriter])
+    children: Array[ArrowFieldWriter],
+    allowTrailingStructFields: Boolean)
     extends ArrowFieldWriter {
+
+  private val declaredType = Utils.fromArrowField(valueVector.getField).asInstanceOf[StructType]
+  private var writingValidatedColumnSlice = false
 
   override def setNull(): Unit = {
     var i = 0
@@ -1450,9 +1459,18 @@ private[arrow] class StructWriter(
 
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
     val struct = input.getStruct(ordinal, children.length)
+    if (writingValidatedColumnSlice) {
+      require(
+        struct.numFields >= children.length,
+        s"Cannot write ${children.length} fields of struct $name from ${struct.numFields} fields")
+    } else {
+      require(
+        struct.numFields == children.length,
+        s"Cannot write struct $name with ${children.length} fields from ${struct.numFields} fields")
+    }
     var i = 0
     valueVector.setIndexDefined(count)
-    while (i < struct.numFields) {
+    while (i < children.length) {
       children(i).write(struct, i)
       i += 1
     }
@@ -1460,12 +1478,52 @@ private[arrow] class StructWriter(
 
   private val childrenSupportNullMask = children.forall(_.supportsNullMask)
 
+  private def validateColumnType(input: ColumnVector): Unit = {
+    val sourceType = input.dataType() match {
+      case struct: StructType => struct
+      case other =>
+        throw new IllegalArgumentException(
+          s"Cannot write Arrow struct $name from non-struct source type ${other.simpleString}")
+    }
+    require(
+      sourceType.length >= declaredType.length,
+      s"Cannot write ${declaredType.length} fields of struct $name from ${sourceType.length} fields")
+
+    val sourceToCompare =
+      if (sourceType.length == declaredType.length) sourceType
+      else StructType(sourceType.fields.take(declaredType.length))
+    // Compare in Arrow's type domain because Spark annotations such as collations are not carried
+    // by the Arrow field. Equal-width structs are positional: readers such as Delta may expose
+    // physical nested names while the plan carries logical names. When trailing fields are
+    // actually dropped, keep the stronger name check so the retained prefix is unambiguous.
+    val normalizedSource = Utils
+      .fromArrowField(Utils.toArrowField(name, sourceToCompare, nullable = true, "UTC"))
+      .asInstanceOf[StructType]
+    val compatible =
+      if (sourceType.length == declaredType.length) {
+        DataType.equalsIgnoreNameAndCompatibleNullability(normalizedSource, declaredType)
+      } else {
+        allowTrailingStructFields &&
+        DataType.equalsIgnoreCompatibleNullability(normalizedSource, declaredType)
+      }
+    require(
+      compatible,
+      s"Cannot write struct $name with declared type ${declaredType.simpleString} " +
+        s"from source type ${sourceType.simpleString}: leading fields are incompatible")
+  }
+
   // Writes each field as a column. Under a null struct the fields must come out null, as setNull
   // writes them, so with nulls this takes the row path unless every field can be masked after.
   // Writing the fields as columns also reads them under a null struct, so with nulls it is only
   // done for Spark's own vectors, whose producers write those fields. A struct missing from a
   // Parquet file is the exception: Spark marks it all null and never writes its fields.
+  //
+  // Only root fields created by ArrowWriter may trim a producer's trailing fields. Iceberg's
+  // vectorized reader can return a struct wider than the projected Arrow attribute for the same
+  // reason it can return a wider top-level batch: delete processing keeps trailing metadata
+  // columns in the backing Spark vector. Nested writers are not given that permission.
   override def writeColumnSlice(input: ColumnVector, startRow: Int, numRows: Int): Unit = {
+    validateColumnType(input)
     val hasNull = input.hasNull
     val readsFields = input match {
       case vector: WritableColumnVector if ArrowFieldWriter.isSparkVector(vector) =>
@@ -1473,7 +1531,9 @@ private[arrow] class StructWriter(
       case _ => !hasNull
     }
     if (numRows == 0 || !readsFields) {
-      super.writeColumnSlice(input, startRow, numRows)
+      writingValidatedColumnSlice = allowTrailingStructFields
+      try super.writeColumnSlice(input, startRow, numRows)
+      finally writingValidatedColumnSlice = false
       return
     }
     // Grows the validity buffer. The bit it sets is rewritten below.
