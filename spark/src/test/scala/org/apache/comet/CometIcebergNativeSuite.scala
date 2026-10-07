@@ -1654,6 +1654,9 @@ class CometIcebergNativeSuite
                   assert(
                     scan.metrics("iceberg_runtime_row_groups_pruned").value ==
                       scan.metrics("iceberg_runtime_row_groups_pruned_live").value)
+                  assert(
+                    scan.metrics("iceberg_runtime_decoder_rebuilds").value ==
+                      scan.metrics("iceberg_runtime_predicate_refreshes").value)
                   if (enabled) {
                     assert(scan.metrics("iceberg_runtime_predicate_tasks").value > 0)
                     assert(scan.metrics("iceberg_runtime_predicate_refreshes").value > 0)

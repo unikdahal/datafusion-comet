@@ -223,6 +223,8 @@ case class CometIcebergNativeScanExec(
         SQLMetrics.createMetric(sparkContext, "runtime predicate refreshes during scanning"),
       "iceberg_runtime_row_groups_pruned_live" ->
         SQLMetrics.createMetric(sparkContext, "row groups pruned by live runtime predicates"),
+      "iceberg_runtime_decoder_rebuilds" ->
+        SQLMetrics.createMetric(sparkContext, "decoder rebuilds for runtime predicates"),
       // Native read/decode time, aggregated across tasks. Fed by iceberg-rust's BaselineMetrics
       // (elapsed_compute, in nanoseconds) through the standard JNI metric path.
       "elapsed_compute" -> SQLMetrics.createNanoTimingMetric(sparkContext, "scan time"))

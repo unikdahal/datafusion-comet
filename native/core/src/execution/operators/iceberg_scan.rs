@@ -39,7 +39,6 @@ use datafusion::physical_plan::{
 };
 use futures::{Stream, StreamExt, TryStreamExt};
 use iceberg::arrow::{RuntimePredicateProvider, ScanMetrics};
-use iceberg::Error;
 use iceberg::Runtime as IcebergRuntime;
 
 use crate::cloud::s3::credential_bridge::AccessMode;
@@ -92,6 +91,11 @@ impl IcebergScanExec {
         tasks: Vec<FileScanTask>,
         data_file_concurrency_limit: usize,
     ) -> Result<Self, ExecutionError> {
+        if data_file_concurrency_limit == 0 {
+            return Err(ExecutionError::GeneralError(
+                "Iceberg data-file concurrency must be greater than zero".into(),
+            ));
+        }
         let output_schema = schema;
         let plan_properties = Self::compute_properties(Arc::clone(&output_schema), 1);
 
@@ -118,7 +122,7 @@ impl IcebergScanExec {
     }
 
     /// The Iceberg field id and name behind output column `output_index`, when every task maps
-    /// it to the same top-level int, long or date field.
+    /// it to the same supported top-level field with a matching type.
     pub(crate) fn runtime_predicate_field(&self, output_index: usize) -> Option<(i32, String)> {
         use arrow::datatypes::{DataType, TimeUnit};
         use iceberg::spec::{PrimitiveType, Type};
@@ -132,7 +136,7 @@ impl IcebergScanExec {
             if field_id.is_some_and(|expected| expected != current_id) {
                 return None;
             }
-            // Only top-level signed integer fields have a direct output-column mapping.
+            // Only top-level fields have a direct output-column mapping.
             // Looking up a nested leaf by id and then binding its short name could prune
             // an unrelated top-level field with that name.
             let field = task
@@ -239,17 +243,42 @@ impl ExecutionPlan for IcebergScanExec {
 
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        if !children.is_empty() {
+            return datafusion::common::internal_err!("IcebergScanExec does not accept children");
+        }
         Ok(self)
+    }
+
+    fn reset_state(self: Arc<Self>) -> DFResult<Arc<dyn ExecutionPlan>> {
+        // A reset producer publishes into a new predicate. Its old consumer
+        // must fail open until the execution wrapper attaches that new producer.
+        Ok(Arc::new(Self {
+            metadata_location: self.metadata_location.clone(),
+            output_schema: Arc::clone(&self.output_schema),
+            plan_properties: Arc::clone(&self.plan_properties),
+            catalog_properties: self.catalog_properties.clone(),
+            catalog_name: self.catalog_name.clone(),
+            tasks: Arc::clone(&self.tasks),
+            data_file_concurrency_limit: self.data_file_concurrency_limit,
+            runtime_predicate_provider: None,
+            runtime_task_order: None,
+            metrics: ExecutionPlanMetricsSet::new(),
+        }))
     }
 
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        self.execute_with_tasks(self.tasks.to_vec(), context)
+        if partition != 0 {
+            return datafusion::common::exec_err!(
+                "IcebergScanExec partition {partition} is out of bounds for one partition"
+            );
+        }
+        self.execute_with_tasks(Arc::clone(&self.tasks), context)
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -262,7 +291,7 @@ impl IcebergScanExec {
     /// deletes via iceberg-rust's ArrowReader.
     fn execute_with_tasks(
         &self,
-        tasks: Vec<FileScanTask>,
+        tasks: Arc<[FileScanTask]>,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let output_schema = Arc::clone(&self.output_schema);
@@ -273,20 +302,27 @@ impl IcebergScanExec {
             AccessMode::Read,
         )?;
         let batch_size = context.session_config().batch_size();
+        if batch_size == 0 {
+            return datafusion::common::exec_err!(
+                "Iceberg scan batch size must be greater than zero"
+            );
+        }
 
         let metrics = IcebergScanMetrics::new(&self.metrics);
         metrics.num_splits.add(tasks.len());
 
-        let mut tasks = tasks;
-        if let Some((field_id, order)) = self.runtime_task_order {
-            order_tasks_for_runtime_bound(&mut tasks, field_id, order);
-        }
+        let tasks = match self.runtime_task_order {
+            Some((field_id, order)) => {
+                let mut ordered = tasks.to_vec();
+                order_tasks_for_runtime_bound(&mut ordered, field_id, order);
+                ordered.into()
+            }
+            None => tasks,
+        };
 
         // Delete-file sizes are not serialized and arrive as 0 (unknown).
         // iceberg-rust sizes each Parquet delete file once per reader, when a
         // task that is actually read first loads it.
-        let task_stream = futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)).boxed();
-
         // iceberg-rust's ArrowReader spawns IO/CPU work onto an iceberg::Runtime, which only needs
         // a tokio handle. execute() runs on the JVM-called thread outside any tokio context, so we
         // enter Comet's global runtime to capture its handle (this is where the stream is later
@@ -307,12 +343,15 @@ impl IcebergScanExec {
         if let Some(provider) = &self.runtime_predicate_provider {
             reader_builder = reader_builder.with_runtime_predicate_provider(Arc::clone(provider));
         }
-        let reader = reader_builder.build();
 
-        // Pass all tasks to iceberg-rust at once to utilize its flatten_unordered
-        // parallelization, avoiding overhead of single-task streams
-        let scan_result = reader.read(task_stream).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to read Iceberg tasks: {}", e))
+        // Share the immutable task list until the reader requests each task.
+        // This avoids eagerly cloning every task and its delete-file references.
+        let task_stream = futures::stream::iter(
+            (0..tasks.len()).map(move |index| Ok::<_, iceberg::Error>(tasks[index].clone())),
+        )
+        .boxed();
+        let scan_result = reader_builder.build().read(task_stream).map_err(|error| {
+            DataFusionError::Execution(format!("Failed to read Iceberg tasks: {error}"))
         })?;
 
         let scan_metrics = scan_result.metrics().clone();
@@ -325,7 +364,7 @@ impl IcebergScanExec {
             stream.map_err(|e| DataFusionError::Execution(format!("Iceberg scan error: {}", e)));
 
         let wrapped_stream = IcebergStreamWrapper {
-            inner: adapted_stream,
+            inner: Some(adapted_stream),
             schema: output_schema,
             adapter_factory,
             cached: None,
@@ -354,6 +393,10 @@ impl IcebergScanExec {
                     metrics.runtime_row_groups_pruned_live,
                     ScanMetrics::runtime_row_groups_pruned_live,
                 ),
+                ReportedCount::new(
+                    metrics.runtime_decoder_rebuilds,
+                    ScanMetrics::runtime_decoder_rebuilds,
+                ),
             ],
         };
 
@@ -379,6 +422,8 @@ struct IcebergScanMetrics {
     runtime_predicate_refreshes: Count,
     /// Row groups skipped at row-group boundaries after a refresh
     runtime_row_groups_pruned_live: Count,
+    /// Decoder restarts required to install a newly sampled pruning selection
+    runtime_decoder_rebuilds: Count,
 }
 
 impl IcebergScanMetrics {
@@ -397,6 +442,8 @@ impl IcebergScanMetrics {
                 .counter("iceberg_runtime_predicate_refreshes", 0),
             runtime_row_groups_pruned_live: MetricBuilder::new(metrics)
                 .counter("iceberg_runtime_row_groups_pruned_live", 0),
+            runtime_decoder_rebuilds: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_decoder_rebuilds", 0),
         }
     }
 }
@@ -405,7 +452,8 @@ impl IcebergScanMetrics {
 /// Handles batches from multiple files that may have different Arrow schemas
 /// (metadata, field IDs, etc.).
 struct IcebergStreamWrapper<S> {
-    inner: S,
+    /// Released at EOF or the first error, even if the exhausted wrapper is retained.
+    inner: Option<S>,
     schema: SchemaRef,
     /// Factory for creating adapters when file schema changes
     adapter_factory: SparkPhysicalExprAdapterFactory,
@@ -421,7 +469,31 @@ struct IcebergStreamWrapper<S> {
     /// Last reported bytes_read value for delta computation
     last_reported_bytes: u64,
     /// Runtime pruning counters bridged from iceberg-rust's live totals.
-    runtime: [ReportedCount; 5],
+    runtime: [ReportedCount; 6],
+}
+
+impl<S> IcebergStreamWrapper<S> {
+    fn report_scan_metrics(&mut self) {
+        // Async readers and delete loaders can advance these totals while the
+        // outer stream is Pending, including immediately before cancellation.
+        let current = self.scan_metrics.bytes_read();
+        let delta = current.saturating_sub(self.last_reported_bytes);
+        if delta > 0 {
+            self.bytes_scanned.add(delta as usize);
+            self.last_reported_bytes = current;
+        }
+        for counter in &mut self.runtime {
+            counter.report(&self.scan_metrics);
+        }
+    }
+}
+
+impl<S> Drop for IcebergStreamWrapper<S> {
+    fn drop(&mut self) {
+        // Request cancellation before taking the final metric snapshot.
+        self.inner = None;
+        self.report_scan_metrics();
+    }
 }
 
 /// A Spark metric fed from a running total in iceberg-rust's [`ScanMetrics`].
@@ -471,61 +543,57 @@ where
         let elapsed_compute = self.baseline_metrics.elapsed_compute().clone();
         let _timer = elapsed_compute.timer();
 
-        let poll_result = self.inner.poll_next_unpin(cx);
+        let poll_result = match self.inner.as_mut() {
+            Some(inner) => inner.poll_next_unpin(cx),
+            None => return Poll::Ready(None),
+        };
 
         let result = match poll_result {
             Poll::Ready(Some(Ok(batch))) => {
-                let file_schema = batch.schema();
+                // Keep adaptation failures in the common reporting path below.
+                // Returning early with `?` would lose the last scan metric deltas.
+                let adapted = (|| -> DFResult<RecordBatch> {
+                    let file_schema = batch.schema();
 
-                // Reuse cached projection expressions if file schema hasn't changed.
-                // Batches from the same file share the same Arc<Schema> pointer,
-                // so pointer equality is sufficient here.
-                let projection_exprs = match &self.cached {
-                    Some(cached) if Arc::ptr_eq(&cached.file_schema, &file_schema) => {
-                        &cached.projection_exprs
-                    }
-                    _ => {
-                        let adapter = self
-                            .adapter_factory
-                            .create(Arc::clone(&self.schema), Arc::clone(&file_schema))?;
-                        let exprs =
-                            build_projection_expressions(&self.schema, &adapter).map_err(|e| {
-                                DataFusionError::Execution(format!(
-                                    "Failed to build projection expressions: {}",
-                                    e
-                                ))
-                            })?;
-                        self.cached = Some(CachedProjection {
-                            file_schema,
-                            projection_exprs: exprs,
-                        });
-                        &self.cached.as_ref().unwrap().projection_exprs
-                    }
-                };
+                    // Batches from the same file share their schema Arc.
+                    let projection_exprs = match &self.cached {
+                        Some(cached) if Arc::ptr_eq(&cached.file_schema, &file_schema) => {
+                            &cached.projection_exprs
+                        }
+                        _ => {
+                            let adapter = self
+                                .adapter_factory
+                                .create(Arc::clone(&self.schema), Arc::clone(&file_schema))?;
+                            let exprs = build_projection_expressions(&self.schema, &adapter)
+                                .map_err(|e| {
+                                    DataFusionError::Execution(format!(
+                                        "Failed to build projection expressions: {}",
+                                        e
+                                    ))
+                                })?;
+                            self.cached = Some(CachedProjection {
+                                file_schema,
+                                projection_exprs: exprs,
+                            });
+                            &self.cached.as_ref().unwrap().projection_exprs
+                        }
+                    };
 
-                let result = adapt_batch_with_expressions(batch, &self.schema, projection_exprs)
-                    .map_err(|e| {
-                        DataFusionError::Execution(format!("Batch adaptation failed: {}", e))
-                    });
+                    adapt_batch_with_expressions(batch, &self.schema, projection_exprs).map_err(
+                        |e| DataFusionError::Execution(format!("Batch adaptation failed: {}", e)),
+                    )
+                })();
 
-                Poll::Ready(Some(result))
+                Poll::Ready(Some(adapted))
             }
             other => other,
         };
 
-        // Bridge iceberg-rust's live AtomicU64 counter into the DF metric tree
-        let current = self.scan_metrics.bytes_read();
-        let delta = current - self.last_reported_bytes;
-        if delta > 0 {
-            self.bytes_scanned.add(delta as usize);
-            self.last_reported_bytes = current;
+        if matches!(&result, Poll::Ready(None | Some(Err(_)))) {
+            self.inner = None;
+            self.cached = None;
         }
-
-        let this = &mut *self;
-        for counter in &mut this.runtime {
-            counter.report(&this.scan_metrics);
-        }
-
+        self.report_scan_metrics();
         self.baseline_metrics.record_poll(result)
     }
 }
@@ -676,7 +744,9 @@ pub(crate) fn order_tasks_for_runtime_bound(
             .field_by_id(field_id)
             .and_then(|field| field.field_type.as_primitive_type().cloned())
     };
-    // Only bounds typed like the field compare with each other, so the ranking is a total order.
+    // Every ranked bound must have the same type, including across task schemas.
+    // Otherwise treating an incomparable pair as equal would not define a total order.
+    let key_type = tasks.iter().find_map(field_type);
     let bound = |task: &FileScanTask| {
         let metrics = task.file_metrics()?;
         let bounds = if descending {
@@ -685,46 +755,70 @@ pub(crate) fn order_tasks_for_runtime_bound(
             metrics.lower_bounds()
         };
         let bound = bounds.get(&field_id)?;
-        (Some(bound.data_type()) == field_type(task).as_ref()).then(|| bound.clone())
+        (Some(bound.data_type()) == field_type(task).as_ref()
+            && Some(bound.data_type()) == key_type.as_ref())
+        .then(|| bound.clone())
     };
     let holds_nulls = |task: &FileScanTask| {
         task.file_metrics()
             .and_then(|metrics| metrics.null_value_counts().get(&field_id))
             .is_some_and(|count| *count > 0)
     };
+    // Cache statistics once and sort indices rather than cloning complete tasks,
+    // which can contain many delete files and projection fields. Files with equal
+    // bounds retain their original file order; only splits of one file reverse.
+    let mut file_ranks = HashMap::new();
     let mut ranked: Vec<_> = tasks
         .iter()
-        .map(|task| (nulls_first && holds_nulls(task), bound(task), task.start()))
-        .zip(tasks.iter().cloned())
+        .enumerate()
+        .map(|(index, task)| {
+            let file_rank = *file_ranks.entry(task.data_file_path()).or_insert(index);
+            (
+                nulls_first && holds_nulls(task),
+                bound(task),
+                file_rank,
+                task.start(),
+                index,
+            )
+        })
         .collect();
     ranked.sort_by(
-        |((left_nulls, left, left_start), _), ((right_nulls, right, right_start), _)| {
+        |(left_nulls, left, left_file, left_start, left_index),
+         (right_nulls, right, right_file, right_start, right_index)| {
             right_nulls
                 .cmp(left_nulls)
                 .then_with(|| match (left, right) {
                     (Some(left), Some(right)) => {
                         let order = left.partial_cmp(right).unwrap_or(Ordering::Equal);
-                        if descending {
-                            order.reverse()
-                        } else {
-                            order
-                        }
+                        let order = if descending { order.reverse() } else { order };
+                        order.then_with(|| left_file.cmp(right_file)).then_with(|| {
+                            if descending {
+                                right_start.cmp(left_start)
+                            } else {
+                                left_start.cmp(right_start)
+                            }
+                        })
                     }
                     (Some(_), None) => Ordering::Less,
                     (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                })
-                .then_with(|| {
-                    if descending {
-                        right_start.cmp(left_start)
-                    } else {
-                        left_start.cmp(right_start)
-                    }
+                    // Unknown bounds preserve the task order, including offsets.
+                    (None, None) => left_index.cmp(right_index),
                 })
         },
     );
-    for (slot, (_, task)) in tasks.iter_mut().zip(ranked) {
-        *slot = task;
+    let mut destinations = vec![0; tasks.len()];
+    for (destination, (_, _, _, _, original)) in ranked.into_iter().enumerate() {
+        destinations[original] = destination;
+    }
+    drop(file_ranks);
+    // Apply the permutation in place. Each swap puts at least one task at its
+    // final position, with no additional task copies or ownership changes.
+    for index in 0..tasks.len() {
+        while destinations[index] != index {
+            let destination = destinations[index];
+            tasks.swap(index, destination);
+            destinations.swap(index, destination);
+        }
     }
 }
 
@@ -737,6 +831,273 @@ mod tests {
     use iceberg::spec::{DataFileFormat, Schema};
 
     use super::IcebergScanExec;
+
+    #[test]
+    fn resetting_scan_detaches_previous_execution_runtime_predicate() {
+        use arrow::datatypes::Schema as ArrowSchema;
+        use datafusion::physical_plan::ExecutionPlan;
+        use iceberg::arrow::{RuntimePredicateProvider, RuntimePredicateSnapshot};
+        use iceberg::expr::Predicate;
+
+        struct CompletedFilter;
+        impl RuntimePredicateProvider for CompletedFilter {
+            fn generation(&self) -> u64 {
+                1
+            }
+
+            fn snapshot(&self) -> iceberg::Result<RuntimePredicateSnapshot> {
+                Ok(RuntimePredicateSnapshot::new(
+                    Some(Predicate::AlwaysFalse),
+                    1,
+                ))
+            }
+        }
+
+        let scan = Arc::new(
+            IcebergScanExec::new(
+                "/tmp/reset.parquet".into(),
+                Arc::new(ArrowSchema::empty()),
+                Default::default(),
+                String::new(),
+                vec![],
+                1,
+            )
+            .unwrap()
+            .with_runtime_predicate_provider(
+                Arc::new(CompletedFilter),
+                Some((1, super::RuntimeScanOrder::Ascending { nulls_first: false })),
+            ),
+        );
+        let reset = Arc::clone(&scan).reset_state().unwrap();
+        let reset = reset.downcast_ref::<IcebergScanExec>().unwrap();
+        assert!(reset.runtime_predicate_provider.is_none());
+        assert!(reset.runtime_task_order.is_none());
+        assert!(Arc::ptr_eq(&scan.tasks, &reset.tasks));
+    }
+
+    #[tokio::test]
+    async fn scan_wrapper_releases_reader_state_at_eof_and_errors() {
+        use arrow::array::{RecordBatch, TimestampMicrosecondArray, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+        use datafusion::common::DataFusionError;
+        use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
+        use futures::StreamExt;
+        use iceberg::arrow::ScanMetrics;
+
+        use super::{IcebergStreamWrapper, ReportedCount};
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]));
+        // Obtain an execution's metric handles without performing any storage IO.
+        let reader = iceberg::arrow::ArrowReaderBuilder::new(
+            super::load_file_io(
+                &Default::default(),
+                "/tmp/scan-lifecycle.parquet",
+                "",
+                super::AccessMode::Read,
+            )
+            .unwrap(),
+            iceberg::Runtime::try_current().unwrap(),
+        )
+        .build();
+        let read = reader.read(futures::stream::empty().boxed()).unwrap();
+        let scan_metrics = read.metrics().clone();
+        drop(read);
+
+        for failure in [0, 1, 2] {
+            let resource = Arc::new(());
+            let released = Arc::downgrade(&resource);
+            let batch = match failure {
+                0 => RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(TimestampMicrosecondArray::from(vec![0]))],
+                )
+                .unwrap(),
+                _ => {
+                    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+                        "ts",
+                        DataType::Timestamp(TimeUnit::Millisecond, None),
+                        false,
+                    )]));
+                    RecordBatch::try_new(
+                        schema,
+                        vec![Arc::new(TimestampMillisecondArray::from(vec![i64::MAX]))],
+                    )
+                    .unwrap()
+                }
+            };
+            let item = if failure == 1 {
+                Err(DataFusionError::Execution("reader failed".into()))
+            } else {
+                Ok(batch)
+            };
+            let inner = futures::stream::iter([item]).map(move |item| {
+                let _ = &resource;
+                item
+            });
+            let metrics = ExecutionPlanMetricsSet::new();
+            let mut stream = IcebergStreamWrapper {
+                inner: Some(inner),
+                schema: Arc::clone(&schema),
+                adapter_factory: super::SparkPhysicalExprAdapterFactory::new(
+                    super::SparkParquetOptions::new(super::EvalMode::Legacy, "UTC", false),
+                    None,
+                ),
+                cached: None,
+                baseline_metrics: super::BaselineMetrics::new(&metrics, 0),
+                scan_metrics: scan_metrics.clone(),
+                bytes_scanned: MetricBuilder::new(&metrics).counter("bytes_scanned", 0),
+                last_reported_bytes: 0,
+                runtime: std::array::from_fn(|index| {
+                    ReportedCount::new(
+                        MetricBuilder::new(&metrics).counter(format!("runtime_{index}"), 0),
+                        ScanMetrics::bytes_read,
+                    )
+                }),
+            };
+            let result = stream.next().await.unwrap();
+            assert_eq!(result.is_err(), failure != 0, "failure={failure}");
+            if failure == 0 {
+                assert!(released.upgrade().is_some());
+            } else {
+                assert!(released.upgrade().is_none());
+                assert!(stream.cached.is_none());
+            }
+            assert!(stream.next().await.is_none());
+            assert!(released.upgrade().is_none());
+            assert!(stream.inner.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_scan_reports_background_delete_reads() {
+        use std::collections::HashMap;
+        use std::pin::Pin;
+        use std::task::Context;
+        use std::time::Duration;
+
+        use arrow::array::{Int32Array, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
+        use futures::{Stream, StreamExt, TryStreamExt};
+        use iceberg::arrow::{ArrowReaderBuilder, ScanMetrics};
+        use iceberg::scan::FileScanTaskDeleteFile;
+        use iceberg::spec::{DataContentType, NestedField, PrimitiveType, Type};
+        use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "key",
+            DataType::Int32,
+            false,
+        )
+        .with_metadata(HashMap::from([(
+            PARQUET_FIELD_ID_META_KEY.to_string(),
+            "1".to_string(),
+        )]))]));
+        let write = |values: Vec<i32>| {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int32Array::from(values))],
+            )
+            .unwrap();
+            let mut writer =
+                ArrowWriter::try_new(file.reopen().unwrap(), Arc::clone(&schema), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            file
+        };
+        let data = write(vec![1, 2]);
+        let delete = write(vec![2]);
+        let task = FileScanTask::builder()
+            .with_data_file_path(data.path().to_string_lossy().into_owned())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_file_size_in_bytes(data.as_file().metadata().unwrap().len())
+            .with_start(0)
+            .with_length(0)
+            .with_schema(Arc::new(
+                Schema::builder()
+                    .with_fields(vec![NestedField::required(
+                        1,
+                        "key",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into()])
+                    .build()
+                    .unwrap(),
+            ))
+            .with_project_field_ids(vec![1])
+            .with_case_sensitive(false)
+            .with_deletes(vec![FileScanTaskDeleteFile::builder()
+                .with_file_path(delete.path().to_string_lossy().into_owned())
+                .with_file_size_in_bytes(delete.as_file().metadata().unwrap().len())
+                .with_file_type(DataContentType::EqualityDeletes)
+                .with_file_format(DataFileFormat::Parquet)
+                .with_partition_spec_id(0)
+                .with_equality_ids(Some(vec![1]))
+                .build()])
+            .build()
+            .unwrap();
+        let reader = ArrowReaderBuilder::new(
+            super::load_file_io(
+                &Default::default(),
+                data.path().to_str().unwrap(),
+                "",
+                super::AccessMode::Read,
+            )
+            .unwrap(),
+            iceberg::Runtime::try_current().unwrap(),
+        )
+        .with_data_file_concurrency_limit(1)
+        .build();
+        let result = reader
+            .read(futures::stream::iter([Ok(task)]).boxed())
+            .unwrap();
+        let scan_metrics = result.metrics().clone();
+        let metrics = ExecutionPlanMetricsSet::new();
+        let bytes = MetricBuilder::new(&metrics).counter("bytes_scanned", 0);
+        let mut stream = super::IcebergStreamWrapper {
+            inner: Some(result.stream().map_err(|error| {
+                datafusion::common::DataFusionError::Execution(error.to_string())
+            })),
+            schema,
+            adapter_factory: super::SparkPhysicalExprAdapterFactory::new(
+                super::SparkParquetOptions::new(super::EvalMode::Legacy, "UTC", false),
+                None,
+            ),
+            cached: None,
+            baseline_metrics: super::BaselineMetrics::new(&metrics, 0),
+            scan_metrics: scan_metrics.clone(),
+            bytes_scanned: bytes.clone(),
+            last_reported_bytes: 0,
+            runtime: std::array::from_fn(|index| {
+                super::ReportedCount::new(
+                    MetricBuilder::new(&metrics).counter(format!("runtime_{index}"), 0),
+                    ScanMetrics::bytes_read,
+                )
+            }),
+        };
+        let mut context = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
+        let reported = bytes.value();
+        // Delete files load in an independent IO task. Let that real reader
+        // advance while the outer scan remains Pending and is never polled again.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while scan_metrics.bytes_read() <= reported as u64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background delete reader must perform IO");
+        let before_cancel = scan_metrics.bytes_read();
+        assert_eq!(bytes.value(), reported);
+        drop(stream);
+        assert!(bytes.value() as u64 >= before_cancel);
+        assert!(bytes.value() > reported);
+    }
 
     #[test]
     fn runtime_field_mapping_aligns_outputs_after_metadata_columns() {
@@ -1096,6 +1457,33 @@ mod tests {
         assert_eq!(
             order(RuntimeScanOrder::Ascending { nulls_first: true }),
             ["b@0", "a@0", "c@0", "c@100", "unknown@0"]
+        );
+
+        let mut equal_and_unknown = vec![
+            task("first", 0, Some((0, 99, 0))),
+            task("unknown-late", 900, None),
+            task("second", 400, Some((0, 99, 0))),
+            task("first", 100, Some((0, 99, 0))),
+            task("unknown-early", 0, None),
+        ];
+        order_tasks_for_runtime_bound(
+            &mut equal_and_unknown,
+            1,
+            RuntimeScanOrder::Descending { nulls_first: false },
+        );
+        assert_eq!(
+            equal_and_unknown
+                .iter()
+                .map(|task| format!("{}@{}", task.data_file_path(), task.start()))
+                .collect::<Vec<_>>(),
+            [
+                "first@100",
+                "first@0",
+                "second@400",
+                "unknown-late@900",
+                "unknown-early@0",
+            ],
+            "equal bounds preserve file order and unknown bounds preserve task order"
         );
     }
 }
