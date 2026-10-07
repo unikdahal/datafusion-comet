@@ -1495,18 +1495,15 @@ private[arrow] class StructWriter(
       else StructType(sourceType.fields.take(declaredType.length))
     // Compare in Arrow's type domain because Spark annotations such as collations are not carried
     // by the Arrow field. Equal-width structs are positional: readers such as Delta may expose
-    // physical nested names while the plan carries logical names. When trailing fields are
-    // actually dropped, keep the stronger name check so the retained prefix is unambiguous.
+    // physical nested names while the plan carries logical names. A validated top-level
+    // projection is positional as well: trailing fields do not change the mapping of the retained
+    // prefix, so physical/logical name differences remain acceptable there.
     val normalizedSource = Utils
       .fromArrowField(Utils.toArrowField(name, sourceToCompare, nullable = true, "UTC"))
       .asInstanceOf[StructType]
     val compatible =
-      if (sourceType.length == declaredType.length) {
-        DataType.equalsIgnoreNameAndCompatibleNullability(normalizedSource, declaredType)
-      } else {
-        allowTrailingStructFields &&
-        DataType.equalsIgnoreCompatibleNullability(normalizedSource, declaredType)
-      }
+      DataType.equalsIgnoreNameAndCompatibleNullability(normalizedSource, declaredType) &&
+        (sourceType.length == declaredType.length || allowTrailingStructFields)
     require(
       compatible,
       s"Cannot write struct $name with declared type ${declaredType.simpleString} " +
