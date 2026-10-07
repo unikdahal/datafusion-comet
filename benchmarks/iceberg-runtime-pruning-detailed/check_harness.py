@@ -28,6 +28,7 @@ from unittest.mock import patch
 
 import lib
 import run_suite
+import run_tpch
 import summarize
 
 
@@ -196,6 +197,24 @@ class HarnessChecks(unittest.TestCase):
             self.assertEqual(
                 summarize.paired_ratio(baseline[:2], candidate[:2])[1:3], (None, None)
             )
+            self.assertIsNone(
+                summarize.paired_ratio(
+                    baseline, [dict(r, correctness="mismatch") for r in candidate]
+                )
+            )
+            self.assertIsNone(
+                summarize.paired_ratio(
+                    baseline, [dict(r, error="failure") for r in candidate]
+                )
+            )
+
+    def test_tpch_namespace_preserves_column_aliases(self):
+        sql = "SELECT nation FROM (SELECT n2.n_name AS nation FROM nation n2) s GROUP BY nation"
+        natural = run_tpch.qualify(sql, "tpch_nat")
+        clustered = run_tpch.qualify(sql, "tpch_clu")
+        self.assertEqual(natural.split("\n", 1)[1], sql)
+        self.assertEqual(clustered.split("\n", 1)[1], sql)
+        self.assertNotEqual(natural, clustered)
 
     def test_all_workloads_have_unique_names(self):
         # PySpark is available in the workflow before this preflight runs.

@@ -113,23 +113,10 @@ def main():
 
 
 def qualify(sql, database):
-    tables = (
-        "customer",
-        "lineitem",
-        "nation",
-        "orders",
-        "part",
-        "partsupp",
-        "region",
-        "supplier",
-    )
-    # These checked-in queries use lower-case, unquoted table names. Do not alter column
-    # names such as orders.o_orderkey or the revenue0 temporary view.
-    return re.sub(
-        r"(?i)(?<![\w.])(" + "|".join(tables) + r")(?![\w.])",
-        lambda m: f"bench.{database}.{m.group(0)}",
-        sql,
-    )
+    # USE selects the namespace before execution. Include it in the SQL digest
+    # without rewriting identifiers: q8 and q9 also use "nation" as an alias.
+    # A comment preserves those aliases and q15's temporary view references.
+    return f"-- benchmark namespace: bench.{database}\n{sql}"
 
 
 if __name__ == "__main__":

@@ -44,6 +44,11 @@ def median(records, name):
 
 def paired_ratio(baseline, candidate, metric="total_ms", samples=4000):
     """Bootstrap independent JVM rounds, retaining paired variants and repetitions."""
+    if any(
+        "error" in run or run.get("correctness") not in ("exact", "tolerance")
+        for run in baseline + candidate
+    ):
+        return None
     left, right = defaultdict(list), defaultdict(list)
     for runs, target in ((baseline, left), (candidate, right)):
         for run in runs:
@@ -179,7 +184,8 @@ def main(argv=None):
     print(
         "within that JVM. Intervals bootstrap matched round medians, with four independent rounds."
     )
-    print("These are warm-cache local-disk measurements on shared CI runners.\n")
+    print("These are warm-cache local-disk measurements on shared CI runners.")
+    print("Comparisons containing wrong results or query errors are excluded from speedup ratios.\n")
     print(
         "| suite | measured queries | geomean original-on / rewritten-on | 95% wins | 95% losses |"
     )
