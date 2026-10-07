@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Launch the oracle and balanced original/rewrite comparisons on one runner."""
+"""Launch the oracle and balanced main/candidate comparisons on one runner."""
 
 import os
 from pathlib import Path
@@ -108,13 +108,14 @@ def launch(variant, round_number):
 
 def main():
     rounds = int(env("BENCH_ROUNDS", "4"))
-    if rounds != len(ORDERS):
+    if rounds < len(ORDERS) or rounds % len(ORDERS):
         raise ValueError(
-            "This benchmark requires four rounds for its balanced comparison"
+            "This benchmark requires a positive multiple of four balanced JVM rounds"
         )
     suite = os.environ["BENCH_SUITE"]
     passed = True
-    for round_number, order in enumerate(ORDERS):
+    for round_number in range(rounds):
+        order = ORDERS[round_number % len(ORDERS)]
         if round_number == 0 or suite == "fuzz":
             passed &= launch("spark", round_number)
         for variant in order:

@@ -16,8 +16,8 @@
 # under the License.
 
 
-# Matched comparison of the original runtime pruning implementation and its rewrite.
-# Revisions are immutable; all four native variants share each runner and generated files.
+# Latest Apache main is resolved once per run, then pinned for both build jobs.
+# All four native variants share each runner and generated files.
 
 name: Matched Runtime Pruning Benchmark
 
@@ -37,7 +37,36 @@ env:
   RUSTFLAGS: "-Clink-arg=-fuse-ld=bfd"
 
 jobs:
+  resolve:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    outputs:
+      baseline: ${{ steps.resolve.outputs.baseline }}
+      candidate: ${{ steps.resolve.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Resolve latest Apache main and validate candidate provenance
+        id: resolve
+        run: |
+          python3 benchmarks/iceberg-runtime-pruning-detailed/resolve_revisions.py \
+            benchmarks/iceberg-runtime-pruning-detailed/revisions.json resolved/revisions.json
+          python3 - <<'PY'
+          import json, os
+          revisions = json.load(open("resolved/revisions.json"))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              for side in ("baseline", "candidate"):
+                  out.write(f"{side}={revisions[side]['comet']}\n")
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: resolved-revisions
+          path: resolved/revisions.json
+          if-no-files-found: error
+
   build:
+    needs: resolve
     if: github.repository == 'unikdahal/datafusion-comet'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
@@ -51,7 +80,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Select a fixed implementation revision
+      - uses: actions/download-artifact@v8
+        with:
+          name: resolved-revisions
+          path: resolved
+      - name: Select the resolved immutable implementation revision
         id: revision
         env:
           SIDE: ${{ matrix.side }}
@@ -59,7 +92,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 - <<'PY'
           import json, os, re, subprocess
-          revisions = json.load(open("benchmarks/iceberg-runtime-pruning-detailed/revisions.json"))
+          revisions = json.load(open("resolved/revisions.json"))
           side = os.environ["SIDE"]
           sha = revisions[side]["comet"]
           if not re.fullmatch("[0-9a-f]{40}", sha):
@@ -67,7 +100,9 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"sha={sha}\n")
           with open(os.environ["GITHUB_ENV"], "a") as out:
-              out.write(f"BENCH_EXPECTED_ICEBERG={revisions[side]['iceberg']}\n")
+              out.write(f"BENCH_SIDE={side}\n")
+          repository = revisions[side].get("repository", "origin")
+          subprocess.run(["git", "fetch", "--no-tags", repository, sha], check=True)
           subprocess.run(["git", "checkout", "--detach", sha], check=True)
           PY
       - uses: ./.github/actions/setup-builder
@@ -95,9 +130,19 @@ jobs:
           dependencies = [{k: p[k] for k in ("name", "version", "source") if k in p}
                           for p in lock["package"] if p["name"] in ("iceberg", "datafusion", "arrow")]
           iceberg = [p for p in dependencies if p["name"] == "iceberg"]
-          if len(iceberg) != 1 or not iceberg[0].get("source", "").endswith("#" + os.environ["BENCH_EXPECTED_ICEBERG"]):
+          resolved = json.loads(pathlib.Path("resolved/revisions.json").read_text())
+          expected = resolved[os.environ["BENCH_SIDE"]]
+          if len(iceberg) != 1 or iceberg[0] != expected["iceberg_dependency"]:
               raise SystemExit(f"Iceberg dependency does not match pinned benchmark revision: {iceberg}")
+          if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != expected["comet"]:
+              raise SystemExit("Built a different implementation than the resolved revision")
+          if subprocess.check_output(["git", "diff", "--", "."], text=True).strip():
+              raise SystemExit("Tracked implementation sources were changed during the build")
+          conf = pathlib.Path("spark/src/main/scala/org/apache/comet/CometConf.scala").read_text()
+          capabilities = {feature: f"{feature}.dynamicFilter.enabled" in conf
+                          for feature in ("join", "topK", "aggregate")}
           metadata = {"comet": os.environ["COMET_COMMIT"], "dependencies": dependencies,
+                      "resolved_revisions": resolved, "configured_pruning_capabilities": capabilities,
                       "rust": subprocess.check_output(["rustc", "--version"], text=True).strip(),
                       "rustflags": os.environ["RUSTFLAGS"], "profile": "release", "spark_profile": "3.5",
                       "cargo_lock_sha256": hashlib.sha256(pathlib.Path("native/Cargo.lock").read_bytes()).hexdigest(),
@@ -141,8 +186,9 @@ jobs:
       BENCH_SUITE: ${{ matrix.suite }}
       BENCH_ROWS: ${{ matrix.rows }}
       BENCH_FILES: '16'
-      BENCH_ROUNDS: '4'
+      BENCH_ROUNDS: '8'
       BENCH_REPS: ${{ matrix.reps }}
+      BENCH_WARMUPS: '2'
       BENCH_FUZZ_ROWS: '4000000'
       BENCH_FUZZ_QUERIES: '500'
       BENCH_EQUALITY_DELETE_KEYS: '4096'
@@ -177,13 +223,23 @@ jobs:
           echo "BENCH_OUTPUT=$GITHUB_WORKSPACE/results-$BENCH_SUITE.jsonl" >> "$GITHUB_ENV"
       - name: Check the benchmark harness
         run: python3 benchmarks/iceberg-runtime-pruning-detailed/check_harness.py
+      - uses: actions/download-artifact@v8
+        with:
+          name: resolved-revisions
+          path: resolved
       - name: Record environment and binary provenance
         run: |
           python3 - <<'PY'
           import hashlib, json, os, pathlib, platform, subprocess
           builds = {side: json.loads(pathlib.Path(f"jars/pruning-{side}/build-info.json").read_text())
                     for side in ("baseline", "candidate")}
-          environment = {"suite": os.environ["BENCH_SUITE"], "rows": os.environ["BENCH_ROWS"],
+          resolved = json.loads(pathlib.Path("resolved/revisions.json").read_text())
+          for side, build in builds.items():
+              jar = pathlib.Path(f"jars/pruning-{side}/comet.jar")
+              if build["comet"] != resolved[side]["comet"] or build["jar_sha256"] != hashlib.sha256(jar.read_bytes()).hexdigest():
+                  raise SystemExit(f"Binary provenance mismatch: {side}")
+          environment = {"resolved_revisions": resolved, "warmups": os.environ["BENCH_WARMUPS"],
+                         "suite": os.environ["BENCH_SUITE"], "rows": os.environ["BENCH_ROWS"],
                          "rounds": os.environ["BENCH_ROUNDS"], "reps": os.environ["BENCH_REPS"],
                          "fuzz_rows": os.environ["BENCH_FUZZ_ROWS"], "fuzz_queries": os.environ["BENCH_FUZZ_QUERIES"],
                          "tpch_sf": os.environ["TPCH_SF"], "equality_delete_keys": os.environ["BENCH_EQUALITY_DELETE_KEYS"],
@@ -238,6 +294,7 @@ jobs:
         with:
           name: matched-${{ matrix.suite }}
           path: |
+            resolved/revisions.json
             environment-*.json
             data-*.json
             results-*.jsonl
@@ -262,7 +319,7 @@ jobs:
           merge-multiple: true
       - name: Validate complete coverage and summarize matched results
         run: |
-          python3 benchmarks/iceberg-runtime-pruning-detailed/summarize.py results > report.md || status=$?
+          python3 benchmarks/iceberg-runtime-pruning-detailed/summarize.py results --rounds 8 --require-latest-main > report.md || status=$?
           # The complete report is attached; the step summary has GitHub's size limit.
           head -c 950000 report.md >> "$GITHUB_STEP_SUMMARY"
           exit "${status:-0}"

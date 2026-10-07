@@ -44,6 +44,57 @@ SCAN_METRICS = [
 ]
 
 
+class JVMRuntimeDiagnostics:
+    """Driver-wide diagnostics sampled outside the timed region, not per-query CPU/RSS.
+
+    Background compilation/GC may overlap a query. These counters expose that overlap;
+    they do not justify subtracting it from wall time or attributing executor memory.
+    """
+
+    def __init__(self, spark):
+        management = spark._jvm.java.lang.management.ManagementFactory
+        self.collectors = list(management.getGarbageCollectorMXBeans())
+        self.compilation = management.getCompilationMXBean()
+
+    def snapshot(self):
+        counts = [int(bean.getCollectionCount()) for bean in self.collectors]
+        times = [int(bean.getCollectionTime()) for bean in self.collectors]
+        compilation = self.compilation
+        return {
+            "driver_gc_count": sum(counts) if all(v >= 0 for v in counts) else None,
+            "driver_gc_ms": sum(times) if all(v >= 0 for v in times) else None,
+            "driver_compilation_ms": (
+                int(compilation.getTotalCompilationTime())
+                if compilation is not None
+                and compilation.isCompilationTimeMonitoringSupported()
+                else None
+            ),
+        }
+
+
+def diagnostic_delta(before, after):
+    # Unsupported JVM counters remain absent values, never invented zeroes.
+    return {
+        name: (
+            after[name] - value
+            if value is not None
+            and after.get(name) is not None
+            and after[name] >= value
+            else None
+        )
+        for name, value in before.items()
+    }
+
+
+def query_order(queries, round_number, repetition, warmup=False):
+    """Same reproducible permutation for every variant, independently shuffled per pass."""
+    import random
+
+    ordered = list(queries)
+    random.Random(f"{round_number}:{repetition}:{warmup}").shuffle(ordered)
+    return ordered
+
+
 def typed(ktype, expr):
     """SQL expression that maps an integer expression onto the key type."""
     if ktype in ("int", "nulls"):
@@ -262,6 +313,11 @@ def run_query(spark, name, sql, ordered=True, confs=None):
     for key, value in confs.items():
         spark.conf.set(key, value)
     try:
+        diagnostics = getattr(spark, "_pruning_benchmark_diagnostics", None)
+        if diagnostics is None:
+            diagnostics = JVMRuntimeDiagnostics(spark)
+            spark._pruning_benchmark_diagnostics = diagnostics
+        before = diagnostics.snapshot()
         started = time.perf_counter()
         df = spark.sql(sql)
         constructed = time.perf_counter()
@@ -269,6 +325,7 @@ def run_query(spark, name, sql, ordered=True, confs=None):
         planned = time.perf_counter()
         rows = df.collect()
         finished = time.perf_counter()
+        runtime_diagnostics = diagnostic_delta(before, diagnostics.snapshot())
         stages = stage_metrics(plan)
         result = check_result(name, sql, confs, rows, ordered, df.schema.json())
         plan_dir = Path(env("BENCH_PLANS", "plans")) / env("BENCH_VARIANT", "unknown")
@@ -287,6 +344,7 @@ def run_query(spark, name, sql, ordered=True, confs=None):
             "rows": len(rows),
             "sample": repr(rows[:3])[:500],
             "stages": stages,
+            "runtime_diagnostics": runtime_diagnostics,
             **result,
             **scan_metrics(stages),
         }

@@ -30,9 +30,137 @@ import lib
 import run_suite
 import run_tpch
 import summarize
+import resolve_revisions
 
 
 class HarnessChecks(unittest.TestCase):
+    def test_runtime_diagnostic_unknown_counters_stay_unknown(self):
+        self.assertEqual(
+            lib.diagnostic_delta(
+                {"gc": 3, "jit": None, "reset": 8}, {"gc": 5, "jit": 1, "reset": 2}
+            ),
+            {"gc": 2, "jit": None, "reset": None},
+        )
+
+    def test_query_order_is_shared_reproducible_and_varies_between_passes(self):
+        values = list(range(50))
+        self.assertEqual(lib.query_order(values, 2, 1), lib.query_order(values, 2, 1))
+        self.assertCountEqual(lib.query_order(values, 2, 1), values)
+        self.assertNotEqual(
+            lib.query_order(values, 2, 1), lib.query_order(values, 2, 2)
+        )
+        self.assertEqual(values, list(range(50)))
+
+    def test_latest_main_resolver_refuses_a_fork_baseline(self):
+        with self.assertRaises(ValueError), patch.object(
+            resolve_revisions.subprocess, "run"
+        ) as fetch:
+            resolve_revisions.resolve({"baseline": {"comet": "a" * 40}})
+        fetch.assert_not_called()
+
+    def test_provenance_gate_rejects_missing_changed_and_fork_baselines(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertTrue(summarize.validate_provenance(root, ["join"])[0])
+            resolved = {
+                "baseline": {
+                    "repository": resolve_revisions.MAIN_REPOSITORY,
+                    "ref": "refs/heads/main",
+                    "comet": "a" * 40,
+                    "iceberg_dependency": {"name": "iceberg", "source": "main"},
+                },
+                "candidate": {
+                    "comet": "b" * 40,
+                    "iceberg_dependency": {"name": "iceberg", "source": "candidate"},
+                },
+            }
+            environment = {
+                "resolved_revisions": resolved,
+                "builds": {
+                    side: {
+                        "comet": resolved[side]["comet"],
+                        "resolved_revisions": resolved,
+                        "dependencies": [resolved[side]["iceberg_dependency"]],
+                    }
+                    for side in ("baseline", "candidate")
+                },
+            }
+            path = root / "environment-join.json"
+            path.write_text(json.dumps(environment))
+            self.assertEqual(summarize.validate_provenance(root, ["join"])[0], [])
+            changed = json.loads(json.dumps(environment))
+            changed["builds"]["baseline"]["comet"] = "c" * 40
+            path.write_text(json.dumps(changed))
+            self.assertTrue(summarize.validate_provenance(root, ["join"])[0])
+            changed = json.loads(json.dumps(environment))
+            changed["resolved_revisions"]["baseline"]["repository"] = "fork"
+            path.write_text(json.dumps(changed))
+            self.assertTrue(summarize.validate_provenance(root, ["join"])[0])
+
+    def test_main_advancement_is_resolved_each_run_with_its_own_dependency(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def command(*args):
+                return subprocess.check_output(
+                    ["git", "-C", directory, *args], text=True
+                ).strip()
+
+            command("init", "-b", "main")
+            command("config", "user.email", "benchmark-test@example.invalid")
+            command("config", "user.name", "Benchmark Test")
+            (root / "native").mkdir()
+            lock = root / "native/Cargo.lock"
+
+            def commit(dependency):
+                lock.write_text(
+                    f'[[package]]\nname = "iceberg"\nversion = "0.10.0"\nsource = "git+https://example.invalid/iceberg#{dependency}"\n'
+                )
+                command("add", "native/Cargo.lock")
+                command("commit", "-m", dependency)
+                return command("rev-parse", "HEAD")
+
+            candidate = commit("a" * 40)
+            first_main = commit("b" * 40)
+            configuration = {
+                "baseline": {
+                    "repository": resolve_revisions.MAIN_REPOSITORY,
+                    "ref": "refs/heads/main",
+                },
+                "candidate": {"comet": candidate, "iceberg": "a" * 40},
+            }
+            previous = os.getcwd()
+            try:
+                os.chdir(directory)
+                first = resolve_revisions.resolve(
+                    configuration, main_repository=directory
+                )
+                second_main = commit("c" * 40)
+                second = resolve_revisions.resolve(
+                    configuration, main_repository=directory
+                )
+            finally:
+                os.chdir(previous)
+            self.assertEqual(first["baseline"]["comet"], first_main)
+            self.assertEqual(second["baseline"]["comet"], second_main)
+            self.assertEqual(first["candidate"], second["candidate"])
+            self.assertTrue(
+                second["baseline"]["iceberg_dependency"]["source"].endswith(
+                    "#" + "c" * 40
+                )
+            )
+            self.assertTrue(
+                second["candidate"]["iceberg_dependency"]["source"].endswith(
+                    "#" + "a" * 40
+                )
+            )
+            with patch.object(
+                resolve_revisions, "git", wraps=command
+            ), self.assertRaises(ValueError):
+                resolve_revisions.fixed_sha("main")
+
     def test_lossless_result_comparison(self):
         self.assertFalse(
             lib.equivalent(lib.canonical(1.23456701), lib.canonical(1.23456709))
@@ -205,6 +333,15 @@ class HarnessChecks(unittest.TestCase):
             self.assertIsNone(
                 summarize.paired_ratio(
                     baseline, [dict(r, error="failure") for r in candidate]
+                )
+            )
+            self.assertIsNone(summarize.paired_ratio(baseline, candidate[:-1]))
+            self.assertIsNone(
+                summarize.paired_ratio(baseline, candidate + candidate[:1])
+            )
+            self.assertIsNone(
+                summarize.paired_ratio(
+                    baseline, [dict(r, sql_sha256="different") for r in candidate]
                 )
             )
 

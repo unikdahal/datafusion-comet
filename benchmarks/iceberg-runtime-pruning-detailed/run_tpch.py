@@ -18,7 +18,7 @@
 
 """Run the 22 TPC-H queries over both Iceberg layouts in one Spark JVM.
 
-The queries come from benchmarks/tpc/queries/tpch. Each query is warmed once per layout and
+The queries come from benchmarks/tpc/queries/tpch. Each query is warmed BENCH_WARMUPS times per layout and
 then timed BENCH_REPS times; every result is checksummed.
 """
 
@@ -29,7 +29,7 @@ import sys
 
 from pyspark.sql import SparkSession
 
-from lib import append, env, run_query, write_manifest
+from lib import append, env, query_order, run_query, write_manifest
 
 VARIANT = env("BENCH_VARIANT", "x")
 ROUND = int(env("BENCH_ROUND", "0"))
@@ -75,11 +75,13 @@ def main():
     failed = False
     for database in DATABASES:
         spark.sql(f"USE bench.{database}")
-        for repetition in range(reps + (VARIANT != "spark")):
-            warmed = VARIANT != "spark" and repetition == 0
-            # Rotate whole query files while preserving q15's create/select/drop sequence.
-            shift = (ROUND + repetition) % len(files)
-            for path in files[shift:] + files[:shift]:
+        warmups = 0 if VARIANT == "spark" else int(env("BENCH_WARMUPS", "2"))
+        if VARIANT != "spark" and warmups < 1:
+            raise ValueError("Timed native variants must warm their workload")
+        for repetition in range(reps + warmups):
+            warmed = repetition < warmups
+            # Shuffle whole query files, preserving q15's create/select/drop sequence.
+            for path in query_order(files, ROUND, repetition, warmup=warmed):
                 number = int(re.findall(r"\d+", os.path.basename(path))[0])
                 for index, sql in enumerate(statements(path)):
                     sql = re.sub(r"(?i)create\s+view", "create temp view", sql)
@@ -98,7 +100,7 @@ def main():
                     )
                     if warmed:
                         continue
-                    rep = repetition if VARIANT == "spark" else repetition - 1
+                    rep = repetition - warmups
                     record.update(
                         {
                             "suite": "tpch",

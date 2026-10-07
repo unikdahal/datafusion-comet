@@ -20,15 +20,13 @@ under the License.
 # Matched runtime pruning benchmark
 
 The workflow `.github/workflows/iceberg_adaptive_benchmark.yml` runs on
-`adaptive-bench/rewrite-*` branches. Implementation commits and the Iceberg dependency are
-fixed in `revisions.json`; benchmark code is kept on its own branch. The baseline is Comet
-`8c5d76b60bcd6db029e78e7b2603d873ad8a2fac` with Iceberg
-`c9bfeb5f988b120c8b5c6c279453ae086451f333`. It retains the original pruning code
-from `26545ae58ee8386529a27518440920975b431d68` and adds the same broadcast transport
-repair as the candidate: normalize sliced Arrow offsets before serialization and coalescing.
-This shared fix preserves string keys and prevents repeated transmission of unused prefixes.
-The earlier run against the unmodified baseline is retained; this run compares pruning
-implementations with the shared correctness defect repaired on both sides.
+`adaptive-bench/rewrite-*` branches. The candidate Comet and Iceberg commits are fixed in
+`revisions.json`; benchmark code stays on its own branch. Every workflow first fetches the
+latest `apache/datafusion-comet` main commit in a single resolver job, then publishes its
+immutable SHA, resolution time and locked Iceberg dependency in `resolved-revisions`.
+Both builds and every suite consume that manifest. Main is built without source changes
+or dependency substitutions. A rerun through a new workflow dispatch resolves main again;
+retrying a failed job inside an existing run retains that run's resolved commit.
 
 Both implementations use Rust 1.99.0, the same release build commands, Spark 3.5.9,
 Iceberg Java 1.8.1 and Java 17. Build artifacts record the exact dependency sources,
@@ -37,17 +35,19 @@ the fixed Iceberg revision; the build does not alter either implementation.
 
 ## Comparisons
 
-| Variant       | Implementation | Join, Top-K and MIN/MAX runtime filters |
+| Variant       | Implementation | Available join, Top-K and MIN/MAX runtime filters |
 | ------------- | -------------- | --------------------------------------- |
-| baseline_off  | Original       | Disabled                                |
-| baseline_on   | Original       | Enabled                                 |
-| candidate_off | Rewritten      | Disabled                                |
-| candidate_on  | Rewritten      | Enabled                                 |
+| baseline_off  | Latest main    | Disabled                                |
+| baseline_on   | Latest main    | Enabled                                 |
+| candidate_off | Candidate      | Disabled                                |
+| candidate_on  | Candidate      | Enabled                                 |
 
 Top-K fusion stays enabled in all four variants so switching pruning off preserves the
-execution algorithm. Original-on versus rewritten-on is the requested comparison; each
+execution algorithm. Main-on versus candidate-on is the headline comparison; each
 implementation's off/on comparison measures pruning benefit and overhead. Off/off helps
-identify costs unrelated to runtime filtering. Plain Spark supplies the result oracle.
+identify costs unrelated to runtime filtering. Plain Spark supplies the result oracle. Build metadata declares which pruning settings each
+revision recognizes; unsupported settings do not imply reader adoption. Actual physical
+plans and counters determine whether a query used native Iceberg or fell back.
 
 ## Workloads
 
@@ -82,11 +82,11 @@ and decoder rebuilds expose whether a tightening bound arrived in time to save r
 
 ## Measurement and correctness
 
-Four balanced rounds run every native variant in a fresh JVM. Each variant occupies each
+Eight balanced rounds (two complete four-round blocks) run every native variant in a fresh JVM. Each variant occupies each
 execution position once; every ordered adjacent pair appears once. Each JVM warms every
-query before two timed repetitions (one for TPC-H/string joins). Fuzz queries run once per
-seed for correctness and are excluded from speedup headlines. Query order rotates between
-repetitions. SQL construction/analysis, physical planning and collection are timed separately;
+query twice before two timed repetitions (one for TPC-H/string joins). Fuzz queries run once per
+seed for correctness and are excluded from speedup headlines. Query order is deterministically shuffled between
+passes, using the same permutation for every variant. SQL construction/analysis, physical planning and collection are timed separately;
 headline total time includes all three.
 
 Every run checks its full result and output schema against plain Spark. Integer, decimal,
@@ -95,11 +95,14 @@ Only TPC-H floating-point values permit relative error `1e-9` or absolute error 
 The artifact reports every accepted non-identical digest. No suite is exempt from correctness;
 query errors, missing variants, missing records, duplicate records and mismatched SQL fail.
 
-The report shows per-query medians and execution IQRs, plus original/rewritten and off/on
+The report shows per-query medians and execution IQRs, plus main/candidate and off/on
 ratios with paired bootstrap 95% intervals. It resamples independent JVM-round medians,
-preserving repetitions as a cluster. Four CI rounds provide a first comparison; the raw
+preserving repetitions as a cluster. Eight CI rounds provide a first comparison; the raw
 records support further analysis or repeated runs. Measurements use warm local-disk caches
-on shared CI runners.
+on shared CI runners. Exploratory bootstrap intervals do not adjust for multiple
+comparisons and do not establish a root cause. Driver GC count/time and JIT compilation
+time are sampled outside the timed region and retained as diagnostics; these driver-wide
+counters include overlapping background work and must not be subtracted from query time.
 
 Reader bytes, file tasks, rows, file pruning, row-group pruning, live pruning, predicate
 refreshes and decoder rebuilds are reported per variant. Missing counters are `n/a`, never

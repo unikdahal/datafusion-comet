@@ -27,6 +27,42 @@ import random
 import statistics
 
 from lib import VARIANTS
+from resolve_revisions import MAIN_REPOSITORY, fixed_sha
+
+
+def validate_provenance(directory, suites):
+    failures, common = [], None
+    for suite in suites:
+        path = directory / f"environment-{suite}.json"
+        try:
+            environment = json.loads(path.read_text())
+            resolved = environment["resolved_revisions"]
+            baseline = resolved["baseline"]
+            if (
+                baseline["repository"] != MAIN_REPOSITORY
+                or baseline["ref"] != "refs/heads/main"
+            ):
+                raise ValueError("Baseline is not Apache Comet main")
+            for side in ("baseline", "candidate"):
+                commit = fixed_sha(resolved[side]["comet"])
+                build = environment["builds"][side]
+                if build["comet"] != commit or build["resolved_revisions"] != resolved:
+                    raise ValueError(
+                        f"Build provenance differs from the resolver: {side}"
+                    )
+                dependency = [
+                    p for p in build["dependencies"] if p["name"] == "iceberg"
+                ]
+                if dependency != [resolved[side]["iceberg_dependency"]]:
+                    raise ValueError(
+                        f"Locked Iceberg dependency differs from the resolver: {side}"
+                    )
+            if common is not None and resolved != common:
+                raise ValueError("Suites used different resolved revisions")
+            common = resolved
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            failures.append(f"Invalid provenance for {suite}: {error}")
+    return failures, common
 
 
 def quantile(values, q):
@@ -48,6 +84,18 @@ def paired_ratio(baseline, candidate, metric="total_ms", samples=4000):
         "error" in run or run.get("correctness") not in ("exact", "tolerance")
         for run in baseline + candidate
     ):
+        return None
+    # A plausible ratio from a partial or duplicated comparison is still invalid.
+    identities = lambda runs: [(r["round"], r["rep"]) for r in runs]
+    left_ids, right_ids = identities(baseline), identities(candidate)
+    if (
+        len(set(left_ids)) != len(left_ids)
+        or len(set(right_ids)) != len(right_ids)
+        or set(left_ids) != set(right_ids)
+    ):
+        return None
+    hashes = {r.get("sql_sha256") for r in baseline + candidate}
+    if len(hashes) != 1:
         return None
     left, right = defaultdict(list), defaultdict(list)
     for runs, target in ((baseline, left), (candidate, right)):
@@ -151,6 +199,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--rounds", type=int, default=4)
+    parser.add_argument("--require-latest-main", action="store_true")
     parser.add_argument(
         "--suites", default="join,topk_minmax,layouts,fuzz,tpch,strjoin"
     )
@@ -158,6 +207,17 @@ def main(argv=None):
     suites = args.suites.split(",")
     records = load_results(args.directory)
     failures = validate(records, args.directory, suites, args.rounds)
+    if args.require_latest_main:
+        provenance_failures, provenance = validate_provenance(args.directory, suites)
+        failures.extend(provenance_failures)
+        if provenance is not None:
+            print("## Resolved implementations\n")
+            print(
+                f"Apache main: `{provenance['baseline']['comet']}`; candidate: `{provenance['candidate']['comet']}`."
+            )
+            print(
+                f"Main resolved once at {provenance['resolved_at_utc']}; each implementation retains its locked dependencies.\n"
+            )
     grouped = defaultdict(list)
     for record in records:
         grouped[(record["suite"], record["query"], record["variant"])].append(record)
@@ -176,18 +236,45 @@ def main(argv=None):
     )
     print("## Matched comparison\n")
     print(
-        "Ratios are original / rewritten; above 1 is faster. Headline time includes SQL analysis,"
+        "Ratios are baseline / candidate; above 1 is faster. Headline time includes SQL analysis,"
     )
     print(
         "physical planning and execution. Each round starts a fresh JVM; repetitions are clustered"
     )
     print(
-        "within that JVM. Intervals bootstrap matched round medians, with four independent rounds."
+        f"within that JVM. Exploratory intervals bootstrap matched medians from {args.rounds} JVM rounds."
+    )
+    print(
+        "Intervals are not adjusted for multiple comparisons and are not causal or significance verdicts."
     )
     print("These are warm-cache local-disk measurements on shared CI runners.")
-    print("Comparisons containing wrong results or query errors are excluded from speedup ratios.\n")
     print(
-        "| suite | measured queries | geomean original-on / rewritten-on | 95% wins | 95% losses |"
+        "Comparisons containing wrong results or query errors are excluded from speedup ratios.\n"
+    )
+    print("## JVM diagnostics\n")
+    print(
+        "Driver-wide GC/JIT deltas overlap query work; they are not executor CPU or peak RSS.\n"
+    )
+    print(
+        "| suite | variant | samples with GC / monitored samples | median GC ms | median compilation ms |"
+    )
+    print("|---|---|---:|---:|---:|")
+    for suite in suites:
+        for variant in VARIANTS:
+            runs = [
+                r
+                for r in records
+                if r["suite"] == suite and r["variant"] == variant and "error" not in r
+            ]
+            diagnostics = [r.get("runtime_diagnostics", {}) for r in runs]
+            monitored = [d for d in diagnostics if d.get("driver_gc_count") is not None]
+            gc = sum(d["driver_gc_count"] > 0 for d in monitored)
+            print(
+                f"| {suite} | {variant} | {gc} / {len(monitored)} | {fmt(median(diagnostics, 'driver_gc_ms'), 2)} | {fmt(median(diagnostics, 'driver_compilation_ms'), 2)} |"
+            )
+    print()
+    print(
+        "| suite | measured queries | geomean baseline-on / candidate-on | exploratory intervals above 1 | below 1 |"
     )
     print("|---|---:|---:|---:|---:|")
     for suite in suites:

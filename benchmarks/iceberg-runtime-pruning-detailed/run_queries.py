@@ -19,8 +19,8 @@
 """Run one suite of the detailed runtime pruning benchmark in one Spark JVM.
 
 The variant is described by environment variables; the Comet jar and the Comet settings are
-supplied by spark-submit. For the timed suites each query is warmed once, then timed BENCH_REPS
-times in a rotated order; the fuzz suite runs every generated query once and exists to compare
+supplied by spark-submit. For the timed suites each query is warmed BENCH_WARMUPS times, then timed BENCH_REPS
+times in a deterministically shuffled order; the fuzz suite runs every generated query once and exists to compare
 results across variants. Planning and execution are timed separately.
 """
 
@@ -29,7 +29,7 @@ import sys
 
 from pyspark.sql import SparkSession
 
-from lib import append, env, run_query, typed, write_manifest
+from lib import append, env, query_order, run_query, typed, write_manifest
 
 SUITE = env("BENCH_SUITE", "join")
 VARIANT = env("BENCH_VARIANT", "x")
@@ -471,15 +471,20 @@ def main():
     write_manifest(queries, SUITE, VARIANT, ROUND, repetitions)
     failed = False
     if SUITE != "fuzz" and VARIANT != "spark":
-        for name, sql, ordered, confs in queries:
-            warmup = run_query(spark, name, sql, ordered, confs)
-            failed |= "error" in warmup or warmup.get("correctness") not in (
-                "exact",
-                "tolerance",
-            )
+        warmups = int(env("BENCH_WARMUPS", "2"))
+        if warmups < 1:
+            raise ValueError("Timed native variants must warm their workload")
+        for iteration in range(warmups):
+            for name, sql, ordered, confs in query_order(
+                queries, ROUND, iteration, warmup=True
+            ):
+                warmup = run_query(spark, name, sql, ordered, confs)
+                failed |= "error" in warmup or warmup.get("correctness") not in (
+                    "exact",
+                    "tolerance",
+                )
     for rep in range(repetitions):
-        shift = (ROUND * repetitions + rep) % len(queries)
-        for name, sql, ordered, confs in queries[shift:] + queries[:shift]:
+        for name, sql, ordered, confs in query_order(queries, ROUND, rep):
             record = run_query(spark, name, sql, ordered, confs)
             record.update(
                 {"suite": SUITE, "variant": VARIANT, "round": ROUND, "rep": rep}
