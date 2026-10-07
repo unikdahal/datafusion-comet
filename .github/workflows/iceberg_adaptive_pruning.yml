@@ -17,7 +17,7 @@
 
 
 # Fork-only validation of adaptive native Iceberg pruning: Rust lint and tests,
-# a release library, and the native Iceberg suite on two Spark versions.
+# a release library, and the native Iceberg and broadcast transport suites on two Spark versions.
 
 name: Fork Adaptive Iceberg Pruning Validation
 
@@ -128,13 +128,13 @@ jobs:
           ./mvnw -B spotless:apply -Pspark-$SPARK_PROFILE
           # Keep the formatted sources so the suite still runs; fail at the end.
           git diff -- spark common > scala-format.patch
-      - name: Native Iceberg suite, runtime producers and deletes
+      - name: Native Iceberg and broadcast transport suites
         env:
           SPARK_PROFILE: ${{ matrix.spark }}
         run: |
           export SPARK_HOME="$GITHUB_WORKSPACE"
           ./mvnw -B -Prelease -Pspark-$SPARK_PROFILE test -Dtest=none \
-            '-Dsuites=org.apache.comet.CometIcebergNativeSuite'
+            '-Dsuites=org.apache.comet.CometIcebergNativeSuite,org.apache.spark.sql.comet.util.UtilsSuite'
       - uses: actions/upload-artifact@v7
         if: always()
         with:
