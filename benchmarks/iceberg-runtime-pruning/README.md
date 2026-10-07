@@ -63,3 +63,8 @@ Timings are warm-cache local-disk timings on a shared CI runner. The summary rep
 interquartile ranges, coefficients of variation and bootstrap 95% intervals for speedups.
 `bytes_scanned` is the total of ranged reads issued by the native reader, including footers and
 page indexes. It does not depend on cache state and is the best proxy for object-store cost.
+
+The baseline resolves the latest Apache DataFusion Comet main once at workflow start.
+Its full commit and resolution time are recorded in the `resolved-revisions` artifact.
+Build matrix jobs consume that immutable commit; the baseline retains its own locked
+dependencies. New runs resolve main again rather than selecting a fork merge base.
