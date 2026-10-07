@@ -42,6 +42,32 @@ import org.apache.comet.vector.CometVector
 
 class UtilsSuite extends CometTestBase {
 
+  test("batch IPC round trips incompressible binary data across scratch chunks") {
+    val payload = new Array[Byte](1024 * 1024)
+    new java.util.Random(17).nextBytes(payload)
+    val vector = new VarBinaryVector("b", CometArrowAllocator)
+    val provider = new CDataDictionaryProvider
+    try {
+      vector.allocateNew()
+      vector.setSafe(0, payload)
+      vector.setNull(1)
+      vector.setValueCount(2)
+      val batch =
+        new ColumnarBatch(Array[ColumnVector](CometVector.getVector(vector, provider)), 2)
+      val (count, bytes) = Utils.serializeBatches(Iterator(batch)).next()
+      assert(count == 2)
+      assert(bytes.getChunks.length > 1, "The fixture must exercise multiple IPC chunks")
+      val decoded = Utils.decodeBatches(bytes, "multi-chunk-binary")
+      val output = decoded.next()
+      assert(Arrays.equals(output.column(0).getBinary(0), payload))
+      assert(output.column(0).isNullAt(1))
+      assert(!decoded.hasNext)
+    } finally {
+      vector.close()
+      provider.close()
+    }
+  }
+
   test("broadcast transport normalizes sliced string and binary offsets with nulls") {
     val values = Seq(
       Some(""),

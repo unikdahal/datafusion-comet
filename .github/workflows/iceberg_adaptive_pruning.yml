@@ -37,6 +37,15 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  spark_sql:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    uses: ./.github/workflows/spark_sql_test_reusable.yml
+    with:
+      spark-short: '3.5'
+      spark-full: '3.5.9'
+      java: 17
+      modules: core
+
   rust:
     if: github.repository == 'unikdahal/datafusion-comet'
     runs-on: ubuntu-24.04
@@ -134,7 +143,7 @@ jobs:
         run: |
           export SPARK_HOME="$GITHUB_WORKSPACE"
           ./mvnw -B -Prelease -Pspark-$SPARK_PROFILE test -Dtest=none \
-            '-Dsuites=org.apache.comet.CometIcebergNativeSuite,org.apache.spark.sql.comet.util.UtilsSuite,org.apache.comet.exec.CometJoinSuite'
+            '-Dsuites=org.apache.comet.CometIcebergNativeSuite,org.apache.spark.sql.comet.util.UtilsSuite,org.apache.comet.exec.CometJoinSuite,org.apache.comet.exec.CometShuffleSuite,org.apache.comet.exec.DisableAQECometShuffleSuite,org.apache.spark.sql.comet.execution.shuffle.CometDiskBlockWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometNativeShuffleWriterSuite'
       - uses: actions/upload-artifact@v7
         if: always()
         with:

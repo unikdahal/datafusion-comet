@@ -50,6 +50,10 @@ import org.apache.comet.vector.CometVector
 
 object Utils extends CometTypeShim with Logging {
   private val VariantExtensionName = "arrow.parquet.variant"
+  // IPC is compressed one batch at a time. A 1 MiB scratch chunk allocates a large
+  // heap object even for a few build keys; use bounded chunks without copying on growth.
+  // The final coalesced broadcast keeps its larger chunks for throughput on large builds.
+  private val BatchIpcChunkSize = 64 * 1024
 
   def majorMinorPatchVersion(version: String): Option[(Int, Int, Int)] =
     org.apache.spark.util.VersionUtils.majorMinorPatchVersion(version)
@@ -256,7 +260,7 @@ object Utils extends CometTypeShim with Logging {
       val dictionaryProvider: CDataDictionaryProvider = new CDataDictionaryProvider
 
       val codec = CompressionCodec.createCodec(SparkEnv.get.conf)
-      val cbbos = new ChunkedByteBufferOutputStream(1024 * 1024, ByteBuffer.allocate)
+      val cbbos = new ChunkedByteBufferOutputStream(BatchIpcChunkSize, ByteBuffer.allocate)
       val out = new DataOutputStream(codec.compressedOutputStream(cbbos))
 
       val (fieldVectors, batchProviderOpt) = getBatchFieldVectors(batch)

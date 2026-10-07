@@ -102,7 +102,6 @@ import static scala.jdk.javaapi.CollectionConverters.*;
 @Private
 public class CometUnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
 
-  @VisibleForTesting static final int DEFAULT_INITIAL_SER_BUFFER_SIZE = 1024 * 1024;
   private static final Logger logger = LoggerFactory.getLogger(CometUnsafeShuffleWriter.class);
   private static final ClassTag<Object> OBJECT_CLASS_TAG = ClassTag$.MODULE$.Object();
   private final BlockManager blockManager;
@@ -296,7 +295,7 @@ public class CometUnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
             sparkConf,
             writeMetrics,
             schema);
-    serBuffer = new ExposedByteArrayOutputStream(DEFAULT_INITIAL_SER_BUFFER_SIZE);
+    serBuffer = new ExposedByteArrayOutputStream();
     serOutputStream = serializer.serializeStream(serBuffer);
   }
 

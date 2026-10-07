@@ -23,6 +23,13 @@ import java.io.ByteArrayOutputStream;
 
 /** Subclass of ByteArrayOutputStream that exposes `buf` directly. */
 public final class ExposedByteArrayOutputStream extends ByteArrayOutputStream {
+  // Writers reuse this buffer for one serialized row at a time. Avoid eagerly
+  // allocating a 1 MiB array for ordinary short rows; ByteArrayOutputStream grows
+  // as needed for large rows and retains that capacity for subsequent records.
+  ExposedByteArrayOutputStream() {
+    this(64 * 1024);
+  }
+
   ExposedByteArrayOutputStream(int size) {
     super(size);
   }
