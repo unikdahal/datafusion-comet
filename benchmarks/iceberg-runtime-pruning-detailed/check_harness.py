@@ -19,6 +19,7 @@
 """Check the benchmark's correctness gate, coverage gate and statistical unit."""
 
 import json
+import decimal
 import os
 from pathlib import Path
 import tempfile
@@ -44,6 +45,66 @@ class HarnessChecks(unittest.TestCase):
         )
         self.assertFalse(lib.equivalent(1000000000, 1000000001, True))
         self.assertFalse(lib.equivalent(None, "None", True))
+
+    def test_unordered_signed_zero_and_decimal_rows_use_semantic_sorting(self):
+        expected = [(0.0, 1), (-0.0, 2)]
+        actual = [(0.0, 2), (-0.0, 1)]
+        expected_rows = lib.result_rows(expected, ordered=False)
+        actual_rows = lib.result_rows(actual, ordered=False)
+        self.assertTrue(lib.equivalent(actual_rows, expected_rows))
+        self.assertNotEqual(lib.digest(actual_rows), lib.digest(expected_rows))
+        self.assertFalse(
+            lib.equivalent(
+                lib.result_rows(actual, ordered=True),
+                lib.result_rows(expected, ordered=True),
+            )
+        )
+        self.assertFalse(
+            lib.equivalent(
+                lib.result_rows([(0.0, 1), (-0.0, 1)], ordered=False), expected_rows
+            )
+        )
+        # Different decimal encodings must not reorder their associated payloads either.
+        large = "12345678901234567890123456789012345678"
+        decimal_expected = [
+            (decimal.Decimal(large + ".0"), 1),
+            (decimal.Decimal(large + ".00"), 2),
+        ]
+        decimal_actual = [
+            (decimal.Decimal(large + ".0"), 2),
+            (decimal.Decimal(large + ".000"), 1),
+        ]
+        with decimal.localcontext() as context:
+            context.prec = 4
+            self.assertTrue(
+                lib.equivalent(
+                    lib.result_rows(decimal_actual, False),
+                    lib.result_rows(decimal_expected, False),
+                )
+            )
+            self.assertNotEqual(
+                lib.semantic_sort_value(lib.canonical(decimal.Decimal(large))),
+                lib.semantic_sort_value(lib.canonical(decimal.Decimal(large + "1"))),
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            variables = {
+                "BENCH_EXPECTED": directory,
+                "BENCH_VARIANT": "spark",
+                "BENCH_SUITE": "join",
+            }
+            with patch.dict(os.environ, variables):
+                oracle = lib.check_result(
+                    "zero", "SELECT zero", None, expected, False, "same schema"
+                )
+                self.assertEqual(oracle["correctness"], "oracle")
+                os.environ["BENCH_VARIANT"] = "candidate_on"
+                comparison = lib.check_result(
+                    "zero", "SELECT zero", None, actual, False, "same schema"
+                )
+                self.assertEqual(comparison["correctness"], "tolerance")
+                self.assertNotEqual(
+                    comparison["checksum"], comparison["oracle_checksum"]
+                )
 
     def test_oracle_detects_schema_and_value_changes(self):
         with tempfile.TemporaryDirectory() as directory:

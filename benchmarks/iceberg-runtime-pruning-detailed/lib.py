@@ -142,10 +142,37 @@ def canonical(value):
     raise TypeError(f"Unrecognized SQL result type: {type(value).__name__}")
 
 
+def semantic_sort_value(value):
+    """Sort unordered rows by SQL values without changing their lossless payload."""
+    if isinstance(value, list):
+        return [semantic_sort_value(item) for item in value]
+    if isinstance(value, dict):
+        if value.keys() == {"float"}:
+            number = float.fromhex(value["float"])
+            return {"float": (0.0).hex()} if number == 0.0 else value
+        if value.keys() == {"decimal"}:
+            number = decimal.Decimal(value["decimal"])
+            if not number.is_finite():
+                return value
+            if number.is_zero():
+                return {"decimal": "0"}
+            sign, digits, exponent = number.as_tuple()
+            # Decimal.normalize() uses the active precision and could round large SQL
+            # decimals. Removing trailing coefficient zeros is exact and context-free.
+            coefficient = "".join(str(digit) for digit in digits)
+            trimmed = coefficient.rstrip("0")
+            exponent += len(coefficient) - len(trimmed)
+            return {"decimal": f"{'-' if sign else ''}{trimmed}e{exponent}"}
+        return {key: semantic_sort_value(item) for key, item in value.items()}
+    return value
+
+
 def result_rows(rows, ordered):
     result = [canonical(tuple(row)) for row in rows]
     if not ordered:
-        result.sort(key=lambda row: json.dumps(row, sort_keys=True))
+        result.sort(
+            key=lambda row: json.dumps(semantic_sort_value(row), sort_keys=True)
+        )
     return result
 
 
