@@ -41,7 +41,7 @@ use futures::StreamExt;
 
 mod reader;
 
-use super::iceberg_reader::is_safe_to_prune_before;
+use super::safety::is_safe_to_prune_before;
 use reader::try_attach_topk_reader_filter;
 
 use crate::execution::operators::RuntimeScanOrder;

@@ -1725,13 +1725,13 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
     let consumer = runtime
         .join
         .right()
-        .downcast_ref::<DynamicFilterExec>()
+        .downcast_ref::<super::super::consumer::ReaderFilterConsumerExec>()
         .unwrap();
-    assert!(consumer.reader_only);
     assert!(consumer
         .input
         .is::<crate::execution::operators::IcebergScanExec>());
     let reader = Arc::clone(&consumer.input);
+    let visible_consumer = Arc::clone(runtime.join.right());
     let session = SessionContext::new();
     let expected = collect(plain, session.task_ctx()).await.unwrap();
     let before = reader.metrics().unwrap().output_rows().unwrap();
@@ -1744,6 +1744,11 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
     .unwrap();
     assert_eq!(metric(&reader, "iceberg_runtime_predicate_tasks"), 1);
     assert_eq!(reader.metrics().unwrap().output_rows().unwrap() - before, 3);
+    // A direct reset must detach the old reader restriction as well as the
+    // producer's discovery expression, even if the old join is still owned.
+    let reset = visible_consumer.reset_state().unwrap();
+    let reset_output = collect(reset, session.task_ctx()).await.unwrap();
+    assert_eq!(row_count(&reset_output), 7);
     assert_eq!(
         batches_to_sort_string(&actual),
         batches_to_sort_string(&expected)

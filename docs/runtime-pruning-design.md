@@ -89,13 +89,45 @@ distinct, aggregate filters or aggregate ordering. Safe projections and filters
 can be traversed while preserving the key's column mapping. Parquet attachment
 keeps its separate schema-adapter and statistics safety checks.
 
-Join reader attachment also retains a pass-through `DynamicFilterExec` exposing
+Join reader attachment also retains a pass-through `ReaderFilterConsumerExec` exposing
 the predicate through the physical-plan expression visitor. DataFusion checks
 that consumer identity before publishing the build domain. The opaque reader
 provider alone does not satisfy that discovery check. This node delegates
 execution directly to its input; it performs no decoded-row membership lookup
 or payload filtering. Regression coverage requires actual reader adoption and
 reduced reader output, in addition to exact join results.
+
+## Component boundaries and incremental support
+
+| Component | Responsibility |
+| --- | --- |
+| `join.rs`, `topk.rs`, `aggregate.rs` | Producer eligibility and execution-local publication lifecycle |
+| `safety.rs` | Whether bypassing an expression preserves values, nulls and errors; independent of the storage backend |
+| `iceberg_reader.rs` | Traverse permitted plan nodes and map the producer column to a consistent Iceberg field identity |
+| `iceberg_reader/predicate.rs` | Conservatively translate the published producer expression; unfamiliar shapes fail open |
+| `consumer.rs` | Expose the reader's consumer identity to DataFusion; delegate batches without evaluation |
+| `batch_filter.rs` | Evaluate membership on decoded batches for non-Iceberg join inputs |
+| iceberg-rust runtime reader | Bind publications, validate physical schemas, and prune files, groups, pages and rows |
+
+`try_attach_iceberg_join_filter` connects the reader provider and the discoverable
+consumer together. A caller cannot accidentally retain only the provider. The
+consumer remains above projection traversal, where the expression's column
+indices belong to the producer's input schema. Reset removes both its discovery
+expression and the reader's old provider, even when invoked directly.
+
+Add expression support in `safety.rs` only after establishing row-local,
+infallible evaluation for that concrete physical expression and its types.
+Determinism or a scalar function's name is insufficient. Test the expression
+produced by Spark serialization as well as null, overflow and error behavior;
+a hand-built DataFusion expression can differ from Spark's expression tree.
+
+Adding a safe filter does not require translating that filter into an Iceberg
+predicate: it permits the independently published join or TopK bound to pass
+below it. New producer predicate shapes belong in `predicate.rs`, with separate
+tests for conservative AND extraction, complete OR coverage, ties and nulls.
+New physical column types require reader/statistics agreement in iceberg-rust
+before being admitted by a producer. These extension points do not broaden one
+another automatically.
 
 Permanent wrappers retain unexecuted templates. Each execution creates a fresh
 producer and connected reader consumer; completed build domains, hash tables

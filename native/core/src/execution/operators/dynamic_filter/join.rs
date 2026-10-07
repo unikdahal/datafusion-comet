@@ -45,7 +45,7 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
-use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_reader_filter};
+use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_join_filter};
 use super::parquet_reader::{is_parquet_reader_key, try_attach_parquet_reader_filter};
 use super::DynamicFilterExec;
 
@@ -103,11 +103,8 @@ impl DynamicFilterJoinExec {
         let (reader, iceberg_reader) = match parquet_reader {
             Some(reader) => (Some(reader), false),
             None => {
-                let reader = try_attach_iceberg_reader_filter(
-                    self.template.right(),
-                    Arc::clone(&predicate),
-                    None,
-                )?;
+                let reader =
+                    try_attach_iceberg_join_filter(self.template.right(), Arc::clone(&predicate))?;
                 let attached = reader.is_some();
                 (reader, attached)
             }
@@ -119,15 +116,7 @@ impl DynamicFilterJoinExec {
             // HashJoinExec then verifies the surviving rows exactly. A second
             // membership lookup on decoded batches cannot save any further IO
             // and would copy payload arrays only to probe the hash table again.
-            Arc::new(
-                DynamicFilterExec::new(
-                    input,
-                    Arc::clone(&predicate),
-                    self.metrics.clone(),
-                    "dynamic_filter_join",
-                )
-                .reader_only(),
-            )
+            input
         } else {
             Arc::new(DynamicFilterExec::new(
                 input,
