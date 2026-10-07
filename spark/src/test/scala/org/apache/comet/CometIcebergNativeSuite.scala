@@ -1115,8 +1115,8 @@ class CometIcebergNativeSuite
           .load(table)
           .createOrReplaceTempView("runtime_temporal")
         val dates = spark
-          .range(1)
-          .selectExpr("DATE'2024-01-03' AS d")
+          .range(2)
+          .selectExpr("date_add(DATE'2024-01-03', CAST(id AS INT)) AS d")
         dates.createOrReplaceTempView("runtime_temporal_dates")
         val queries = Seq(
           CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key ->

@@ -128,10 +128,10 @@ fn metric(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
     if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
         return metric(projection.input(), name);
     }
-    plan.metrics()
-        .unwrap()
+    let metrics = plan.metrics().unwrap();
+    metrics
         .sum_by_name(name)
-        .unwrap()
+        .unwrap_or_else(|| panic!("missing metric {name} in {metrics:?}"))
         .as_usize()
 }
 
@@ -1722,12 +1722,32 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
     .unwrap();
     let runtime = wrapper.build_runtime_join().unwrap();
     assert!(runtime.reader_filter_attached);
-    assert!(runtime
+    let consumer = runtime
         .join
         .right()
+        .downcast_ref::<DynamicFilterExec>()
+        .unwrap();
+    assert!(consumer.reader_only);
+    assert!(consumer
+        .input
         .is::<crate::execution::operators::IcebergScanExec>());
+    let reader = Arc::clone(&consumer.input);
     let session = SessionContext::new();
     let expected = collect(plain, session.task_ctx()).await.unwrap();
+    let before = reader.metrics().unwrap().output_rows().unwrap();
+    // Check actual reader adoption, not only the wrapper's attachment counter.
+    let actual = collect(
+        Arc::new(runtime.join) as Arc<dyn ExecutionPlan>,
+        session.task_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(metric(&reader, "iceberg_runtime_predicate_tasks"), 1);
+    assert_eq!(reader.metrics().unwrap().output_rows().unwrap() - before, 3);
+    assert_eq!(
+        batches_to_sort_string(&actual),
+        batches_to_sort_string(&expected)
+    );
     let filtered: Arc<dyn ExecutionPlan> = Arc::new(wrapper);
     let actual = collect(Arc::clone(&filtered), session.task_ctx())
         .await

@@ -89,6 +89,14 @@ distinct, aggregate filters or aggregate ordering. Safe projections and filters
 can be traversed while preserving the key's column mapping. Parquet attachment
 keeps its separate schema-adapter and statistics safety checks.
 
+Join reader attachment also retains a pass-through `DynamicFilterExec` exposing
+the predicate through the physical-plan expression visitor. DataFusion checks
+that consumer identity before publishing the build domain. The opaque reader
+provider alone does not satisfy that discovery check. This node delegates
+execution directly to its input; it performs no decoded-row membership lookup
+or payload filtering. Regression coverage requires actual reader adoption and
+reduced reader output, in addition to exact join results.
+
 Permanent wrappers retain unexecuted templates. Each execution creates a fresh
 producer and connected reader consumer; completed build domains, hash tables
 and TopK thresholds do not survive into the next execution. EOF, error and

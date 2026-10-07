@@ -119,7 +119,15 @@ impl DynamicFilterJoinExec {
             // HashJoinExec then verifies the surviving rows exactly. A second
             // membership lookup on decoded batches cannot save any further IO
             // and would copy payload arrays only to probe the hash table again.
-            input
+            Arc::new(
+                DynamicFilterExec::new(
+                    input,
+                    Arc::clone(&predicate),
+                    self.metrics.clone(),
+                    "dynamic_filter_join",
+                )
+                .reader_only(),
+            )
         } else {
             Arc::new(DynamicFilterExec::new(
                 input,

@@ -54,6 +54,8 @@ pub(crate) struct DynamicFilterExec {
     predicate: Arc<DynamicFilterPhysicalExpr>,
     metrics: ExecutionPlanMetricsSet,
     metric_prefix: &'static str,
+    /// Expose the consumer to producer discovery while the reader does all pruning.
+    reader_only: bool,
 }
 
 impl DynamicFilterExec {
@@ -68,7 +70,16 @@ impl DynamicFilterExec {
             predicate,
             metrics,
             metric_prefix,
+            reader_only: false,
         }
+    }
+
+    /// Keep the producer/consumer expression visible without evaluating decoded rows.
+    /// HashJoinExec discovers consumers through the physical plan's expression visitor;
+    /// an opaque Iceberg provider alone cannot enable its build-domain publication.
+    pub(super) fn reader_only(mut self) -> Self {
+        self.reader_only = true;
+        self
     }
 }
 
@@ -104,7 +115,11 @@ impl ExecutionPlan for DynamicFilterExec {
     }
 
     fn cardinality_effect(&self) -> CardinalityEffect {
-        CardinalityEffect::LowerEqual
+        if self.reader_only {
+            CardinalityEffect::Equal
+        } else {
+            CardinalityEffect::LowerEqual
+        }
     }
 
     fn with_new_children(
@@ -125,12 +140,13 @@ impl ExecutionPlan for DynamicFilterExec {
         if children.len() != 1 {
             return internal_err!("CometDynamicFilterExec requires one child");
         }
-        Ok(Arc::new(Self::new(
-            children.remove(0),
-            Arc::clone(&self.predicate),
-            ExecutionPlanMetricsSet::new(),
-            self.metric_prefix,
-        )))
+        Ok(Arc::new(Self {
+            input: children.remove(0),
+            predicate: Arc::clone(&self.predicate),
+            metrics: ExecutionPlanMetricsSet::new(),
+            metric_prefix: self.metric_prefix,
+            reader_only: self.reader_only,
+        }))
     }
 
     fn reset_state(self: Arc<Self>) -> Result<Arc<dyn ExecutionPlan>> {
@@ -141,12 +157,13 @@ impl ExecutionPlan for DynamicFilterExec {
             self.predicate.children().into_iter().cloned().collect(),
             lit(true),
         ));
-        Ok(Arc::new(Self::new(
-            Arc::clone(&self.input),
+        Ok(Arc::new(Self {
+            input: Arc::clone(&self.input),
             predicate,
-            ExecutionPlanMetricsSet::new(),
-            self.metric_prefix,
-        )))
+            metrics: ExecutionPlanMetricsSet::new(),
+            metric_prefix: self.metric_prefix,
+            reader_only: self.reader_only,
+        }))
     }
 
     fn execute(
@@ -154,6 +171,9 @@ impl ExecutionPlan for DynamicFilterExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        if self.reader_only {
+            return self.input.execute(partition, context);
+        }
         let children = self.predicate.children();
         let [key] = children.as_slice() else {
             return internal_err!("CometDynamicFilterExec requires one join-key column");
