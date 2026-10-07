@@ -113,3 +113,116 @@ fn iceberg_topk_attaches_with_fresh_execution_local_thresholds() {
         }
     }
 }
+
+#[tokio::test]
+async fn iceberg_topk_preserves_errors_in_late_secondary_sort_keys() {
+    use std::collections::HashMap;
+
+    use ::iceberg::scan::FileScanTaskMetrics;
+    use ::iceberg::spec::Datum;
+
+    let physical_schema = Arc::new(Schema::new(
+        ["key", "payload"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Field::new(name, DataType::Int32, false).with_metadata(HashMap::from([(
+                    parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+                    (index + 1).to_string(),
+                )]))
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let table_schema = Arc::new(
+        IcebergSchema::builder()
+            .with_fields(vec![
+                NestedField::required(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(2, "payload", Type::Primitive(PrimitiveType::Int)).into(),
+            ])
+            .build()
+            .unwrap(),
+    );
+    let mut files = Vec::new();
+    let mut tasks = Vec::new();
+    for (key, payload) in [(0, 1), (100, 0)] {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&physical_schema),
+            vec![
+                Arc::new(Int32Array::from(vec![key])),
+                Arc::new(Int32Array::from(vec![payload])),
+            ],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file.reopen().unwrap(), Arc::clone(&physical_schema), None)
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        tasks.push(
+            FileScanTask::builder()
+                .with_data_file_path(file.path().to_string_lossy().into_owned())
+                .with_data_file_format(DataFileFormat::Parquet)
+                .with_file_size_in_bytes(file.as_file().metadata().unwrap().len())
+                .with_start(0)
+                .with_length(0)
+                .with_schema(Arc::clone(&table_schema))
+                .with_project_field_ids(vec![1, 2])
+                .with_case_sensitive(false)
+                .with_file_metrics(Some(Arc::new(FileScanTaskMetrics::new(
+                    Some(1),
+                    HashMap::from([(1, 1)]),
+                    HashMap::from([(1, 0)]),
+                    HashMap::new(),
+                    HashMap::from([(1, Datum::int(key))]),
+                    HashMap::from([(1, Datum::int(key))]),
+                ))))
+                .build()
+                .unwrap(),
+        );
+        files.push(file);
+    }
+    let session = session(1);
+    for enabled in [false, true] {
+        let scan: Arc<dyn ExecutionPlan> = Arc::new(
+            IcebergScanExec::new(
+                files[0].path().to_string_lossy().into_owned(),
+                Arc::clone(&physical_schema),
+                Default::default(),
+                String::new(),
+                tasks.clone(),
+                1,
+            )
+            .unwrap(),
+        );
+        let sort = SortExec::new(
+            LexOrdering::new(vec![
+                PhysicalSortExpr::new_default(Arc::new(Column::new("key", 0))),
+                PhysicalSortExpr::new_default(Arc::new(BinaryExpr::new(
+                    lit(1_i32),
+                    Operator::Divide,
+                    Arc::new(Column::new("payload", 1)),
+                ))),
+            ])
+            .unwrap(),
+            scan,
+        )
+        .with_fetch(Some(1));
+        let plan: Arc<dyn ExecutionPlan> = if enabled {
+            let wrapper =
+                TopKReaderFilterExec::try_new(&sort, session.copied_config().options()).unwrap();
+            assert!(
+                wrapper.is_none(),
+                "fallible secondary key must remain a boundary"
+            );
+            Arc::new(sort)
+        } else {
+            Arc::new(sort)
+        };
+        let error = collect(plan, session.task_ctx()).await.unwrap_err();
+        assert!(
+            error.to_string().to_lowercase().contains("divide by zero"),
+            "enabled={enabled}: {error}"
+        );
+    }
+}

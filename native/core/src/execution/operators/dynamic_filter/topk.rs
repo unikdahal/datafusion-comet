@@ -41,6 +41,7 @@ use futures::StreamExt;
 
 mod reader;
 
+use super::iceberg_reader::is_safe_to_prune_before;
 use reader::try_attach_topk_reader_filter;
 
 use crate::execution::operators::RuntimeScanOrder;
@@ -81,6 +82,16 @@ impl TopKReaderFilterExec {
                     | DataType::Date32
                     | DataType::Timestamp(TimeUnit::Microsecond, _)
             )
+        {
+            return Ok(None);
+        }
+        // Every sort expression is evaluated before rows enter the heap. A
+        // primary-key bound must not hide a later row's secondary-key error.
+        if sort
+            .expr()
+            .iter()
+            .skip(1)
+            .any(|order| !is_safe_to_prune_before(&order.expr, sort.input().schema().as_ref()))
         {
             return Ok(None);
         }
