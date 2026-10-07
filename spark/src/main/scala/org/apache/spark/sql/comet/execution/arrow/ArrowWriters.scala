@@ -1446,6 +1446,7 @@ private[arrow] class StructWriter(
 
   private val declaredType = Utils.fromArrowField(valueVector.getField).asInstanceOf[StructType]
   private var writingValidatedColumnSlice = false
+  private var validatedInput: ColumnVector = null
 
   override def setNull(): Unit = {
     var i = 0
@@ -1523,7 +1524,12 @@ private[arrow] class StructWriter(
   // reason it can return a wider top-level batch: delete processing keeps trailing metadata
   // columns in the backing Spark vector. Nested writers are not given that permission.
   override def writeColumnSlice(input: ColumnVector, startRow: Int, numRows: Int): Unit = {
-    validateColumnType(input)
+    // Array and map writers may split one child vector into many runs. Validate the vector once
+    // per input batch rather than rebuilding and normalizing its schema for every run.
+    if (validatedInput ne input) {
+      validateColumnType(input)
+      validatedInput = input
+    }
     val hasNull = input.hasNull
     val readsFields = input match {
       case vector: WritableColumnVector if ArrowFieldWriter.isSparkVector(vector) =>
@@ -1550,7 +1556,10 @@ private[arrow] class StructWriter(
     count += numRows
   }
 
-  override private[arrow] def startInputBatch(): Unit = children.foreach(_.startInputBatch())
+  override private[arrow] def startInputBatch(): Unit = {
+    validatedInput = null
+    children.foreach(_.startInputBatch())
+  }
 
   override private[arrow] def supportsNullMask: Boolean = childrenSupportNullMask
 
