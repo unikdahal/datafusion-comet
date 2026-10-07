@@ -121,6 +121,26 @@ def append(path, record):
         out.write(json.dumps(record, allow_nan=False) + "\n")
 
 
+def record_warmup(record, suite, variant, round_number, iteration):
+    # Retain correctness evidence, without mixing warmup timing into measured samples.
+    validation = {
+        key: record[key]
+        for key in (
+            "query",
+            "sql_sha256",
+            "correctness",
+            "checksum",
+            "oracle_checksum",
+            "error",
+        )
+        if key in record
+    }
+    validation.update(
+        suite=suite, variant=variant, round=round_number, iteration=iteration
+    )
+    append(f"warmup-validation-{suite}.jsonl", validation)
+
+
 def signature(sql, confs=None):
     return hashlib.sha256(
         json.dumps([sql, confs or {}], sort_keys=True).encode()
@@ -373,6 +393,11 @@ def write_manifest(queries, suite, variant, round_number, reps):
         "variant": variant,
         "round": round_number,
         "reps": reps,
+        "warmups": (
+            0
+            if variant == "spark" or suite == "fuzz"
+            else int(env("BENCH_WARMUPS", "2"))
+        ),
         "queries": [
             {"query": name, "sql_sha256": signature(sql, confs)}
             for name, sql, _, confs in queries

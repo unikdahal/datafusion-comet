@@ -298,6 +298,7 @@ jobs:
             environment-*.json
             data-*.json
             results-*.jsonl
+            warmup-validation-*.jsonl
             manifests
             plans
             generate-*.log

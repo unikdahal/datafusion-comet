@@ -34,6 +34,92 @@ import resolve_revisions
 
 
 class HarnessChecks(unittest.TestCase):
+    def test_warmup_gate_rejects_failures_missing_duplicates_and_different_sql(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "manifests").mkdir()
+            manifest = {
+                "variant": "candidate_on",
+                "round": 0,
+                "warmups": 1,
+                "queries": [{"query": "q", "sql_sha256": "digest"}],
+            }
+            (root / "manifests/join-candidate_on-0.json").write_text(
+                json.dumps(manifest)
+            )
+            path = root / "warmup-validation-join.jsonl"
+            good = {
+                "suite": "join",
+                "variant": "candidate_on",
+                "round": 0,
+                "iteration": 0,
+                "query": "q",
+                "sql_sha256": "digest",
+                "correctness": "exact",
+            }
+            self.assertEqual(
+                summarize.validate_warmups(root, ["join"], True)[1], {("join", "q")}
+            )
+            for runs in [
+                [good],
+                [dict(good, correctness="mismatch")],
+                [good, good],
+                [dict(good, sql_sha256="changed")],
+                [dict(good, error="warmup failed")],
+            ]:
+                path.write_text("".join(json.dumps(r) + "\n" for r in runs))
+                failures, invalid = summarize.validate_warmups(root, ["join"], True)
+                if runs == [good]:
+                    self.assertEqual((failures, invalid), ([], set()))
+                else:
+                    self.assertTrue(failures)
+                    self.assertEqual(invalid, {("join", "q")})
+            manifest.pop("warmups")
+            (root / "manifests/join-candidate_on-0.json").write_text(
+                json.dumps(manifest)
+            )
+            self.assertTrue(summarize.validate_warmups(root, ["join"], True)[0])
+
+    def test_warmup_record_retains_correctness_and_omits_timing(self):
+        with patch.object(lib, "append") as append:
+            lib.record_warmup(
+                {
+                    "query": "q",
+                    "sql_sha256": "digest",
+                    "correctness": "mismatch",
+                    "checksum": "bad",
+                    "oracle_checksum": "good",
+                    "total_ms": 1,
+                    "stages": [{}],
+                },
+                "join",
+                "baseline_on",
+                2,
+                0,
+            )
+        path, record = append.call_args.args
+        self.assertEqual(path, "warmup-validation-join.jsonl")
+        self.assertEqual(record["correctness"], "mismatch")
+        self.assertEqual(record["iteration"], 0)
+        self.assertNotIn("total_ms", record)
+        self.assertNotIn("stages", record)
+
+    def test_ratio_gate_rejects_invalid_comparison_and_missing_sql_digest(self):
+        good = [
+            {
+                "round": 0,
+                "rep": 0,
+                "total_ms": 10,
+                "sql_sha256": "same",
+                "correctness": "exact",
+            }
+        ]
+        self.assertIsNone(
+            summarize.paired_ratio(good, [dict(good[0], comparison_validated=False)])
+        )
+        missing = [{k: v for k, v in good[0].items() if k != "sql_sha256"}]
+        self.assertIsNone(summarize.paired_ratio(missing, missing))
+
     def test_runtime_diagnostic_unknown_counters_stay_unknown(self):
         self.assertEqual(
             lib.diagnostic_delta(

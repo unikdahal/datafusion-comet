@@ -29,7 +29,7 @@ import sys
 
 from pyspark.sql import SparkSession
 
-from lib import append, env, query_order, run_query, write_manifest
+from lib import append, env, query_order, record_warmup, run_query, write_manifest
 
 VARIANT = env("BENCH_VARIANT", "x")
 ROUND = int(env("BENCH_ROUND", "0"))
@@ -99,6 +99,7 @@ def main():
                         "tolerance",
                     )
                     if warmed:
+                        record_warmup(record, "tpch", VARIANT, ROUND, repetition)
                         continue
                     rep = repetition - warmups
                     record.update(

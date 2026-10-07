@@ -81,7 +81,9 @@ def median(records, name):
 def paired_ratio(baseline, candidate, metric="total_ms", samples=4000):
     """Bootstrap independent JVM rounds, retaining paired variants and repetitions."""
     if any(
-        "error" in run or run.get("correctness") not in ("exact", "tolerance")
+        "error" in run
+        or run.get("correctness") not in ("exact", "tolerance")
+        or run.get("comparison_validated") is False
         for run in baseline + candidate
     ):
         return None
@@ -95,7 +97,7 @@ def paired_ratio(baseline, candidate, metric="total_ms", samples=4000):
     ):
         return None
     hashes = {r.get("sql_sha256") for r in baseline + candidate}
-    if len(hashes) != 1:
+    if len(hashes) != 1 or None in hashes:
         return None
     left, right = defaultdict(list), defaultdict(list)
     for runs, target in ((baseline, left), (candidate, right)):
@@ -127,8 +129,19 @@ def load_results(directory):
     return records
 
 
-def validate(records, directory, suites, rounds):
+def validate(records, directory, suites, rounds, invalid_queries=None):
     failures = []
+    invalid = set() if invalid_queries is None else invalid_queries
+
+    def fail(message, query=None, suite=None):
+        failures.append(message)
+        if query is not None:
+            invalid.add(query)
+        elif suite is not None:
+            invalid.update(
+                (r["suite"], r["query"]) for r in records if r["suite"] == suite
+            )
+
     by_instance = defaultdict(list)
     by_query = defaultdict(list)
     for r in records:
@@ -136,12 +149,14 @@ def validate(records, directory, suites, rounds):
         by_instance[key].append(r)
         by_query[(r["suite"], r["query"], r["round"])].append(r)
         if "error" in r:
-            failures.append(
-                f"{r['suite']}/{r['query']} {r['variant']}: {r['error'][:300]}"
+            fail(
+                f"{r['suite']}/{r['query']} {r['variant']}: {r['error'][:300]}",
+                (r["suite"], r["query"]),
             )
         elif r.get("correctness") not in ("oracle", "exact", "tolerance"):
-            failures.append(
-                f"{r['suite']}/{r['query']} {r['variant']}: {r.get('correctness', 'unvalidated result')}"
+            fail(
+                f"{r['suite']}/{r['query']} {r['variant']}: {r.get('correctness', 'unvalidated result')}",
+                (r["suite"], r["query"]),
             )
     expected = set()
     for suite in suites:
@@ -154,29 +169,117 @@ def validate(records, directory, suites, rounds):
                     directory / "manifests" / f"{suite}-{variant}-{round_number}.json"
                 )
                 if not path.is_file():
-                    failures.append(f"Missing manifest: {path.name}")
+                    fail(f"Missing manifest: {path.name}", suite=suite)
                     continue
                 manifest = json.loads(path.read_text(encoding="utf-8"))
                 if not manifest.get("queries") or manifest.get("reps", 0) < 1:
-                    failures.append(f"Empty manifest: {path.name}")
+                    fail(f"Empty manifest: {path.name}", suite=suite)
                 for query in manifest["queries"]:
                     for rep in range(manifest["reps"]):
                         key = (suite, variant, round_number, query["query"], rep)
                         expected.add(key)
                         runs = by_instance[key]
                         if len(runs) != 1:
-                            failures.append(
-                                f"Expected one result for {key}, found {len(runs)}"
+                            fail(
+                                f"Expected one result for {key}, found {len(runs)}",
+                                (suite, query["query"]),
                             )
                         elif runs[0].get("sql_sha256") != query["sql_sha256"]:
-                            failures.append(f"SQL does not match manifest: {key}")
+                            fail(
+                                f"SQL does not match manifest: {key}",
+                                (suite, query["query"]),
+                            )
     unexpected = set(by_instance) - expected
-    failures.extend(f"Unexpected result: {key}" for key in sorted(unexpected))
+    for key in sorted(unexpected):
+        fail(f"Unexpected result: {key}", (key[0], key[3]))
     for key, runs in by_query.items():
         hashes = {r.get("sql_sha256") for r in runs}
         if len(hashes) > 1:
-            failures.append(f"Variants ran different SQL: {key}")
+            fail(f"Variants ran different SQL: {key}", (key[0], key[1]))
     return failures
+
+
+def validate_warmups(directory, suites, require=False):
+    failures, invalid = [], set()
+    for suite in suites:
+        manifests = [
+            json.loads(p.read_text())
+            for p in (directory / "manifests").glob(f"{suite}-*.json")
+        ]
+        queries = {(suite, q["query"]) for m in manifests for q in m["queries"]}
+        expected = {}
+        for manifest in manifests:
+            if "warmups" not in manifest and require:
+                failures.append(
+                    f"Missing warmup count: {suite}/{manifest['variant']}/{manifest['round']}"
+                )
+                invalid.update(queries)
+                continue
+            count = manifest.get("warmups", 0)
+            if (
+                type(count) is not int
+                or count < 0
+                or (
+                    require
+                    and suite != "fuzz"
+                    and manifest["variant"] != "spark"
+                    and count < 1
+                )
+            ):
+                failures.append(
+                    f"Invalid warmup count: {suite}/{manifest['variant']}/{manifest['round']}"
+                )
+                invalid.update(queries)
+                continue
+            for query in manifest["queries"]:
+                for iteration in range(count):
+                    key = (
+                        suite,
+                        manifest["variant"],
+                        manifest["round"],
+                        query["query"],
+                        iteration,
+                    )
+                    if key in expected:
+                        failures.append(f"Duplicate warmup manifest instance: {key}")
+                        invalid.add((suite, query["query"]))
+                    expected[key] = query["sql_sha256"]
+        observed = defaultdict(list)
+        path = directory / f"warmup-validation-{suite}.jsonl"
+        if path.is_file():
+            try:
+                for line in path.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    key = (
+                        r["suite"],
+                        r["variant"],
+                        r["round"],
+                        r["query"],
+                        r["iteration"],
+                    )
+                    observed[key].append(r)
+            except (ValueError, KeyError, TypeError) as error:
+                failures.append(f"Malformed warmup validation for {suite}: {error}")
+                invalid.update(queries)
+        for key, digest in expected.items():
+            runs = observed[key]
+            if len(runs) != 1 or runs[0].get("sql_sha256") != digest:
+                failures.append(f"Warmup missing, duplicated or SQL differs: {key}")
+                invalid.add((key[0], key[3]))
+            elif "error" in runs[0] or runs[0].get("correctness") not in (
+                "exact",
+                "tolerance",
+            ):
+                failures.append(
+                    f"Warmup failed: {key}: {runs[0].get('error',runs[0].get('correctness'))}"
+                )
+                invalid.add((key[0], key[3]))
+        for key in set(observed) - set(expected):
+            failures.append(f"Unexpected warmup: {key}")
+            invalid.update(queries)
+    return failures, invalid
 
 
 def fmt(value, digits=0):
@@ -206,7 +309,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     suites = args.suites.split(",")
     records = load_results(args.directory)
-    failures = validate(records, args.directory, suites, args.rounds)
+    invalid_queries = set()
+    failures = validate(records, args.directory, suites, args.rounds, invalid_queries)
+    warmup_failures, warmup_invalid = validate_warmups(
+        args.directory, suites, require=args.require_latest_main
+    )
+    failures.extend(warmup_failures)
+    invalid_queries.update(warmup_invalid)
+    provenance_failures = []
     if args.require_latest_main:
         provenance_failures, provenance = validate_provenance(args.directory, suites)
         failures.extend(provenance_failures)
@@ -218,6 +328,16 @@ def main(argv=None):
             print(
                 f"Main resolved once at {provenance['resolved_at_utc']}; each implementation retains its locked dependencies.\n"
             )
+    records = [
+        dict(
+            r,
+            comparison_validated=(
+                not provenance_failures
+                and (r["suite"], r["query"]) not in invalid_queries
+            ),
+        )
+        for r in records
+    ]
     grouped = defaultdict(list)
     for record in records:
         grouped[(record["suite"], record["query"], record["variant"])].append(record)
@@ -249,7 +369,7 @@ def main(argv=None):
     )
     print("These are warm-cache local-disk measurements on shared CI runners.")
     print(
-        "Comparisons containing wrong results or query errors are excluded from speedup ratios.\n"
+        "Comparisons containing wrong/missing/duplicate timed or warmup results, or invalid provenance, are excluded from speedup ratios.\n"
     )
     print("## JVM diagnostics\n")
     print(

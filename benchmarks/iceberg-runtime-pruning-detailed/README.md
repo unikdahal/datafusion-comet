@@ -70,8 +70,8 @@ comparing absolute times across suites.
   equality-delete evaluation with and without runtime pruning.
 - `layouts`: small row groups, 256 files, wide payloads, skew, partitions, updates,
   snapshots, schema and partition evolution, plus four times the normal row count.
-- `fuzz`: 500 deterministic queries per seed across 17 layouts and key types; four seeds
-  produce 2,000 distinct correctness checks for each implementation/configuration.
+- `fuzz`: 500 deterministic queries per seed across 17 layouts and key types; eight seeds
+  produce 4,000 distinct correctness checks for each implementation/configuration.
 - `tpch`: all 22 queries at scale factor 3, on natural and date-clustered Iceberg layouts.
 - `strjoin`: integer, long and string joins against up to three million build keys, with
   broadcast, shuffled hash and sort merge and with/without DISTINCT.
@@ -83,7 +83,7 @@ and decoder rebuilds expose whether a tightening bound arrived in time to save r
 ## Measurement and correctness
 
 Eight balanced rounds (two complete four-round blocks) run every native variant in a fresh JVM. Each variant occupies each
-execution position once; every ordered adjacent pair appears once. Each JVM warms every
+execution position twice; every ordered adjacent pair appears twice. Each JVM warms every
 query twice before two timed repetitions (one for TPC-H/string joins). Fuzz queries run once per
 seed for correctness and are excluded from speedup headlines. Query order is deterministically shuffled between
 passes, using the same permutation for every variant. SQL construction/analysis, physical planning and collection are timed separately;
@@ -94,6 +94,9 @@ string, date and nested values remain exact; NaNs and signed zeros use SQL value
 Only TPC-H floating-point values permit relative error `1e-9` or absolute error `1e-8`.
 The artifact reports every accepted non-identical digest. No suite is exempt from correctness;
 query errors, missing variants, missing records, duplicate records and mismatched SQL fail.
+Compact warmup validation records retain every query/pass identity, result digest and failure
+without mixing warmup timing into retained samples. A failed or incomplete warmup invalidates
+that query in all comparisons. Invalid build provenance suppresses all performance ratios.
 
 The report shows per-query medians and execution IQRs, plus main/candidate and off/on
 ratios with paired bootstrap 95% intervals. It resamples independent JVM-round medians,

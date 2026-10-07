@@ -29,7 +29,15 @@ import sys
 
 from pyspark.sql import SparkSession
 
-from lib import append, env, query_order, run_query, typed, write_manifest
+from lib import (
+    append,
+    env,
+    query_order,
+    record_warmup,
+    run_query,
+    typed,
+    write_manifest,
+)
 
 SUITE = env("BENCH_SUITE", "join")
 VARIANT = env("BENCH_VARIANT", "x")
@@ -479,6 +487,7 @@ def main():
                 queries, ROUND, iteration, warmup=True
             ):
                 warmup = run_query(spark, name, sql, ordered, confs)
+                record_warmup(warmup, SUITE, VARIANT, ROUND, iteration)
                 failed |= "error" in warmup or warmup.get("correctness") not in (
                     "exact",
                     "tolerance",
