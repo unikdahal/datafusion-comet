@@ -1,0 +1,59 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Recover the reporting stage from immutable, completed benchmark artifacts.
+name: Runtime Pruning Report Recovery
+
+on:
+  push:
+    branches: ['adaptive-report/rewrite-20261007']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN_ID: '37642915051'
+
+jobs:
+  validate-and-report:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download the completed comparison artifacts
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          pattern: matched-*
+          path: results
+          merge-multiple: true
+      - name: Validate complete coverage and summarize the original measurements
+        run: |
+          printf 'Source benchmark: https://github.com/%s/actions/runs/%s\n\n' "$GITHUB_REPOSITORY" "$SOURCE_RUN_ID" > report.md
+          python3 benchmarks/iceberg-runtime-pruning-detailed/summarize.py results >> report.md || status=$?
+          head -c 950000 report.md >> "$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: recovered-matched-report
+          path: report.md
+          if-no-files-found: error
