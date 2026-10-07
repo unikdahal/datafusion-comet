@@ -1,0 +1,32 @@
+name: MergeRows cardinality design benchmark
+
+on:
+  push:
+    branches:
+      - bench/mergerows-cardinality-designs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: mergerows-design-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
+      - name: Run design benchmark
+        working-directory: native
+        run: cargo bench -p datafusion-comet --bench mergerows_cardinality_designs --no-default-features 2>&1 | tee mergerows-design.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mergerows-cardinality-design-results
+          path: native/mergerows-design.txt
