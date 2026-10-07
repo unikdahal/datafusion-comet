@@ -1187,13 +1187,14 @@ class CometJoinSuite extends CometTestBase {
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
       SQLConf.SHUFFLE_PARTITIONS.key -> numPartitions.toString) {
       withParquetTable((0 until 10000).map(i => (i, i % 5)), "tbl_a") {
-        withParquetTable((0 until 10000).map(i => (i % 10, i + 2)), "tbl_b") {
+        // Unique keys keep the answer at 10K rows instead of materializing 10M matches.
+        withParquetTable((0 until 10000).map(i => (i, i + 2)), "tbl_b") {
           // Force a shuffle on tbl_a before broadcast so the broadcast source has
           // numPartitions partitions, not just the number of parquet files.
           val query =
             s"""SELECT /*+ BROADCAST(a) */ *
                |FROM (SELECT /*+ REPARTITION($numPartitions) */ * FROM tbl_a) a
-               |JOIN tbl_b ON a._2 = tbl_b._1""".stripMargin
+               |JOIN tbl_b ON a._1 = tbl_b._1""".stripMargin
 
           val (_, cometPlan) = checkSparkAnswerAndOperator(
             sql(query),
