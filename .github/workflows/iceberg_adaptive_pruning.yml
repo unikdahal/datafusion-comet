@@ -137,13 +137,13 @@ jobs:
           ./mvnw -B spotless:apply -Pspark-$SPARK_PROFILE
           # Keep the formatted sources so the suite still runs; fail at the end.
           git diff -- spark common > scala-format.patch
-      - name: Native Iceberg, join and broadcast transport suites
+      - name: Native Iceberg, aggregate, planner and transport suites
         env:
           SPARK_PROFILE: ${{ matrix.spark }}
         run: |
           export SPARK_HOME="$GITHUB_WORKSPACE"
           ./mvnw -B -Prelease -Pspark-$SPARK_PROFILE test -Dtest=none \
-            '-Dsuites=org.apache.comet.CometIcebergNativeSuite,org.apache.spark.sql.comet.util.UtilsSuite,org.apache.comet.exec.CometJoinSuite,org.apache.comet.exec.CometShuffleSuite,org.apache.comet.exec.DisableAQECometShuffleSuite,org.apache.spark.sql.comet.execution.shuffle.CometDiskBlockWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometNativeShuffleWriterSuite'
+            '-Dsuites=org.apache.comet.CometIcebergNativeSuite,org.apache.spark.sql.comet.util.UtilsSuite,org.apache.comet.exec.CometJoinSuite,org.apache.comet.exec.CometShuffleSuite,org.apache.comet.exec.DisableAQECometShuffleSuite,org.apache.spark.sql.comet.execution.shuffle.CometDiskBlockWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometNativeShuffleWriterSuite,org.apache.comet.exec.CometAggregateSuite,org.apache.comet.rules.CometScanRuleSuite,org.apache.comet.rules.CometScanSchemeFallbackSuite,org.apache.comet.rules.CometExecRuleSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShufflePlanningSuite'
       - uses: actions/upload-artifact@v7
         if: always()
         with:
