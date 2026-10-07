@@ -172,9 +172,8 @@ subset of the total. Scan compute time measures active polling/adaptation;
 producer metrics measure their own operators. Poll, error and drop paths report
 available metric deltas without retaining producer state.
 
-The comparison against the existing runtime implementation is pending CI.
-No speedup or regression result is claimed here. The
-[benchmark harness](https://github.com/unikdahal/datafusion-comet/blob/adaptive-bench/rewrite-20261006/benchmarks/iceberg-runtime-pruning-detailed/README.md) provides
+Compare the existing and rewritten runtime implementations with the
+[benchmark harness](https://github.com/unikdahal/datafusion-comet/blob/adaptive-bench/rewrite-20261007-transport-fixed/benchmarks/iceberg-runtime-pruning-detailed/README.md). It provides
 shared generated fixtures, a plain Spark correctness oracle, four balanced rounds
 in fresh JVMs, paired timing intervals, separate planning/execution timings and
 reader counters. Six suites cover sorted selective queries, unsorted/control
@@ -207,4 +206,6 @@ and one is a manual buffer benchmark. The no-default-features run passed 692
 tests with one ignored. Comet workspace Clippy checked all targets with warnings
 denied; Iceberg library/test Clippy used its configured nightly toolchain with
 warnings denied. Rust formatting, Scala formatting and whitespace checks passed.
-Spark 3.5/4.1 validation and the matched benchmark are separate CI verdicts.
+Integration validation passed on Spark 3.5 and 4.1, with 196 tests per version:
+123 native Iceberg tests, 65 join tests and eight broadcast transport tests.
+The matched benchmark has a separate correctness and performance verdict.
