@@ -42,7 +42,7 @@
   }
  ],
  "tasks": [
-  "rp-f4-impl-r1"
+  "rp-f4-impl-r2"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"

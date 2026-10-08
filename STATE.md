@@ -70,3 +70,4 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - Comet 434d18333 GREEN (run 37761771346, all jobs). Both impl branches now remotely validated.
 - F4 impl dispatched (codex, rp-f4-impl-r1).
 - Bench 37758359536 still running; when done: analyze + pin bench to comet 434d18333 / iceberg 1e3f2a868 (or later head if F4 lands green first).
+- 12:07 UTC: F4 re-dispatched as rp-f4-impl-r2 (r1 hit codex limit).
