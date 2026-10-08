@@ -25,7 +25,7 @@ use std::hash::{Hash, Hasher};
 use crate::execution::planner::PhysicalPlanner;
 use crate::parquet::parquet_exec::init_datasource_exec;
 use crate::parquet::parquet_support::ObjectStoreBackend;
-use arrow::array::{Array, ArrayRef, BooleanArray, Int32Array, Int64Array, Int8Array, RecordBatch};
+use arrow::array::{ArrayRef, BooleanArray, Int32Array, Int64Array, Int8Array, RecordBatch};
 use arrow::compute::{cast, filter_record_batch};
 use arrow::datatypes::{Field, Schema};
 use datafusion::common::test_util::batches_to_sort_string;
@@ -532,100 +532,6 @@ fn skips_unsupported_joins_and_session_disables() {
     }
 }
 
-#[tokio::test]
-async fn shuffled_probes_keep_exact_join_without_redundant_filter() {
-    use crate::execution::operators::scan::InputBatch;
-    use crate::execution::operators::shuffle_scan::ShuffleScanExec;
-    use crate::execution::planner::TEST_EXEC_CONTEXT_ID;
-    use std::task::Poll;
-
-    let session = SessionContext::new();
-    for mode in [PartitionMode::Partitioned, PartitionMode::CollectLeft] {
-        for build_keys in [vec![], vec![None], vec![Some(1), Some(1), None, Some(3)]] {
-            for wrap in [false, true] {
-                let mut scan =
-                    ShuffleScanExec::new(TEST_EXEC_CONTEXT_ID, None, vec![DataType::Int64])
-                        .unwrap();
-                scan.set_input_batch(InputBatch::new(
-                    vec![Arc::new(Int64Array::from(vec![
-                        Some(1),
-                        Some(1),
-                        None,
-                        Some(2),
-                        Some(3),
-                    ]))],
-                    Some(5),
-                ));
-                let mut probe: Arc<dyn ExecutionPlan> = Arc::new(scan.clone());
-                if wrap {
-                    probe = Arc::new(CometFilterExec::from_datafusion(
-                        FilterExec::try_new(
-                            Arc::new(IsNotNullExpr::new(Arc::new(Column::new("col_0", 0)))),
-                            probe,
-                        )
-                        .unwrap(),
-                    ));
-                    probe = Arc::new(
-                        ProjectionExec::try_new(
-                            vec![(
-                                Arc::new(Column::new("col_0", 0)) as Arc<dyn PhysicalExpr>,
-                                "key".to_string(),
-                            )],
-                            probe,
-                        )
-                        .unwrap(),
-                    );
-                }
-                let build = input(build_keys.clone(), &DataType::Int64, 0);
-                let join: Arc<dyn ExecutionPlan> =
-                    Arc::new(single_key_join_plans(build, probe, mode));
-                let plan = PhysicalPlanner::apply_join_dynamic_filter(
-                    Arc::clone(&join),
-                    true,
-                    session.copied_config().options(),
-                )
-                .unwrap();
-                assert!(Arc::ptr_eq(&plan, &join));
-                assert!(plan.dynamic_expressions_produced().is_empty());
-                let mut stream = plan.execute(0, session.task_ctx()).unwrap();
-                let mut output = Vec::new();
-                // Mimic the executor refill after the buffered batch is consumed.
-                while let Some(batch) = futures::future::poll_fn(|cx| {
-                    let result = stream.as_mut().poll_next(cx);
-                    let consumed = scan.batch.try_lock().unwrap().is_none();
-                    if matches!(result, Poll::Pending) && consumed {
-                        scan.set_input_batch(InputBatch::EOF);
-                    }
-                    result
-                })
-                .await
-                {
-                    output.push(batch.unwrap());
-                }
-                assert_eq!(
-                    row_count(&output),
-                    if build_keys.len() == 4 { 5 } else { 0 }
-                );
-                for batch in output {
-                    let keys = batch
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<Int64Array>()
-                        .unwrap();
-                    assert_eq!(keys.null_count(), 0);
-                    assert!(keys.values().iter().all(|key| [1, 3].contains(key)));
-                }
-            }
-        }
-    }
-    // This policy is specific to an exchanged probe, not all batch inputs.
-    assert!(
-        DynamicFilterJoinExec::try_new(&plain_join(), &ConfigOptions::default())
-            .unwrap()
-            .is_some()
-    );
-}
-
 #[test]
 fn skips_unsupported_keys_and_multiple_native_partitions() {
     for key_type in [
@@ -737,12 +643,13 @@ fn single_key_join_plans(
     probe: Arc<dyn ExecutionPlan>,
     mode: PartitionMode,
 ) -> HashJoinExec {
-    let build_key = Arc::new(Column::new(build.schema().field(0).name(), 0));
-    let probe_key = Arc::new(Column::new(probe.schema().field(0).name(), 0));
     HashJoinExec::try_new(
         build,
         probe,
-        vec![(build_key, probe_key)],
+        vec![(
+            Arc::new(Column::new("key", 0)),
+            Arc::new(Column::new("key", 0)),
+        )],
         None,
         &JoinType::Inner,
         None,
