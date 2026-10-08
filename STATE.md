@@ -136,3 +136,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Fast CI lane merged into Comet integration (681bdcbff). ws-* branches now ~30 min CI.
 - Decimal bench: f_dec queries 0.96x -> 2.06-5.19x (I/O 588->12 MiB). B4/B6 targeted bench 7c2dd47e8 started.
 - 19:58 UTC heartbeat: iceberg 0c3d9eede green; batching Comet pin bump with ws-b3/ws-b2 merges. Cancelled stale ws-b3 full run.
+- R4: gemini claimed CI green but clippy failed (ColumnStatsSelection dead after making include_column_stats cfg(test)). Lead decision: stats retention is intended public API → restored pub (c4e8a66e9); split kept; independent pure-extraction review running. LESSON: always verify agent CI claims with gh.

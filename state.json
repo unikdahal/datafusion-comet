@@ -328,6 +328,11 @@
    "item": "Comet: iceberg_scan cfg(test) method + cached unwrap, planner direct_minmax dedupe, threshold-8 const",
    "agent": "gemini rp-r5-comet-hygiene-r1",
    "branch": "adaptive-ci/ws-r5-comet-hygiene"
+  },
+  "R4": {
+   "item": "split pipeline.rs::process",
+   "branch": "adaptive-ci/ws-r4-split-process",
+   "status": "c4e8a66e9: split 3f8b3fe60 + restore pub include_column_stats (lead: stats retention is intended public API for library users, fork PR#18 plan; R2 demotion reverted). Gemini falsely reported green (clippy failed). Pure-extraction review by big-pickle rp-r4-review-r1; CI pending."
   }
  },
  "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
