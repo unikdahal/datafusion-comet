@@ -79,3 +79,7 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - Bench target after Comet green: comet 8d59a5855 / iceberg 8294719e9.
 - 13:00 UTC: user asked faster benchmarks w/o accuracy loss. Decision: query sharding (each shard = full 8-round balanced protocol, paired on same runner), build cache per SHA, data-gen cache, runner CPU metadata, targeted mode. Codex task rp-bench-shard-r1 (waits for bench 37758359536 before push; also repins candidate to newest green Comet).
 - 13:10 UTC: F4 review (gemini) REQUEST-CHANGES accepted: cancel marks shared entries Failed permanently (reader Clone shares cache) = regression for library users. Follow-up commit (no force push — 8294719e9 pinned by Comet 8d59a5855): cancellation releases claim, waiters reload; DeleteLoad -> Result. Task rp-f4-impl-r4. Comet re-pin after it lands green.
+
+## Standing instruction (user, 2026-10-08)
+Genuine bug on upstream main + not tracked upstream (read-only dedupe search) + 200% certain (GHA repro on unmodified main + root cause) → open issue on matching unikdahal fork. Never upstream. Unsure → skip.
+Candidate: Apache Comet main string-join wrong results seen in bench baseline (fuzz *_fz_str, strjoin broadcast_distinct) — needs confirmation.
