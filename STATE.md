@@ -116,3 +116,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 16:00 UTC: sharded campaign 37788815352 done in 1h46m. Candidate 0 failures; baseline string-join failures again. Delta-ledger task rp-delta-37788815352-r1 (gemini).
 - 16:20 UTC: delta analysis 37788815352 vs 37758359536: shuffle-probe revert confirmed beneficial; most small "regressions" were noise. POLICY: regression requires CI<1 in 2 campaigns. B6 added (safe float all-match).
 - 16:45 UTC: P1 adaptive bypass landed c739c322e (CI green). Targeted bench 21f15844d pushed. B1 decimal impl started (codex).
+- 16:40 UTC: B1 decimal pushed 901348bea/1bfd6239b; uncommitted Spark lineage-guard WIP in comet-decimal; codex limited until 17:07 UTC -> resume.

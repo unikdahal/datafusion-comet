@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T16:45Z",
+ "updated": "2026-10-08T16:40Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "c739c322ea591cd40f23fc44c164f18ab6d38499",
@@ -167,7 +167,7 @@
   }
  ],
  "agent_limits": {
-  "codex": "usage limit until 17:34 IST (12:04 UTC) 2026-10-08"
+  "codex": "usage limit until 17:07 UTC 2026-10-08"
  },
  "next": [
   "on comet green: after bench 37758359536 finishes, pin bench to comet 434d18333 / iceberg 1e3f2a868",
@@ -206,7 +206,7 @@
   {
    "id": "B1",
    "item": "string/decimal join-key pruning eligibility",
-   "status": "phase1 decimal impl rp-b1-decimal-r1 (codex)"
+   "status": "phase1 decimal: pushed 901348bea+1bfd6239b (CI 37808593789 running). UNCOMMITTED WIP in rp-work/comet-decimal: Spark-side decimal key lineage guard (operators.scala isDirectDecimalKey) + tests. Codex limited; resume after 17:07 UTC with continuation task."
   },
   {
    "id": "B2",
