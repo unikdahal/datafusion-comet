@@ -71,3 +71,9 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - F4 impl dispatched (codex, rp-f4-impl-r1).
 - Bench 37758359536 still running; when done: analyze + pin bench to comet 434d18333 / iceberg 1e3f2a868 (or later head if F4 lands green first).
 - 12:07 UTC: F4 re-dispatched as rp-f4-impl-r2 (r1 hit codex limit).
+
+## 2026-10-08 ~12:50 UTC
+- F4 implemented iceberg 8294719e9 (DeleteLoad future, abort on drop; gated tests pos+eq). CI 37775247993 GREEN. Lead checked: only error paths drop DeleteLoad early.
+- Comet 8d59a5855 pins iceberg 8294719e9; CI running.
+- F4 upstream-style review (gemini rp-f4-review-r1) running — key Q: abort mid-load leaving half-populated delete state visible as complete?
+- Bench target after Comet green: comet 8d59a5855 / iceberg 8294719e9.
