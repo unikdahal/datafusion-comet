@@ -110,6 +110,62 @@ fn flatten_or<'a>(expr: &'a Arc<dyn PhysicalExpr>, arms: &mut Vec<&'a Arc<dyn Ph
     }
 }
 
+/// Whether an expression evaluates to literal boolean false.
+fn is_literal_false(expr: &Arc<dyn PhysicalExpr>) -> bool {
+    expr.downcast_ref::<Literal>()
+        .is_some_and(|lit| matches!(lit.value(), ScalarValue::Boolean(Some(false))))
+}
+
+/// Whether the conjunct provably implies `column IS NULL` on the probe column.
+fn arm_implies_null(expr: &Arc<dyn PhysicalExpr>, probe_column_index: usize) -> bool {
+    if let Some(null) = expr.downcast_ref::<IsNullExpr>() {
+        return null
+            .arg()
+            .downcast_ref::<Column>()
+            .is_some_and(|col| col.index() == probe_column_index);
+    }
+    if let Some(binary) = expr.downcast_ref::<BinaryExpr>() {
+        match binary.op() {
+            Operator::And => {
+                arm_implies_null(binary.left(), probe_column_index)
+                    || arm_implies_null(binary.right(), probe_column_index)
+            }
+            Operator::Or => {
+                if is_literal_false(binary.left()) {
+                    arm_implies_null(binary.right(), probe_column_index)
+                } else if is_literal_false(binary.right()) {
+                    arm_implies_null(binary.left(), probe_column_index)
+                } else {
+                    arm_implies_null(binary.left(), probe_column_index)
+                        && arm_implies_null(binary.right(), probe_column_index)
+                }
+            }
+            Operator::Eq => {
+                let left_col = binary
+                    .left()
+                    .downcast_ref::<Column>()
+                    .is_some_and(|column| column.index() == probe_column_index);
+                let right_col = binary
+                    .right()
+                    .downcast_ref::<Column>()
+                    .is_some_and(|column| column.index() == probe_column_index);
+                let left_null = binary
+                    .left()
+                    .downcast_ref::<Literal>()
+                    .is_some_and(|value| value.value().is_null());
+                let right_null = binary
+                    .right()
+                    .downcast_ref::<Literal>()
+                    .is_some_and(|value| value.value().is_null());
+                (left_col && right_null) || (right_col && left_null)
+            }
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
 /// Whether the leftmost conjunct of `arm` is `column = literal` on the probe column.
 fn starts_with_equality(
     arm: &Arc<dyn PhysicalExpr>,
@@ -122,25 +178,36 @@ fn starts_with_equality(
     match binary.op() {
         Operator::And => starts_with_equality(binary.left(), probe_column_index, literal),
         Operator::Eq => {
-            binary
+            (binary
                 .left()
                 .downcast_ref::<Column>()
                 .is_some_and(|column| column.index() == probe_column_index)
                 && binary
                     .right()
                     .downcast_ref::<Literal>()
-                    .is_some_and(|value| value.value() == literal)
+                    .is_some_and(|value| value.value() == literal))
+                || (binary
+                    .right()
+                    .downcast_ref::<Column>()
+                    .is_some_and(|column| column.index() == probe_column_index)
+                    && binary
+                        .left()
+                        .downcast_ref::<Literal>()
+                        .is_some_and(|value| value.value() == literal))
         }
         _ => false,
     }
 }
 
-/// The two OR shapes DataFusion's TopK produces, translated on the first sort key only:
+/// The OR shapes DataFusion's TopK produces, translated on the first sort key only:
 ///
 /// * single key: `key < t` or `key IS NULL OR key < t` (also `>`), kept exact;
 /// * several keys: those arms followed by one `key = t AND ...` arm per further key. Every
 ///   further arm implies `key = t`, so the first key alone is bounded by `key <= t`
-///   (`>=` for descending), plus `OR key IS NULL` when nulls sort first.
+///   (`>=` for descending), plus `OR key IS NULL` when nulls sort first;
+/// * nulls-first all-null heap: DataFusion publishes
+///   `false OR ((key IS NULL OR key = NULL) AND ...)` where every arm implies `key IS NULL`.
+///   This is safely translated to `is_null(key)`.
 ///
 /// Any other OR fails open.
 fn extract_disjunction(
@@ -151,23 +218,39 @@ fn extract_disjunction(
     let mut arms = Vec::new();
     flatten_or(binary.left(), &mut arms);
     flatten_or(binary.right(), &mut arms);
-    let mut arms = arms.into_iter();
 
-    let mut first = arms.next()?;
-    let mut with_null = false;
-    if let Some(null) = first.downcast_ref::<IsNullExpr>() {
-        if null.arg().downcast_ref::<Column>()?.index() != probe_column_index {
-            return None;
-        }
-        with_null = true;
-        first = arms.next()?;
+    let arms: Vec<_> = arms
+        .into_iter()
+        .filter(|arm| !is_literal_false(arm))
+        .collect();
+
+    if arms.is_empty() {
+        return Some(Predicate::AlwaysFalse);
     }
-    let comparison = first.downcast_ref::<BinaryExpr>()?;
+
+    if arms
+        .iter()
+        .all(|arm| arm_implies_null(arm, probe_column_index))
+    {
+        return Some(Reference::new(iceberg_field_name).is_null());
+    }
+
+    let (null_arms, value_arms): (Vec<_>, Vec<_>) = arms
+        .into_iter()
+        .partition(|arm| arm_implies_null(arm, probe_column_index));
+
+    let with_null = !null_arms.is_empty();
+
+    let comparison = value_arms.first()?.downcast_ref::<BinaryExpr>()?;
     if !matches!(comparison.op(), Operator::Lt | Operator::Gt) {
         return None;
     }
+    let column = comparison.left().downcast_ref::<Column>()?;
+    if column.index() != probe_column_index {
+        return None;
+    }
     let threshold = comparison.right().downcast_ref::<Literal>()?;
-    let rest: Vec<_> = arms.collect();
+    let rest = &value_arms[1..];
     let bound = if rest.is_empty() {
         extract_bound(comparison, probe_column_index, iceberg_field_name)?
     } else {
@@ -175,10 +258,6 @@ fn extract_disjunction(
             .iter()
             .all(|arm| starts_with_equality(arm, probe_column_index, threshold.value()))
         {
-            return None;
-        }
-        let column = comparison.left().downcast_ref::<Column>()?;
-        if column.index() != probe_column_index {
             return None;
         }
         let datum = scalar_to_datum(threshold.value())?;
