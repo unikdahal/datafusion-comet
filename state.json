@@ -46,7 +46,6 @@
  ],
  "tasks": [
   "rp-bench-shard-r1",
-  "rp-strjoin-repro-r1",
   "rp-bench-analysis-r2"
  ],
  "missing_evidence": [
@@ -97,7 +96,20 @@
   {
    "id": "M1",
    "status": "rca-done-awaiting-gha-proof",
-   "summary": "Apache Comet main wrong results: broadcast batch coalescing (Utils.coalesceBroadcastBatches ~383 / serializeBatches ~270) appends sliced var-width vectors with offset[0]>0 via VectorSchemaRootAppender -> corrupt first row per batch (dropped join rows) + quadratic buffer growth (OversizedAllocationException). Fork fix 422cb76f1 (normalize via root.slice). Not tracked upstream or on fork (searched). Repro task rp-strjoin-repro-r1 (branches repro/broadcast-sliced-offsets-{main,fix}). If confirmed -> open issue on unikdahal/datafusion-comet."
+   "summary": "Apache Comet main wrong results: broadcast batch coalescing (Utils.coalesceBroadcastBatches ~383 / serializeBatches ~270) appends sliced var-width vectors with offset[0]>0 via VectorSchemaRootAppender -> corrupt first row per batch (dropped join rows) + quadratic buffer growth (OversizedAllocationException). Fork fix 422cb76f1 (normalize via root.slice). Not tracked upstream or on fork (searched). Repro task rp-strjoin-repro-r1 (branches repro/broadcast-sliced-offsets-{main,fix}). If confirmed -> open issue on unikdahal/datafusion-comet.",
+   "repro": {
+    "A_main_tests_only": {
+     "branch": "repro/broadcast-sliced-offsets-main",
+     "sha": "46a30c839",
+     "run": 37792317030
+    },
+    "B_with_fix": {
+     "branch": "repro/broadcast-sliced-offsets-fix",
+     "sha": "c7b1b70b7",
+     "run": 37792322262
+    },
+    "note": "gemini task crashed after pushing; lead watching runs"
+   }
   }
  ],
  "agent_limits": {
