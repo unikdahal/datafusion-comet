@@ -30,6 +30,7 @@ jobs:
           set -o pipefail
           cargo bench -p datafusion-comet --bench mergerows_cardinality_designs --no-default-features 2>&1 | tee mergerows-design.txt
           cargo bench -p datafusion-comet --bench mergerows_cardinality_adaptive --no-default-features 2>&1 | tee mergerows-adaptive.txt
+          cargo bench -p datafusion-comet --bench mergerows_cardinality_scaling --no-default-features 2>&1 | tee mergerows-scaling.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -37,3 +38,4 @@ jobs:
           path: |
               native/mergerows-design.txt
               native/mergerows-adaptive.txt
+              native/mergerows-scaling.txt
