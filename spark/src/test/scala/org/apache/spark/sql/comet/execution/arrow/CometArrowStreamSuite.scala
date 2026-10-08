@@ -44,7 +44,7 @@ import org.apache.spark.sql.types.{ArrayType, BooleanType, ByteType, CalendarInt
 import org.apache.spark.sql.vectorized.{ColumnarArray, ColumnarBatch, ColumnarMap, ColumnVector}
 import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
 
-import org.apache.comet.vector.{CometPlainVector, CometVector, NativeUtil}
+import org.apache.comet.vector.{CometPlainVector, CometStructVector, CometVector, NativeUtil}
 
 /**
  * Direct tests for [[CometArrowStream.reconcileStreamSchema]]. The end-to-end regression that
@@ -1177,6 +1177,233 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
       } finally batch.close()
     } finally {
       input.close()
+      allocator.close()
+    }
+  }
+
+  test("columnar struct row fallback trims validated trailing fields") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceType = StructType(
+      Seq(
+        StructField("id", IntegerType),
+        StructField("items", ArrayType(IntegerType)),
+        StructField("added", IntegerType)))
+    val outputType = StructType(
+      Seq(StructField("id", IntegerType), StructField("items", ArrayType(IntegerType))))
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    val partition = new OnHeapColumnVector(2, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](partition), 2)
+    try {
+      partition.putNotNull(0)
+      partition.getChild(0).putInt(0, 7)
+      val items = partition.getChild(1)
+      items.putArray(0, 0, 1)
+      items.getChild(0).putInt(0, 11)
+      partition.getChild(2).putInt(0, 99)
+      partition.putNull(1)
+
+      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      try {
+        batch.numRows() shouldBe 2
+        val first = batch.column(0).getStruct(0)
+        first.numFields shouldBe 2
+        first.getInt(0) shouldBe 7
+        first.getArray(1).getInt(0) shouldBe 11
+        batch.column(0).isNullAt(1) shouldBe true
+      } finally batch.close()
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("non-Spark struct vector row fallback trims validated trailing fields") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceType =
+      StructType(Seq(StructField("id", IntegerType), StructField("added", IntegerType)))
+    val outputType = StructType(Seq(StructField("id", IntegerType)))
+    val sourceField = Utils.toArrowField("partition", sourceType, nullable = true, "UTC")
+    val sourceVector = sourceField.createVector(allocator).asInstanceOf[StructVector]
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    try {
+      sourceVector.allocateNew()
+      sourceVector.setIndexDefined(0)
+      sourceVector.getChildByOrdinal(0).asInstanceOf[IntVector].setSafe(0, 7)
+      sourceVector.getChildByOrdinal(1).asInstanceOf[IntVector].setSafe(0, 99)
+      sourceVector.setNull(1)
+      sourceVector.setValueCount(2)
+      sourceVector.getChildByOrdinal(0).setValueCount(2)
+      sourceVector.getChildByOrdinal(1).setValueCount(2)
+
+      // CometDecodedVector snapshots the Arrow null count at construction.
+      val inputVector = new CometStructVector(sourceVector, new MapDictionaryProvider())
+      val input = new ColumnarBatch(Array[ColumnVector](inputVector), 2)
+      try {
+        inputVector.hasNull shouldBe true
+        val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+        try {
+          batch.column(0).getStruct(0).getInt(0) shouldBe 7
+          batch.column(0).isNullAt(1) shouldBe true
+        } finally batch.close()
+      } finally input.close()
+    } finally {
+      sourceVector.close()
+      allocator.close()
+    }
+  }
+
+  test("equal-width columnar structs allow renamed nested fields") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceInner = StructType(Seq(StructField("col-physical", IntegerType)))
+    val outputInner = StructType(Seq(StructField("id", IntegerType)))
+    val sourceType = StructType(Seq(StructField("inner", sourceInner)))
+    val outputType = StructType(Seq(StructField("inner", outputInner)))
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    val partition = new OnHeapColumnVector(1, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](partition), 1)
+    try {
+      partition.putNotNull(0)
+      val inner = partition.getChild(0)
+      inner.putNotNull(0)
+      inner.getChild(0).putInt(0, 42)
+
+      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      try {
+        batch.column(0).getStruct(0).getStruct(0, 1).getInt(0) shouldBe 42
+      } finally batch.close()
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("nested struct column slices handle discontiguous child runs") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val elementType = StructType(Seq(StructField("id", IntegerType)))
+    val arrayType = ArrayType(elementType, containsNull = false)
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("items", arrayType))), "UTC")
+    val items = new OnHeapColumnVector(5, arrayType)
+    val input = new ColumnarBatch(Array[ColumnVector](items), 5)
+    try {
+      // Leave gaps in the child vector so writeChildRuns dispatches multiple slices to the same
+      // nested StructWriter. Schema validation is batch-scoped and must not depend on run shape.
+      items.putArray(0, 0, 1)
+      items.putArray(1, 1, 0)
+      items.putArray(2, 2, 1)
+      items.putNull(3)
+      items.putArray(4, 4, 1)
+      val elements = items.getChild(0)
+      Seq((0, 10), (2, 20), (4, 30)).foreach { case (row, value) =>
+        elements.putNotNull(row)
+        elements.getChild(0).putInt(row, value)
+      }
+
+      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      try {
+        batch.column(0).getArray(0).getStruct(0, 1).getInt(0) shouldBe 10
+        batch.column(0).getArray(1).numElements() shouldBe 0
+        batch.column(0).getArray(2).getStruct(0, 1).getInt(0) shouldBe 20
+        batch.column(0).isNullAt(3) shouldBe true
+        batch.column(0).getArray(4).getStruct(0, 1).getInt(0) shouldBe 30
+      } finally batch.close()
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("nested array structs cannot trim trailing fields") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceInner =
+      StructType(Seq(StructField("id", IntegerType), StructField("added", IntegerType)))
+    val outputInner = StructType(Seq(StructField("id", IntegerType)))
+    val sourceType = ArrayType(sourceInner, containsNull = false)
+    val outputType = ArrayType(outputInner, containsNull = false)
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("items", outputType))), "UTC")
+    val items = new OnHeapColumnVector(1, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](items), 1)
+    try {
+      items.putArray(0, 0, 1)
+      val element = items.getChild(0)
+      element.putNotNull(0)
+      element.getChild(0).putInt(0, 1)
+      element.getChild(1).putInt(0, 2)
+
+      val error = intercept[IllegalArgumentException] {
+        CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      }
+      error.getMessage should include("leading fields are incompatible")
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("columnar struct trimming allows renamed compatible retained fields") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceType =
+      StructType(Seq(StructField("physical_id", IntegerType), StructField("added", IntegerType)))
+    val outputType = StructType(Seq(StructField("id", IntegerType)))
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    val partition = new OnHeapColumnVector(1, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](partition), 1)
+    try {
+      partition.putNotNull(0)
+      partition.getChild(0).putInt(0, 7)
+      partition.getChild(1).putInt(0, 99)
+
+      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      try batch.column(0).getStruct(0).getInt(0) shouldBe 7
+      finally batch.close()
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("columnar struct trimming rejects an incompatible retained type") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val sourceType =
+      StructType(Seq(StructField("id", StringType), StructField("added", IntegerType)))
+    val outputType = StructType(Seq(StructField("id", IntegerType)))
+    val arrowSchema =
+      Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
+    val partition = new OnHeapColumnVector(1, sourceType)
+    val input = new ColumnarBatch(Array[ColumnVector](partition), 1)
+    try {
+      partition.putNotNull(0)
+      partition.getChild(0).putByteArray(0, UTF8String.fromString("wrong").getBytes)
+      partition.getChild(1).putInt(0, 1)
+      val error = intercept[IllegalArgumentException] {
+        CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      }
+      error.getMessage should include("leading fields are incompatible")
+    } finally {
+      input.close()
+      allocator.close()
+    }
+  }
+
+  test("row struct writers require exact width") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val structType = StructType(Seq(StructField("id", IntegerType)))
+    val field = Utils.toArrowField("partition", structType, nullable = true, "UTC")
+    val vector = field.createVector(allocator).asInstanceOf[StructVector]
+    val writer = ArrowWriter.createFieldWriter(vector)
+    val input = new GenericInternalRow(Array[Any](new GenericInternalRow(Array[Any](1, 2))))
+    try {
+      val error = intercept[IllegalArgumentException] {
+        writer.write(input, 0)
+      }
+      error.getMessage should include("with 1 fields from 2 fields")
+    } finally {
+      vector.close()
       allocator.close()
     }
   }
