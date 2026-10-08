@@ -93,11 +93,12 @@
  ],
  "tasks": [
   "rp-w1b-string-r1",
-  "rp-w5-upstream-audit-r2",
-  "sonnet:ws-b4-fix+rebase",
-  "sonnet:ws-fast-ci-fix",
-  "sonnet:ws-b3+ws-b2-shepherd",
-  "bench c43593010 decimal targeted"
+  "rp-r23-iceberg-refactor-r1",
+  "rp-r5-comet-hygiene-r1",
+  "sonnet:ws-b4",
+  "sonnet:ws-fast-ci",
+  "sonnet:ws-b3+ws-b2",
+  "bench c43593010"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -236,6 +237,21 @@
    "id": "B6",
    "item": "restore float all-match fast path when provably safe (nan_count==0, literal not NaN, bounds don't straddle +-0)",
    "status": "low priority"
+  },
+  {
+   "id": "R1",
+   "item": "unify join-key type allowlist (6+ places, inconsistent: Scala TimestampNTZ vs native micros) + agreement test",
+   "status": "after W1b string"
+  },
+  {
+   "id": "R4",
+   "item": "split pipeline.rs::process (681 lines)",
+   "status": "after B4 merge"
+  },
+  {
+   "id": "R6",
+   "item": "separate 9 behavior changes into own units; 26-PR upstream split plan",
+   "status": "later"
   }
  ],
  "policy": {
@@ -273,7 +289,8 @@
   },
   "W5": {
    "item": "upstreamability/refactor audit (read-only)",
-   "agent": "opencode/big-pickle rp-w5-upstream-audit-r2"
+   "agent": "opencode/big-pickle rp-w5-upstream-audit-r2",
+   "status": "DONE (reports/upstream-refactor-audit-r1.md: 40 items, 26 PR units)"
   },
   "W6": {
    "item": "B3 NULLS FIRST Top-K translation (Comet)",
@@ -291,6 +308,16 @@
    "item": "B1 phase 2 string keys",
    "agent": "codex rp-w1b-string-r1",
    "branch": "adaptive-ci/ws-b1-string (both repos)"
+  },
+  "R23": {
+   "item": "iceberg: remove cfg(test) semaphore from DeleteFilter, decoder expects->errors, named consts, pub API shrink (check Comet usage)",
+   "agent": "gemini rp-r23-iceberg-refactor-r1",
+   "branch": "adaptive-ci/ws-r23-iceberg-hygiene"
+  },
+  "R5": {
+   "item": "Comet: iceberg_scan cfg(test) method + cached unwrap, planner direct_minmax dedupe, threshold-8 const",
+   "agent": "gemini rp-r5-comet-hygiene-r1",
+   "branch": "adaptive-ci/ws-r5-comet-hygiene"
   }
  },
  "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback"
