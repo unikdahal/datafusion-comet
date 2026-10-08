@@ -1,7 +1,7 @@
 {
- "updated": "2026-10-08T10:05Z",
+ "updated": "2026-10-08T10:30Z",
  "heads": {
-  "iceberg": "5f326d1035e0d0692bb2c934d22c35496481dd8c",
+  "iceberg": "1e3f2a8689fc5a8aa203405411e791770d2cfc0e",
   "comet": "92bba61b68ec44f305e0519f507cd02ae4546ee0",
   "bench": "163b5c235e914f8a22af834e26e85b0a6a8ea6b0",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
@@ -14,9 +14,9 @@
    "investigation": "rp-comet-integ-fail-r1"
   },
   "iceberg_validation": {
-   "run": 37760274980,
-   "sha": "5f326d103",
-   "result": "fmt FAILED (2 rustfmt diffs, fixed locally b3b63ba76); clippy/tests running"
+   "sha": "1e3f2a868",
+   "status": "running",
+   "note": "previous 5f326d103 failed fmt + clippy float_literal_f32_fallback; fixed by amend"
   }
  },
  "bench": [
@@ -42,9 +42,7 @@
    "status": "running"
   }
  ],
- "tasks": [
-  "rp-comet-integ-fail-r1g"
- ],
+ "tasks": [],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
  ],
@@ -83,15 +81,20 @@
    "id": "F7",
    "status": "deferred-low",
    "summary": "StrictMetricsEvaluator not_eq contains_nans_only arm returns MUST_MATCH even for NaN literal (evaluator-level; reader now guarded). Candidate upstream-quality follow-up."
+  },
+  {
+   "id": "F8",
+   "status": "decided-revert",
+   "summary": "9cccd0676 broke CometJoinSuite 'join dynamic filter prunes probe rows: SHUFFLE_HASH, AQE=true' (3.5+4.1). Upstream behavior + upstream test; no perf evidence. Reverted locally 72981e4c3. F5/F6 moot."
   }
  ],
- "pending_push": {
-  "repo": "iceberg",
-  "worktree": "rp-work/iceberg-nanfix",
-  "local_commit": "0703d53f5 (rustfmt + is_floating_type simplification per review)",
-  "when": "after run 37760274980 clippy+tests finish (push cancels it)"
- },
  "agent_limits": {
   "codex": "usage limit until 17:34 IST (12:04 UTC) 2026-10-08"
+ },
+ "pending_push": {
+  "repo": "comet",
+  "worktree": "rp-work/comet",
+  "local_commit": "72981e4c3 revert of 9cccd0676",
+  "plan": "when iceberg CI on 1e3f2a868 green: add commit bumping native/Cargo.toml + Cargo.lock iceberg rev to 1e3f2a868, push both together (one Comet CI run)"
  }
 }

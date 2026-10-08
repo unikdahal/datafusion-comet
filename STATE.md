@@ -53,3 +53,8 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - F1 fix pushed iceberg 5f326d103 (reader guard: float/double Binary+Set preds keep row filter; unit + e2e NaN equality-delete tests). CI 37760274980: fmt FAILED (line width) → local fix b3b63ba76 in rp-work/iceberg-nanfix, PUSH AFTER clippy/tests of 37760274980 finish.
 - Codex hit usage limit (resets 12:04 UTC). Reassigned: integration diagnosis → gemini (rp-comet-integ-fail-r1g); float-guard upstream review → gemini (rp-float-guard-review-r1).
 - Float guard review (gemini, rp-float-guard-review-r1): correctness APPROVED (only skip site; unary NaN preds agree; nested ok). Applied: is_floating_type simplification → local 0703d53f5 (amended fmt commit). Declined: test import change (inline path is file convention). Deferred F7: evaluator NaN-literal arm.
+
+## 2026-10-08 10:30 UTC
+- Comet integration failure root cause (gemini, verified by lead): 9cccd0676 disables upstream-tested shuffle-probe dynamic filter → CometJoinSuite SHUFFLE_HASH/AQE assertions fail. DECISION: revert (local 72981e4c3); do not weaken test. Re-propose only as benchmarked cost policy. Bench run 37758359536 includes 9cccd0676 → its join numbers = "no shuffle-probe filter" variant; useful A/B evidence.
+- iceberg float guard: 5f326d103 failed fmt + clippy (f32 literal fallback). Amended → 1e3f2a868 pushed; CI running (watcher).
+- NEXT: on iceberg green, bump Comet pin to 1e3f2a868 + push with revert; then bench pins update.
