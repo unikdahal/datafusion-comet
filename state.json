@@ -1,7 +1,7 @@
 {
  "updated": "2026-10-09 (W1 done)",
  "heads": {
-  "iceberg": "3e0b1ca54b64e76f5cf9c1154b12166afe508ce7 (B6 merged, CI pending)",
+  "iceberg": "f3a157f8184e1033680941f35d639d01b9645b0a (B6 3e0b1ca54 + B4 ce99adab2 + comment polish; CI running)",
   "comet": "bef150221 (GREEN 37820096779: decimal phase1)",
   "bench": "c43593010 (targeted decimal)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
@@ -273,7 +273,7 @@
    "item": "B4 advisory row-filter gate (iceberg)",
    "agent": "gemini rp-w2-b4-impl-r1",
    "branch": "adaptive-ci/ws-b4-rowfilter-gate",
-   "status": "sonnet fixing CI; told to rebase onto 3e0b1ca54"
+   "status": "MERGED iceberg integration ce99adab2 + f3a157f81 (lead review: sound; advisory-only gating; loosened assertion only on advisory output; fixed late-rejection of unplannable runtime predicates). Pending Comet pin bump."
   },
   "W3": {
    "item": "Comet fast CI lane for ws-* + full only on integration",
@@ -320,5 +320,9 @@
    "branch": "adaptive-ci/ws-r5-comet-hygiene"
   }
  },
- "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback"
+ "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
+ "pending": [
+  "on iceberg f3a157f81 green: bump Comet pin (batch with ready Comet ws merges)",
+  "targeted bench for B4 (dim_10pct, sorted dim_128, pos_deletes dim_10k, semi, topk10__f_unsorted)"
+ ]
 }

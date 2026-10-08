@@ -130,3 +130,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - W1 decimal DONE (bef150221 green). Targeted decimal bench c43593010. W1b string started (codex). Gemini quota hit -> sonnet subagents fixing ws-b4 CI and fast-ci lane.
 - B6 merged into iceberg integration (3e0b1ca54). Sonnet shepherds on ws-b4, ws-fast-ci, ws-b3, ws-b2.
 - Upstream audit done; refactor track R2/R3 (iceberg) + R5 (Comet) started on ws branches; R1/R4/R6 queued.
+- B4 merged into iceberg integration (f3a157f81). Await CI → Comet pin bump + B4 targeted bench.
