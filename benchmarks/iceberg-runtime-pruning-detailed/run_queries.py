@@ -44,7 +44,7 @@ REPS = int(env("BENCH_REPS", "2"))
 OUTPUT = env("BENCH_OUTPUT", "results.jsonl")
 ROWS = int(env("BENCH_ROWS", "16000000"))
 FUZZ_ROWS = int(env("BENCH_FUZZ_ROWS", "4000000"))
-FUZZ_QUERIES = int(env("BENCH_FUZZ_QUERIES", "400"))
+FUZZ_QUERIES = int(env("BENCH_FUZZ_QUERIES", "500"))
 SEED = int(env("BENCH_SEED", "1"))
 
 T = "bench.db."
@@ -326,6 +326,12 @@ def fuzz_queries(seed=None):
         "fz_overlap": "int",
         "fz_reversed_files": "int",
         "fz_skewed": "int",
+        "fz_dec_mismatch": "dec_mismatch",
+        "fz_str_long": "str_long",
+        "fz_nulls_heavy": "nulls_heavy",
+        "fz_eq_deletes": "int",
+        "fz_eq_deletes_str": "str",
+        "fz_eq_deletes_nan": "nan",
     }
     names = sorted(tables)
     rows = FUZZ_ROWS
@@ -351,9 +357,41 @@ def fuzz_queries(seed=None):
 
     def dim_from(ktype):
         base = f"SELECT {typed(ktype, 'id')} AS id FROM (SELECT id FROM range({rows}) WHERE {dim()})"
-        if ktype == "nan":
-            base += " UNION ALL SELECT double('NaN') AS id"
-        if ktype in ("date", "str"):
+        if ktype in ("nan", "eq_deletes_nan"):
+            base += (
+                " UNION ALL SELECT double('NaN') AS id"
+                " UNION ALL SELECT -0.0D AS id"
+                " UNION ALL SELECT +0.0D AS id"
+                " UNION ALL SELECT double('Infinity') AS id"
+                " UNION ALL SELECT double('-Infinity') AS id"
+                " UNION ALL SELECT cast(NULL as double) AS id"
+            )
+        elif ktype in ("dec", "dec_mismatch"):
+            if rng.choice([True, False]):
+                scale_choice = rng.choice(["decimal(10,2)", "decimal(18,1)", "decimal(10,1)"])
+                base = f"SELECT cast(id as {scale_choice}) AS id FROM (SELECT id FROM range({rows}) WHERE {dim()})"
+                base += (
+                    f" UNION ALL SELECT cast(-125 as {scale_choice}) AS id"
+                    f" UNION ALL SELECT cast(0 as {scale_choice}) AS id"
+                    f" UNION ALL SELECT cast(NULL as {scale_choice}) AS id"
+                )
+            else:
+                base += (
+                    " UNION ALL SELECT cast(-125 as decimal(18,2)) AS id"
+                    " UNION ALL SELECT cast(0 as decimal(18,2)) AS id"
+                    " UNION ALL SELECT cast(NULL as decimal(18,2)) AS id"
+                )
+        elif ktype in ("str", "str_long", "eq_deletes_str"):
+            if ktype == "str_long":
+                base += (
+                    " UNION ALL SELECT '' AS id"
+                    " UNION ALL SELECT 'prefix_long_common_key_é東京🙂' AS id"
+                    " UNION ALL SELECT concat('prefix_long_common_key_', 'e\\u0301', '100') AS id"
+                    " UNION ALL SELECT cast(NULL as string) AS id"
+                )
+            else:
+                base += " UNION ALL SELECT '' AS id UNION ALL SELECT cast(NULL as string) AS id"
+        if ktype in ("date", "str", "str_long", "eq_deletes_str"):
             base = base.replace("SELECT ", "SELECT DISTINCT ", 1)
         return base
 
@@ -367,30 +405,45 @@ def fuzz_queries(seed=None):
         kind = rng.choice(
             [
                 "join",
-                "join",
+                "shuffled_join",
                 "semi",
+                "shuffled_semi",
                 "topk",
                 "topk",
                 "minmax",
                 "join_topk",
                 "join_min",
                 "filtered_topk",
+                "filtered_join",
+                "empty_projection_count",
+                "nan_predicates",
             ]
         )
         t = f"{T}{table}"
         name = f"fuzz{seed}_{index:04d}_{kind}__{table}"
-        if kind == "join":
-            sql = f"SELECT /*+ BROADCAST(d) */ count(*), sum(f.value) FROM {t} f JOIN ({dim_from(ktype)}) d ON f.id = d.id"
+        if kind in ("join", "shuffled_join"):
+            hint = "BROADCAST(d)" if kind == "join" else "SHUFFLE_HASH(d)"
+            sql = f"SELECT /*+ {hint} */ count(*), sum(f.value) FROM {t} f JOIN ({dim_from(ktype)}) d ON f.id = d.id"
             queries.append((name, sql, False, None))
-        elif kind == "semi":
-            sql = f"SELECT /*+ BROADCAST(d) */ count(*), sum(f.value) FROM {t} f LEFT SEMI JOIN ({dim_from(ktype)}) d ON f.id = d.id"
+        elif kind in ("semi", "shuffled_semi"):
+            hint = "BROADCAST(d)" if kind == "semi" else "SHUFFLE_HASH(d)"
+            sql = f"SELECT /*+ {hint} */ count(*), sum(f.value) FROM {t} f LEFT SEMI JOIN ({dim_from(ktype)}) d ON f.id = d.id"
             queries.append((name, sql, False, None))
         elif kind == "topk":
             k = rng.choice([1, 5, 10, 100, 1000, 20000])
-            direction = rng.choice(["", " DESC"])
-            placement = rng.choice(["", " NULLS FIRST", " NULLS LAST"])
-            cols = rng.choice(["id, value", "id"])
-            order = f"id{direction}{placement}" + (", value" if cols != "id" else "")
+            dir1 = rng.choice(["", " DESC"])
+            nulls1 = rng.choice(["", " NULLS FIRST", " NULLS LAST"])
+            two_keys = rng.choice([True, False])
+            if two_keys:
+                dir2 = rng.choice(["", " DESC"])
+                nulls2 = rng.choice(["", " NULLS FIRST", " NULLS LAST"])
+                first_col = rng.choice(["id", "value"])
+                second_col = "value" if first_col == "id" else "id"
+                order = f"{first_col}{dir1}{nulls1}, {second_col}{dir2}{nulls2}"
+                cols = "id, value"
+            else:
+                order = f"id{dir1}{nulls1}"
+                cols = rng.choice(["id", "id, value"])
             queries.append(
                 (name, f"SELECT {cols} FROM {t} ORDER BY {order} LIMIT {k}", True, None)
             )
@@ -418,18 +471,65 @@ def fuzz_queries(seed=None):
                 f"JOIN ({dim_from(ktype)}) d ON f.id = d.id"
             )
             queries.append((name, sql, True, None))
-        else:
+        elif kind == "filtered_topk":
             low = rng.randrange(rows)
             k = rng.choice([1, 10, 500])
-            direction = rng.choice(["", " DESC"])
-            queries.append(
-                (
-                    name,
-                    f"SELECT id, value FROM {t} WHERE id >= {bound(ktype, low)} ORDER BY id{direction}, value LIMIT {k}",
-                    True,
-                    None,
-                )
+            dir1 = rng.choice(["", " DESC"])
+            nulls1 = rng.choice(["", " NULLS FIRST", " NULLS LAST"])
+            pred_choice = rng.choice(["literal_mod", "col_mod_zero", "range"])
+            if pred_choice == "literal_mod":
+                m = rng.choice([3, 7, 11])
+                filter_pred = f"(value % {m}) = {rng.randrange(m)}"
+            elif pred_choice == "col_mod_zero":
+                filter_pred = "(value % k2) = 1"
+            else:
+                filter_pred = f"id >= {bound(ktype, low)}" if ktype not in ("nan", "str_long") else "value >= 0"
+            sql = f"SELECT id, value FROM {t} WHERE {filter_pred} ORDER BY id{dir1}{nulls1}, value LIMIT {k}"
+            queries.append((name, sql, True, None))
+        elif kind == "filtered_join":
+            hint = rng.choice(["BROADCAST(d)", "SHUFFLE_HASH(d)"])
+            pred_choice = rng.choice(["literal_mod", "col_mod_zero"])
+            if pred_choice == "literal_mod":
+                m = rng.choice([3, 7, 11])
+                filter_pred = f"(f.value % {m}) = {rng.randrange(m)}"
+            else:
+                filter_pred = "(f.value % f.k2) = 1"
+            sql = (
+                f"SELECT /*+ {hint} */ count(*), sum(f.value) "
+                f"FROM {t} f JOIN ({dim_from(ktype)}) d ON f.id = d.id "
+                f"WHERE {filter_pred}"
             )
+            queries.append((name, sql, False, None))
+        elif kind == "empty_projection_count":
+            filter_choice = rng.choice(["none", "literal_mod", "col_mod_zero"])
+            if filter_choice == "literal_mod":
+                where = f" WHERE (value % 7) = {rng.randrange(7)}"
+            elif filter_choice == "col_mod_zero":
+                where = " WHERE (value % k2) = 1"
+            else:
+                where = ""
+            sql = f"SELECT count(*) FROM {t}{where}"
+            queries.append((name, sql, True, None))
+        elif kind == "nan_predicates":
+            pred_type = rng.choice(["eq", "neq", "not_in", "range"])
+            val = rng.choice(["double('NaN')", "-0.0D", "+0.0D", "double('Infinity')", "double('-Infinity')"])
+            if pred_type == "eq":
+                where = f"WHERE id = {val}"
+            elif pred_type == "neq":
+                where = f"WHERE id != {val}"
+            elif pred_type == "not_in":
+                where = "WHERE id NOT IN (double('NaN'), 0.0D, double('Infinity'))"
+            else:
+                where = rng.choice([
+                    "WHERE id < 0.0D",
+                    "WHERE id >= -0.0D",
+                    "WHERE id > double('-Infinity') AND id < double('Infinity')",
+                    "WHERE id <= 1000.0D",
+                ])
+            nan_table = rng.choice(["fz_nan", "fz_eq_deletes_nan"])
+            sql = f"SELECT count(*), sum(value) FROM {T}{nan_table} {where}"
+            name = f"fuzz{seed}_{index:04d}_{kind}__{nan_table}"
+            queries.append((name, sql, True, None))
     return queries
 
 

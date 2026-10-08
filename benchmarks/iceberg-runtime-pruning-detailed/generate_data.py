@@ -61,14 +61,45 @@ def base(spark, rows, ktype="int"):
     key = typed(ktype, "id")
     if ktype == "nulls":
         key = f"CASE WHEN id % 10 = 0 THEN NULL ELSE {key} END"
-    if ktype == "nan":
+    elif ktype == "nulls_heavy":
+        key = f"CASE WHEN id % 10 < 7 THEN NULL ELSE {key} END"
+    elif ktype == "nan":
         key = (
-            "CASE WHEN id % 97 = 0 THEN double('NaN') WHEN id % 89 = 0 THEN NULL "
-            "WHEN id % 83 = 0 THEN -0.0D ELSE cast(id as double) END"
+            "CASE "
+            "WHEN id % 97 = 0 THEN double('NaN') "
+            "WHEN id % 89 = 0 THEN NULL "
+            "WHEN id % 83 = 0 THEN -0.0D "
+            "WHEN id % 79 = 0 THEN +0.0D "
+            "WHEN id % 73 = 0 THEN double('Infinity') "
+            "WHEN id % 71 = 0 THEN double('-Infinity') "
+            "ELSE cast(id as double) END"
         )
+    elif ktype == "dec_mismatch":
+        key = (
+            "CASE "
+            "WHEN id % 89 = 0 THEN NULL "
+            "WHEN id % 10 = 0 THEN cast(0 as decimal(18,2)) "
+            "WHEN id % 2 = 1 THEN cast(-id as decimal(18,2)) "
+            "ELSE cast(id as decimal(18,2)) END"
+        )
+    elif ktype == "str_long":
+        key = (
+            "CASE "
+            "WHEN id % 97 = 0 THEN NULL "
+            "WHEN id % 89 = 0 THEN '' "
+            "WHEN id % 79 = 0 THEN 'prefix_long_common_key_é東京🙂' "
+            "WHEN id % 73 = 0 THEN concat('prefix_long_common_key_', 'e\\u0301', cast(id as string)) "
+            "ELSE concat('prefix_long_common_key_', lpad(cast(id as string), 10, '0')) "
+            "END"
+        )
+    value_col = (
+        F.when(F.col("id") % 2 == 0, F.lit(None).cast("bigint")).otherwise(F.col("id") * 3)
+        if ktype == "nulls_heavy"
+        else (F.col("id") * 3)
+    )
     return df.select(
         F.expr(key).alias("id"),
-        (F.col("id") * 3).alias("value"),
+        value_col.alias("value"),
         F.sha2(F.col("id").cast("string"), 256).alias("payload"),
         (F.col("id") % 1000).cast("int").alias("k2"),
         F.col("id").alias("raw"),
@@ -83,8 +114,10 @@ def sorted_files(df, files=FILES):
     return df.repartitionByRange(files, "raw").sortWithinPartitions("raw")
 
 
-def add_equality_deletes(spark, table, rows, stride, string_keys=False):
+def add_equality_deletes(spark, table, rows, stride, key_type="int"):
     """Write one genuine v2 equality-delete file, rather than Spark's positional DELETE."""
+    if isinstance(key_type, bool):
+        key_type = "str" if key_type else "int"
     jvm = spark._jvm
     iceberg = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
         spark._jsparkSession, f"bench.db.{table}"
@@ -98,7 +131,7 @@ def add_equality_deletes(spark, table, rows, stride, string_keys=False):
         iceberg.schema(), iceberg.spec(), equality_ids, equality_schema, None
     )
     output = iceberg.io().newOutputFile(
-        iceberg.location() + "/data/benchmark-equality-deletes.parquet"
+        iceberg.location() + f"/data/benchmark-equality-deletes-{table}.parquet"
     )
     encrypted = jvm.org.apache.iceberg.encryption.EncryptedFiles.plainAsEncryptedOutput(
         output
@@ -116,7 +149,18 @@ def add_equality_deletes(spark, table, rows, stride, string_keys=False):
     for index in range(count):
         key = index * spacing
         record = jvm.org.apache.iceberg.data.GenericRecord.create(equality_schema)
-        record.setField("id", f"k{key:010d}" if string_keys else key)
+        if key_type in ("str", "str_long"):
+            val = f"prefix_long_common_key_{key:010d}" if key_type == "str_long" else f"k{key:010d}"
+            record.setField("id", val)
+        elif key_type == "nan":
+            if index == 0:
+                record.setField("id", float("nan"))
+            elif index == 1:
+                record.setField("id", 0.0)
+            else:
+                record.setField("id", float(key))
+        else:
+            record.setField("id", key)
         writer.write(record)
     writer.close()
     delete_file = writer.toDeleteFile()
@@ -125,8 +169,9 @@ def add_equality_deletes(spark, table, rows, stride, string_keys=False):
     iceberg.newRowDelta().addDeletes(delete_file).commit()
     spark.catalog.refreshTable(f"bench.db.{table}")
     actual = spark.sql(f"SELECT count(*) FROM bench.db.{table}").first()[0]
-    expected = (rows + stride - 1) // stride - count
-    assert actual == expected, (table, actual, expected)
+    if not table.startswith("fz_") and key_type in ("int", "str"):
+        expected = (rows + stride - 1) // stride - count
+        assert actual == expected, (table, actual, expected)
     print(
         f"EQUALITY_DELETE {table} keys={count} stride={stride} rows_after={actual}",
         flush=True,
@@ -134,7 +179,18 @@ def add_equality_deletes(spark, table, rows, stride, string_keys=False):
 
 
 def build(spark, kind, table, rows):
-    if kind in ("sorted", "long", "str", "date", "dec", "nulls", "nan"):
+    if kind in (
+        "sorted",
+        "long",
+        "str",
+        "date",
+        "dec",
+        "nulls",
+        "nan",
+        "dec_mismatch",
+        "str_long",
+        "nulls_heavy",
+    ):
         ktype = "int" if kind == "sorted" else kind
         write(cols(sorted_files(base(spark, rows, ktype))), table)
     elif kind == "unsorted":
@@ -143,14 +199,21 @@ def build(spark, kind, table, rows):
     elif kind == "pos_deletes":
         write(cols(sorted_files(base(spark, rows))), table)
         spark.sql(f"DELETE FROM bench.db.{table} WHERE id % 101 = 0")
-    elif kind in ("eq_deletes", "eq_deletes_str"):
+    elif kind in ("eq_deletes", "eq_deletes_str", "eq_deletes_nan"):
         # Bound the old expression-tree evaluation cost while retaining the full key range.
         # Both implementations scan the same roughly one million rows with 4096 delete keys.
-        stride = max(rows // 1_000_000, 1)
-        ktype = "str" if kind.endswith("_str") else "int"
+        stride = max(rows // 500_000 if table.startswith("fz_") else rows // 1_000_000, 1)
+        if kind == "eq_deletes_str":
+            ktype = "str"
+        elif kind == "eq_deletes_nan":
+            ktype = "nan"
+        else:
+            ktype = "int"
         df = base(spark, rows, ktype).where(F.col("raw") % stride == 0)
         write(cols(sorted_files(df)), table)
-        add_equality_deletes(spark, table, rows, stride, ktype == "str")
+        if table.startswith("fz_"):
+            spark.sql(f"DELETE FROM bench.db.{table} WHERE raw % (stride * 101) = 0")
+        add_equality_deletes(spark, table, rows, stride, ktype)
     elif kind == "updated":
         # Updates rewrite 1% of rows into new files whose key bounds span the whole range.
         write(cols(sorted_files(base(spark, rows))), table)
@@ -365,6 +428,12 @@ PLAN = {
             "overlap",
             "reversed_files",
             "skewed",
+            "dec_mismatch",
+            "str_long",
+            "nulls_heavy",
+            "eq_deletes",
+            "eq_deletes_str",
+            "eq_deletes_nan",
         ],
         FUZZ_ROWS,
         False,

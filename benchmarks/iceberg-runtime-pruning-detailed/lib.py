@@ -29,7 +29,18 @@ from pathlib import Path
 import time
 
 IDS_PER_DAY = 4000
-KEY_TYPES = ["int", "long", "str", "date", "dec", "nulls", "nan"]
+KEY_TYPES = [
+    "int",
+    "long",
+    "str",
+    "date",
+    "dec",
+    "nulls",
+    "nan",
+    "dec_mismatch",
+    "str_long",
+    "nulls_heavy",
+]
 VARIANTS = ["baseline_off", "baseline_on", "candidate_off", "candidate_on"]
 SCAN_METRICS = [
     "bytes_scanned",
@@ -42,6 +53,16 @@ SCAN_METRICS = [
     "iceberg_runtime_predicate_refreshes",
     "iceberg_runtime_decoder_rebuilds",
 ]
+
+
+def _float_from_hex(s):
+    if s == "nan":
+        return float("nan")
+    if s in ("inf", "+inf"):
+        return float("inf")
+    if s == "-inf":
+        return float("-inf")
+    return float.fromhex(s)
 
 
 class JVMRuntimeDiagnostics:
@@ -97,15 +118,17 @@ def query_order(queries, round_number, repetition, warmup=False):
 
 def typed(ktype, expr):
     """SQL expression that maps an integer expression onto the key type."""
-    if ktype in ("int", "nulls"):
+    if ktype in ("int", "nulls", "nulls_heavy"):
         return f"cast({expr} as int)"
     if ktype == "long":
         return f"cast({expr} as bigint)"
     if ktype == "str":
         return f"concat('k', lpad(cast({expr} as string), 10, '0'))"
+    if ktype == "str_long":
+        return f"concat('prefix_long_common_key_', lpad(cast({expr} as string), 10, '0'))"
     if ktype == "date":
         return f"date_add(DATE'2000-01-01', cast(({expr}) / {IDS_PER_DAY} as int))"
-    if ktype == "dec":
+    if ktype in ("dec", "dec_mismatch"):
         return f"cast({expr} as decimal(18,2))"
     if ktype == "nan":
         return f"cast({expr} as double)"
@@ -222,7 +245,10 @@ def semantic_sort_value(value):
         return [semantic_sort_value(item) for item in value]
     if isinstance(value, dict):
         if value.keys() == {"float"}:
-            number = float.fromhex(value["float"])
+            s = value["float"]
+            if s in ("nan", "inf", "+inf", "-inf"):
+                return value
+            number = _float_from_hex(s)
             return {"float": (0.0).hex()} if number == 0.0 else value
         if value.keys() == {"decimal"}:
             number = decimal.Decimal(value["decimal"])
@@ -270,7 +296,7 @@ def equivalent(actual, expected, floating_tolerance=False):
         if actual.keys() != expected.keys():
             return False
         if actual.keys() == {"float"}:
-            a, e = float.fromhex(actual["float"]), float.fromhex(expected["float"])
+            a, e = _float_from_hex(actual["float"]), _float_from_hex(expected["float"])
             if math.isnan(a) or math.isnan(e):
                 return math.isnan(a) and math.isnan(e)
             if a == e:
