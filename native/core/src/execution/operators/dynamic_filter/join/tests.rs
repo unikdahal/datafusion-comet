@@ -534,11 +534,7 @@ fn skips_unsupported_joins_and_session_disables() {
 
 #[test]
 fn skips_unsupported_keys_and_multiple_native_partitions() {
-    for key_type in [
-        DataType::Float32,
-        DataType::Float64,
-        DataType::Utf8,
-    ] {
+    for key_type in [DataType::Float32, DataType::Float64, DataType::Utf8] {
         let plan = join(
             input(vec![Some(10)], &key_type, 1),
             input(vec![Some(10)], &key_type, 0),
@@ -1777,9 +1773,21 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
 #[test]
 fn decimal_eligibility_requires_identical_precision_and_scale() {
     for (build_type, probe_type, eligible) in [
-        (DataType::Decimal128(18, 2), DataType::Decimal128(18, 2), true),
-        (DataType::Decimal128(10, 2), DataType::Decimal128(18, 2), false),
-        (DataType::Decimal128(18, 2), DataType::Decimal128(18, 3), false),
+        (
+            DataType::Decimal128(18, 2),
+            DataType::Decimal128(18, 2),
+            true,
+        ),
+        (
+            DataType::Decimal128(10, 2),
+            DataType::Decimal128(18, 2),
+            false,
+        ),
+        (
+            DataType::Decimal128(18, 2),
+            DataType::Decimal128(18, 3),
+            false,
+        ),
     ] {
         let plan = join(
             input(vec![Some(10)], &build_type, 1),
@@ -1808,15 +1816,20 @@ fn decimal_casts_on_either_input_are_ineligible_even_when_projected() {
         let source = input(vec![Some(10)], &DataType::Decimal128(10, 2), 0);
         let direct = input(vec![Some(10)], &decimal_type, 0);
         let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
-        let cast: Arc<dyn PhysicalExpr> = Arc::new(CastExpr::new(
-            Arc::clone(&key),
-            decimal_type.clone(),
-            None,
-        ));
+        let cast: Arc<dyn PhysicalExpr> =
+            Arc::new(CastExpr::new(Arc::clone(&key), decimal_type.clone(), None));
         let (build, probe, on) = if cast_build {
-            (Arc::clone(&source), Arc::clone(&direct), vec![(Arc::clone(&cast), key)])
+            (
+                Arc::clone(&source),
+                Arc::clone(&direct),
+                vec![(Arc::clone(&cast), key)],
+            )
         } else {
-            (Arc::clone(&direct), Arc::clone(&source), vec![(key, Arc::clone(&cast))])
+            (
+                Arc::clone(&direct),
+                Arc::clone(&source),
+                vec![(key, Arc::clone(&cast))],
+            )
         };
         assert_skipped(
             single_key_join_plans(build, probe, PartitionMode::CollectLeft)
@@ -1826,9 +1839,8 @@ fn decimal_casts_on_either_input_are_ineligible_even_when_projected() {
                 .unwrap(),
             &ConfigOptions::default(),
         );
-        let projected: Arc<dyn ExecutionPlan> = Arc::new(
-            ProjectionExec::try_new(vec![(cast, "key".into())], source).unwrap()
-        );
+        let projected: Arc<dyn ExecutionPlan> =
+            Arc::new(ProjectionExec::try_new(vec![(cast, "key".into())], source).unwrap());
         let (build, probe) = if cast_build {
             (projected, direct)
         } else {
@@ -1854,20 +1866,43 @@ async fn decimal_batch_filter_prunes_bounds_and_membership_without_losing_nulls_
                 // Exceed the IN-list limit to exercise DataFusion's exact hash membership.
                 build_values.extend((1000..2100).map(Some));
             }
-            let probe_values = vec![None, Some(-126), Some(-125), Some(-1), Some(0),
-                Some(1), Some(125), Some(126), Some(maximum)];
+            let probe_values = vec![
+                None,
+                Some(-126),
+                Some(-125),
+                Some(-1),
+                Some(0),
+                Some(1),
+                Some(125),
+                Some(126),
+                Some(maximum),
+            ];
             let array = |values: Vec<Option<i128>>| -> ArrayRef {
-                Arc::new(Decimal128Array::from(values).with_precision_and_scale(38, 2).unwrap())
+                Arc::new(
+                    Decimal128Array::from(values)
+                        .with_precision_and_scale(38, 2)
+                        .unwrap(),
+                )
             };
             let plain = single_key_join(array(build_values), array(probe_values), mode);
-            let expected = collect(Arc::new(plain.builder().reset_state().build().unwrap()), session.task_ctx()).await.unwrap();
+            let expected = collect(
+                Arc::new(plain.builder().reset_state().build().unwrap()),
+                session.task_ctx(),
+            )
+            .await
+            .unwrap();
             let attached: Arc<dyn ExecutionPlan> = Arc::new(
                 DynamicFilterJoinExec::try_new(&plain, &ConfigOptions::default())
                     .unwrap()
-                    .unwrap()
+                    .unwrap(),
             );
-            let output = collect(Arc::clone(&attached), session.task_ctx()).await.unwrap();
-            assert_eq!(batches_to_sort_string(&output), batches_to_sort_string(&expected));
+            let output = collect(Arc::clone(&attached), session.task_ctx())
+                .await
+                .unwrap();
+            assert_eq!(
+                batches_to_sort_string(&output),
+                batches_to_sort_string(&expected)
+            );
             assert_eq!(row_count(&output), 4);
             assert_eq!(metric(&attached, "dynamic_filter_join_rows_pruned"), 6);
         }

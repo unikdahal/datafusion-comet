@@ -386,10 +386,13 @@ fn is_direct_decimal_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalE
         return false;
     };
     if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
-        return projection.expr().get(column.index()).is_some_and(|projected| {
-            projected.expr.is::<Column>()
-                && is_direct_decimal_key(projection.input(), &projected.expr)
-        });
+        return projection
+            .expr()
+            .get(column.index())
+            .is_some_and(|projected| {
+                projected.expr.is::<Column>()
+                    && is_direct_decimal_key(projection.input(), &projected.expr)
+            });
     }
     if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
         return !filter.has_projection() && is_direct_decimal_key(filter.input(), key);

@@ -169,20 +169,22 @@ impl IcebergScanExec {
                 }
                 _ => false,
             };
-            if !decimal_matches && !matches!(
-                (output.data_type(), field.field_type.as_ref()),
-                (DataType::Int32, Type::Primitive(PrimitiveType::Int))
-                    | (DataType::Int64, Type::Primitive(PrimitiveType::Long))
-                    | (DataType::Date32, Type::Primitive(PrimitiveType::Date))
-                    | (
-                        DataType::Timestamp(TimeUnit::Microsecond, Some(_)),
-                        Type::Primitive(PrimitiveType::Timestamptz)
-                    )
-                    | (
-                        DataType::Timestamp(TimeUnit::Microsecond, None),
-                        Type::Primitive(PrimitiveType::Timestamp)
-                    )
-            ) {
+            if !decimal_matches
+                && !matches!(
+                    (output.data_type(), field.field_type.as_ref()),
+                    (DataType::Int32, Type::Primitive(PrimitiveType::Int))
+                        | (DataType::Int64, Type::Primitive(PrimitiveType::Long))
+                        | (DataType::Date32, Type::Primitive(PrimitiveType::Date))
+                        | (
+                            DataType::Timestamp(TimeUnit::Microsecond, Some(_)),
+                            Type::Primitive(PrimitiveType::Timestamptz)
+                        )
+                        | (
+                            DataType::Timestamp(TimeUnit::Microsecond, None),
+                            Type::Primitive(PrimitiveType::Timestamp)
+                        )
+                )
+            {
                 return None;
             }
             let current_name = field.name.clone();
@@ -1170,7 +1172,8 @@ mod tests {
                         1,
                         "key",
                         Type::decimal(18, 2).unwrap(),
-                    ).into()])
+                    )
+                    .into()])
                     .build()
                     .unwrap(),
             );

@@ -236,10 +236,13 @@ fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
             // Iceberg decimals serialize the unscaled i128 in signed big-endian form.
             // Validate precision above before using the existing public byte constructor.
             // The mantissa and scale are unchanged: no parsing, rounding or rescaling.
-            Datum::try_from_bytes(&value.to_be_bytes(), decimal_type.as_primitive_type()?.clone())
-                .ok()?
-                .to(&decimal_type)
-                .ok()
+            Datum::try_from_bytes(
+                &value.to_be_bytes(),
+                decimal_type.as_primitive_type()?.clone(),
+            )
+            .ok()?
+            .to(&decimal_type)
+            .ok()
         }
         // Spark TIMESTAMP carries a zone and maps to Iceberg timestamptz; TIMESTAMP_NTZ has
         // none and maps to timestamp. Both store microseconds since the epoch.
@@ -269,8 +272,8 @@ mod tests {
             (-maximum, 38, 38),
             (1, 38, 38),
         ] {
-            let datum = scalar_to_datum(&ScalarValue::Decimal128(Some(value), precision, scale))
-                .unwrap();
+            let datum =
+                scalar_to_datum(&ScalarValue::Decimal128(Some(value), precision, scale)).unwrap();
             assert_eq!(datum.literal(), &PrimitiveLiteral::Int128(value));
             assert_eq!(
                 datum.data_type(),
