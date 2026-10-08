@@ -2,7 +2,7 @@
  "updated": "2026-10-09 (W1 done)",
  "heads": {
   "iceberg": "c4e8a66e97fa9c838dec9ce58fe7afd36d68e089 (R4 split + stats API restored; branch CI green 37837062812; integration CI pending)",
-  "comet": "681bdcbff68fe4ebb4a41bb682e2329266478c58 (fast lane merged on top of 6e7d582b5; full CI running)",
+  "comet": "681bdcbff RED (37833666272: rust test iceberg_reader_attachment_uses_join_for_exact_membership expects reader row filter -> broken by B4 gating). Last fully green: bef150221.",
   "bench": "7c2dd47e8 (B4/B6 targeted)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
@@ -98,16 +98,17 @@
     "iceberg": "157cf6475"
    },
    "result": "SUCCESS validation; f_dec dim_10k 5.19x [4.89,5.48] (588.8->12.8 MiB), dim_128 4.52x, dim_128_spread 2.06x; sorted dim_128 4.75x control; dim_10pct 0.93x (pre-B4)"
+  },
+  {
+   "run": 37834528369,
+   "type": "targeted B4/B6",
+   "result": "0 validation failures; dim_10pct 1.00x (fixed) BUT unsorted dim_128 1.01x (was 2.41x), topk10__f_unsorted 3.00x (was 3.91x) -> B4 reverted; f_nan 1.00x; dec dim_128 4.97x; pos_deletes 5.15x; sorted dim_128 5.02x; semi 1.70x; topk1000_desc sorted 7.58x"
   }
  ],
  "tasks": [
-  "rp-w1b-string-r1",
-  "rp-r23-iceberg-refactor-r1",
-  "rp-r5-comet-hygiene-r1",
-  "sonnet:ws-b4",
-  "sonnet:ws-fast-ci",
-  "sonnet:ws-b3+ws-b2",
-  "bench c43593010"
+  "rp-b4-revert-r1",
+  "rp-b3b2-ci-fix-r1",
+  "rp-w1b-string-r2"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -282,7 +283,7 @@
    "item": "B4 advisory row-filter gate (iceberg)",
    "agent": "gemini rp-w2-b4-impl-r1",
    "branch": "adaptive-ci/ws-b4-rowfilter-gate",
-   "status": "MERGED iceberg integration ce99adab2 + f3a157f81 (lead review: sound; advisory-only gating; loosened assertion only on advisory output; fixed late-rejection of unplannable runtime predicates). Pending Comet pin bump."
+   "status": "REVERTING: bench 37834528369 showed B4 kills selective unsorted wins (unsorted dim_128 2.41x->1.01x, topk10__f_unsorted 3.91x->3.00x) for ~4% gain on dim_10pct. Lesson: gate on observed selectivity, not on page/RG pruning. Revert task gemini rp-b4-revert-r1 -> branch adaptive-ci/ws-b4-revert."
   },
   "W3": {
    "item": "Comet fast CI lane for ws-* + full only on integration",
@@ -305,18 +306,19 @@
    "item": "B3 NULLS FIRST Top-K translation (Comet)",
    "agent": "gemini rp-w6-b3-impl-r1",
    "branch": "adaptive-ci/ws-b3-nulls-first",
-   "status": "ws-b3 c74d3c531 pushed; sonnet shepherd fixing CI + correctness self-review"
+   "status": "fast-lane rust failing; big-pickle rp-b3b2-ci-fix-r1"
   },
   "W7": {
    "item": "B2 Top-K/join filters through safe Filter + spark_modulo (ANSI-gated)",
    "agent": "gemini rp-w7-b2-impl-r1",
    "branch": "adaptive-ci/ws-b2-topk-filters",
-   "status": "ws-b2 15c727d9a pushed; sonnet shepherd fixing CI + correctness self-review"
+   "status": "fast-lane rust failing; big-pickle rp-b3b2-ci-fix-r1"
   },
   "W1b": {
    "item": "B1 phase 2 string keys",
    "agent": "codex rp-w1b-string-r1",
-   "branch": "adaptive-ci/ws-b1-string (both repos)"
+   "branch": "adaptive-ci/ws-b1-string (both repos)",
+   "status": "codex at capacity; continued by gemini rp-w1b-string-r2"
   },
   "R23": {
    "item": "iceberg: remove cfg(test) semaphore from DeleteFilter, decoder expects->errors, named consts, pub API shrink (check Comet usage)",
@@ -327,7 +329,8 @@
   "R5": {
    "item": "Comet: iceberg_scan cfg(test) method + cached unwrap, planner direct_minmax dedupe, threshold-8 const",
    "agent": "gemini rp-r5-comet-hygiene-r1",
-   "branch": "adaptive-ci/ws-r5-comet-hygiene"
+   "branch": "adaptive-ci/ws-r5-comet-hygiene",
+   "status": "green a0264fcb7 (37832608642 verified); merge into Comet integration with pin bump after B4 revert"
   },
   "R4": {
    "item": "split pipeline.rs::process",
@@ -347,10 +350,11 @@
   },
   "MANIFEST": {
    "item": "eliminate/cheapen second manifest scan for runtime stats (scales with manifests)",
-   "agent": "gemini rp-manifest-rescan-design-r1 (design)"
+   "agent": "gemini rp-manifest-rescan-design-r1 (design)",
+   "status": "design done (reports/manifest-rescan-design.md): f_snapshots +21-24ms plan (39 manifests). Recommend skip guards (tasks<=1) + driver cache by (snapshot,keys) + manifest cache. Impl queued."
   }
  },
- "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
+ "providers_note": "codex at capacity; sonnet session limit until 04:40 IST; gemini + big-pickle active",
  "pending": [
   "batch Comet integration push: pin iceberg -> c4e8a66e9 (after its CI) + ws-b3/ws-b2 merges",
   "next full campaign: merge ws-fuzz-ext into bench branch + pin newest green Comet/iceberg"
