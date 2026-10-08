@@ -145,3 +145,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - B4 targeted bench: B4 REGRESSED selective unsorted queries (unsorted dim_128 2.41x→1.01x; topk10 unsorted 3.91x→3.00x) → REVERT (gemini). Also broke Comet test (reader row-filter expectation) → Comet integration 681bdcbff red.
 - Manifest rescan design done; impl queued (skip guards + snapshot cache).
 - W1b string → gemini (codex at capacity). ws-b3/b2 rust fixes → big-pickle. R5 green, merge with pin bump after revert.
+- B4 reverted (iceberg 1f154f5f3); Comet c408a06bd = R5 + pin. Manifest stats cache impl started (codex).

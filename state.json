@@ -1,8 +1,8 @@
 {
  "updated": "2026-10-09 (W1 done)",
  "heads": {
-  "iceberg": "c4e8a66e97fa9c838dec9ce58fe7afd36d68e089 (R4 split + stats API restored; branch CI green 37837062812; integration CI pending)",
-  "comet": "681bdcbff RED (37833666272: rust test iceberg_reader_attachment_uses_join_for_exact_membership expects reader row filter -> broken by B4 gating). Last fully green: bef150221.",
+  "iceberg": "1f154f5f3afe7b2d06b7e45fd1ced3f0c5e9ff53 (B4 reverted; branch CI green 37859240837)",
+  "comet": "c408a06bd7ad8c904c255e67b56f35cbc2ae009a (R5 + pin iceberg 1f154f5f3; full CI running)",
   "bench": "7c2dd47e8 (B4/B6 targeted)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
@@ -106,9 +106,9 @@
   }
  ],
  "tasks": [
-  "rp-b4-revert-r1",
   "rp-b3b2-ci-fix-r1",
-  "rp-w1b-string-r2"
+  "rp-w1b-string-r2",
+  "rp-manifest-impl-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -283,7 +283,7 @@
    "item": "B4 advisory row-filter gate (iceberg)",
    "agent": "gemini rp-w2-b4-impl-r1",
    "branch": "adaptive-ci/ws-b4-rowfilter-gate",
-   "status": "REVERTING: bench 37834528369 showed B4 kills selective unsorted wins (unsorted dim_128 2.41x->1.01x, topk10__f_unsorted 3.91x->3.00x) for ~4% gain on dim_10pct. Lesson: gate on observed selectivity, not on page/RG pruning. Revert task gemini rp-b4-revert-r1 -> branch adaptive-ci/ws-b4-revert."
+   "status": "REVERTED 1f154f5f3 (lead verified: runtime_stream == pre-B4 modulo R3b)"
   },
   "W3": {
    "item": "Comet fast CI lane for ws-* + full only on integration",
@@ -330,7 +330,7 @@
    "item": "Comet: iceberg_scan cfg(test) method + cached unwrap, planner direct_minmax dedupe, threshold-8 const",
    "agent": "gemini rp-r5-comet-hygiene-r1",
    "branch": "adaptive-ci/ws-r5-comet-hygiene",
-   "status": "green a0264fcb7 (37832608642 verified); merge into Comet integration with pin bump after B4 revert"
+   "status": "MERGED c408a06bd"
   },
   "R4": {
    "item": "split pipeline.rs::process",
@@ -351,7 +351,7 @@
   "MANIFEST": {
    "item": "eliminate/cheapen second manifest scan for runtime stats (scales with manifests)",
    "agent": "gemini rp-manifest-rescan-design-r1 (design)",
-   "status": "design done (reports/manifest-rescan-design.md): f_snapshots +21-24ms plan (39 manifests). Recommend skip guards (tasks<=1) + driver cache by (snapshot,keys) + manifest cache. Impl queued."
+   "status": "impl codex rp-manifest-impl-r1 -> adaptive-ci/ws-manifest-stats-cache"
   }
  },
  "providers_note": "codex at capacity; sonnet session limit until 04:40 IST; gemini + big-pickle active",
