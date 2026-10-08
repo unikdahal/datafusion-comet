@@ -106,7 +106,7 @@ reduced reader output, in addition to exact join results.
 | `iceberg_reader.rs` | Traverse permitted plan nodes and map the producer column to a consistent Iceberg field identity |
 | `iceberg_reader/predicate.rs` | Conservatively translate the published producer expression; unfamiliar shapes fail open |
 | `consumer.rs` | Expose the reader's consumer identity to DataFusion; delegate batches without evaluation |
-| `batch_filter.rs` | Evaluate membership on decoded batches for non-Iceberg join inputs |
+| `batch_filter.rs` | Evaluate membership for eligible decoded-batch inputs; materialized shuffle probes keep the original exact join |
 | iceberg-rust runtime reader | Bind publications, validate physical schemas, and prune files, groups, pages and rows |
 
 `try_attach_iceberg_join_filter` connects the reader provider and the discoverable
@@ -135,6 +135,14 @@ and TopK thresholds do not survive into the next execution. EOF, error and
 cancellation release stream-owned state. Reset detaches a scan's old provider
 and ordering. Native Iceberg scans reject nonzero partition indices.
 
+Shuffle probes have already paid the scan, exchange and decode costs. An extra
+membership filter cannot avoid those costs and repeats the hash lookup in the
+exact join. `join.rs` therefore keeps the original join for `ShuffleScanExec`,
+including its recognized row-local filter/projection wrappers. This eligibility
+rule is rechecked when replacing children; it does not cross an exchange or
+change expression evaluation. Other decoded-batch inputs retain their existing
+behavior.
+
 See [join.rs](../native/core/src/execution/operators/dynamic_filter/join.rs),
 [topk.rs](../native/core/src/execution/operators/dynamic_filter/topk.rs),
 [aggregate.rs](../native/core/src/execution/operators/dynamic_filter/aggregate.rs)
@@ -148,10 +156,13 @@ and [iceberg_scan.rs](../native/core/src/execution/operators/iceberg_scan.rs).
 | Shared read lock for an unchanged bound predicate | Serializing parallel tasks merely to reuse a binding |
 | Generation checks at row-group boundaries | Rebinding and rebuilding on every batch; a changed publication makes one pass over remaining groups and one decoder rebuild |
 | Combined planned/runtime Arrow predicate | Decoding shared predicate columns twice |
-| Whole-file proof that every row matches | Re-evaluating a redundant runtime row filter |
+| Whole-file proof that every row matches | Re-evaluating a redundant planned or runtime row filter |
+| Row-group-scoped reuse of actual coalesced fetch ranges | Fetching output chunks already read alongside predicate chunks |
+| Empty physical projection for empty output field IDs | Decoding and dropping all payload columns for COUNT; predicates and deletes still execute |
 | Shared tasks, lazy task cloning and in-place ordering permutation | Eager copies of all tasks during ordinary execution and additional complete task copies during sorting |
 | Best-first files and descending row groups for MAX/descending TopK | Reading worse candidates before a useful bound exists; unknown bounds retain conservative handling |
 | Original join verifies surviving Iceberg rows directly | A second decoded-batch membership lookup and payload-array filtering |
+| Original exact join for materialized shuffle probes | Additional membership lookup and payload copying after scan/shuffle/decode costs are paid |
 | Compact single-column equality-delete sets above eight entries | Building one expression per delete row; supported larger sets compile membership once and use hash lookup per data row |
 
 These changes reduce specific work; they do not establish a wall-clock speedup.

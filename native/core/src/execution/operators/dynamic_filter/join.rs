@@ -37,13 +37,17 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::distribution_requirements::InputDistributionRequirements;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::statistics::{ChildStats, StatisticsArgs};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties,
     PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream,
 };
+use datafusion_comet_operators::CometFilterExec;
 use futures::StreamExt;
+
+use crate::execution::operators::shuffle_scan::ShuffleScanExec;
 
 use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_join_filter};
 use super::parquet_reader::{is_parquet_reader_key, try_attach_parquet_reader_filter};
@@ -297,11 +301,30 @@ impl ExecutionPlan for DynamicFilterJoinExec {
 const IN_LIST_PUSHDOWN_MAX_BYTES: usize = 16 * 1024;
 const IN_LIST_PUSHDOWN_MAX_DISTINCT: usize = 1024;
 
+/// A shuffled probe has already paid its scan, exchange and decode costs. An
+/// additional membership filter cannot avoid those costs and repeats the hash
+/// lookup the join performs on each row. Recognize only the shuffle source and
+/// its row-local wrappers; do not infer this property across other operators.
+fn is_materialized_shuffle_probe(input: &Arc<dyn ExecutionPlan>) -> bool {
+    if input.is::<ShuffleScanExec>() {
+        true
+    } else if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
+        is_materialized_shuffle_probe(projection.input())
+    } else if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
+        is_materialized_shuffle_probe(filter.input())
+    } else {
+        false
+    }
+}
+
 fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Option<&'static str>> {
     if !config.optimizer.enable_dynamic_filter_pushdown
         || !config.optimizer.enable_join_dynamic_filter_pushdown
     {
         return Ok(Some("disabled by DataFusion session options"));
+    }
+    if is_materialized_shuffle_probe(join.right()) {
+        return Ok(Some("probe is already materialized by a shuffle"));
     }
     // The build side is the left input here. A probe row without a build match never reaches
     // the output of these join types, so dropping it early cannot change the result. Outer
