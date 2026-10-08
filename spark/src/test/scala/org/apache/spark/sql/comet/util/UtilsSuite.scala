@@ -19,16 +19,188 @@
 
 package org.apache.spark.sql.comet.util
 
+import java.io.DataOutputStream
+import java.nio.ByteBuffer
+import java.nio.channels.Channels
+import java.nio.charset.StandardCharsets.UTF_8
+import java.util.Arrays
+
 import org.apache.arrow.c.CDataDictionaryProvider
+import org.apache.arrow.vector.{BaseVariableWidthVector, FieldVector, VarBinaryVector, VarCharVector, VectorSchemaRoot}
+import org.apache.arrow.vector.ipc.ArrowStreamWriter
+import org.apache.arrow.vector.ipc.message.ArrowFieldNode
+import org.apache.spark.SparkEnv
+import org.apache.spark.io.CompressionCodec
 import org.apache.spark.sql.CometTestBase
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType, TimestampType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+import org.apache.spark.util.io.{ChunkedByteBuffer, ChunkedByteBufferOutputStream}
 
-import org.apache.comet.CometArrowAllocator
+import org.apache.comet.{CometArrowAllocator, CometConf}
 import org.apache.comet.vector.CometVector
 
 class UtilsSuite extends CometTestBase {
+
+  test("broadcast transport normalizes sliced string and binary offsets with nulls") {
+    val values = Seq(
+      Some(""),
+      None,
+      Some("short"),
+      Some("long \u03bb" * 20),
+      Some("last"),
+      None,
+      Some("tail"),
+      Some("end"))
+
+    def slicedBuffer(serializeWithUtils: Boolean): ChunkedByteBuffer = {
+      val originals = Seq[BaseVariableWidthVector](
+        new VarCharVector("s", CometArrowAllocator),
+        new VarBinaryVector("b", CometArrowAllocator))
+      val sliced = Seq[BaseVariableWidthVector](
+        new VarCharVector("s", CometArrowAllocator),
+        new VarBinaryVector("b", CometArrowAllocator))
+      val root = new VectorSchemaRoot(Arrays.asList[FieldVector](sliced: _*))
+      try {
+        originals.zip(sliced).foreach { case (original, slice) =>
+          original.allocateNew()
+          (Seq.fill(8)(Some("unused prefix" * 20)) ++ values).zipWithIndex.foreach {
+            case (Some(value), row) => original.setSafe(row, value.getBytes(UTF_8))
+            case (None, row) => original.setNull(row)
+          }
+          original.setValueCount(16)
+          slice.loadFieldBuffers(
+            new ArrowFieldNode(8, 2),
+            Arrays.asList(
+              original.getValidityBuffer.slice(1, 1),
+              original.getOffsetBuffer.slice(8 * 4, 9 * 4),
+              original.getDataBuffer))
+          assert(slice.getOffsetBuffer.getInt(0) > 0)
+        }
+        root.setRowCount(8)
+        if (serializeWithUtils) {
+          val provider = new CDataDictionaryProvider
+          val columns = sliced.map(vector => CometVector.getVector(vector, provider))
+          val batch = new ColumnarBatch(columns.toArray[ColumnVector], 8)
+          Utils.serializeBatches(Iterator(batch)).next()._2
+        } else {
+          // External IPC retains its original offsets; the coalescer must normalize it too.
+          val output = new ChunkedByteBufferOutputStream(1024, ByteBuffer.allocate)
+          val codec = CompressionCodec.createCodec(SparkEnv.get.conf)
+          val compressed = new DataOutputStream(codec.compressedOutputStream(output))
+          val writer = new ArrowStreamWriter(root, null, Channels.newChannel(compressed))
+          try {
+            writer.start()
+            writer.writeBatch()
+          } finally {
+            writer.close()
+          }
+          output.toChunkedByteBuffer
+        }
+      } finally {
+        root.close()
+        originals.foreach(_.close())
+      }
+    }
+
+    Seq(false, true).foreach { serializeWithUtils =>
+      val input = Seq.fill(3)(slicedBuffer(serializeWithUtils))
+      if (serializeWithUtils) {
+        input.foreach { bytes =>
+          val decoded = Utils.decodeBatches(bytes, "compact-broadcast")
+          val batch = decoded.next()
+          (0 until batch.numCols()).foreach { column =>
+            val vector = batch.column(column).asInstanceOf[CometVector].getValueVector
+            assert(vector.getOffsetBuffer.getInt(0) == 0)
+            assert(vector.getDataBuffer.capacity() < 1024)
+          }
+          assert(!decoded.hasNext)
+        }
+      }
+      val (buffers, batchCount, rowCount) = Utils.coalesceBroadcastBatches(input.iterator)
+      assert(batchCount == 3)
+      assert(rowCount == 24)
+      val actual = buffers.iterator.flatMap { bytes =>
+        Utils.decodeBatches(bytes, "sliced-broadcast").flatMap { batch =>
+          (0 until batch.numRows()).map { row =>
+            val string =
+              if (batch.column(0).isNullAt(row)) None
+              else Some(batch.column(0).getUTF8String(row).toString)
+            val binary =
+              if (batch.column(1).isNullAt(row)) None
+              else Some(batch.column(1).getBinary(row).toSeq)
+            (string, binary)
+          }
+        }
+      }.toSeq
+      val expected =
+        Seq.fill(3)(values).flatten.map(value => (value, value.map(_.getBytes(UTF_8).toSeq)))
+      assert(actual == expected)
+    }
+  }
+
+  test("broadcast coalescing preserves all DISTINCT string keys across batch boundaries") {
+    withSQLConf(
+      "spark.sql.adaptive.enabled" -> "false",
+      "spark.sql.shuffle.partitions" -> "4",
+      "spark.comet.expression.Cast.allowIncompatible" -> "true") {
+      val df = spark
+        .range(100000, 140000, 1, 4)
+        .selectExpr("concat('k', lpad(cast(id as string), 10, '0')) AS id")
+        .distinct()
+      val executed = df.queryExecution.executedPlan
+      val plan = executed
+        .collectFirst { case columnar: org.apache.spark.sql.comet.CometColumnarToRowExec =>
+          columnar.child
+        }
+        .getOrElse(fail(s"No native DISTINCT output: $executed"))
+      val buffers = plan
+        .executeColumnar()
+        .mapPartitions(iter => Utils.serializeBatches(iter))
+        .collect()
+        .map(_._2)
+      def keys(input: Iterator[ChunkedByteBuffer]): Seq[String] = {
+        input.flatMap { bytes =>
+          Utils.decodeBatches(bytes, "broadcast-test").flatMap { batch =>
+            (0 until batch.numRows()).map(row => batch.column(0).getUTF8String(row).toString)
+          }
+        }.toSeq
+      }
+      val original = keys(buffers.iterator)
+      val (coalesced, _, _) = Utils.coalesceBroadcastBatches(buffers.iterator)
+      val actual = keys(coalesced.iterator)
+      val expected = (100000 until 140000).map(id => f"k$id%010d")
+      assert(original.sorted == expected)
+      assert(actual.sorted == expected)
+    }
+  }
+
+
+  test("broadcast join with DISTINCT string build keys matches Spark") {
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "10485760",
+      SQLConf.SHUFFLE_PARTITIONS.key -> "4",
+      CometConf.COMET_EXEC_ENABLED.key -> "true",
+      "spark.comet.expression.Cast.allowIncompatible" -> "true") {
+      withTempView("t") {
+        spark
+          .range(0, 200000, 1, 4)
+          .selectExpr("concat('k', lpad(cast(id as string), 10, '0')) AS id")
+          .createOrReplaceTempView("t")
+
+        checkSparkAnswer(sql(
+          """SELECT /*+ BROADCAST(d) */ count(*)
+            |FROM t
+            |JOIN (
+            |  SELECT DISTINCT concat('k', lpad(cast(id as string), 10, '0')) AS id
+            |  FROM range(0, 200000, 1, 4)
+            |) d ON t.id = d.id
+            |""".stripMargin))
+      }
+    }
+  }
 
   test("serializeBatches preserves row count for a zero-column batch") {
     val numRows = 5
