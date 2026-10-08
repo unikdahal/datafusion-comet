@@ -20,6 +20,7 @@ use super::*;
 use arrow::array::{ArrayRef, Int32Array, RecordBatch};
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema};
+use datafusion::common::cast::as_int32_array;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::expressions::BinaryExpr;
@@ -74,6 +75,173 @@ fn metric(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
 
 fn row_count(batches: &[RecordBatch]) -> usize {
     batches.iter().map(RecordBatch::num_rows).sum()
+}
+
+fn probe_batch(values: Vec<Option<i32>>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("payload", DataType::Int32, false),
+        Field::new("key", DataType::Int32, true),
+    ]));
+    let payload = Arc::new(Int32Array::from_iter_values(0..values.len() as i32)) as ArrayRef;
+    let key = Arc::new(Int32Array::from(values)) as ArrayRef;
+    RecordBatch::try_new(schema, vec![payload, key]).unwrap()
+}
+
+fn key_less_than(bound: i32) -> Arc<dyn PhysicalExpr> {
+    Arc::new(BinaryExpr::new(
+        Arc::new(Column::new("key", 1)),
+        Operator::Lt,
+        lit(bound),
+    ))
+}
+
+fn filter_batches(
+    batches: Vec<RecordBatch>,
+) -> (Arc<dyn ExecutionPlan>, Arc<DynamicFilterPhysicalExpr>) {
+    let predicate = Arc::new(DynamicFilterPhysicalExpr::new(
+        vec![Arc::new(Column::new("key", 1))],
+        key_less_than(10),
+    ));
+    let wrapper = Arc::new(DynamicFilterExec::new(
+        memory_exec(batches),
+        Arc::clone(&predicate),
+        ExecutionPlanMetricsSet::new(),
+        "test_filter",
+    ));
+    (wrapper, predicate)
+}
+
+fn assert_accounting(plan: &Arc<dyn ExecutionPlan>, output_rows: usize, input_rows: usize) {
+    let evaluated = metric(plan, "test_filter_rows_evaluated");
+    let bypassed = metric(plan, "test_filter_rows_bypassed");
+    let pruned = metric(plan, "test_filter_rows_pruned");
+    assert_eq!(evaluated + bypassed, input_rows);
+    assert_eq!(output_rows + pruned, evaluated + bypassed);
+}
+
+#[tokio::test]
+async fn all_true_mask_preserves_column_allocations() {
+    let batch = probe_batch(vec![Some(0); 128]);
+    let (wrapper, _) = filter_batches(vec![batch.clone()]);
+    let output = collect(Arc::clone(&wrapper), SessionContext::new().task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(output, vec![batch.clone()]);
+    for (actual, original) in output[0].columns().iter().zip(batch.columns()) {
+        assert!(Arc::ptr_eq(actual, original));
+    }
+    assert_eq!(metric(&wrapper, "test_filter_rows_pruned"), 0);
+    assert_eq!(metric(&wrapper, "test_filter_rows_evaluated"), 128);
+    assert_accounting(&wrapper, 128, 128);
+}
+
+#[tokio::test]
+async fn empty_all_false_and_nullable_masks_preserve_accounting() {
+    let batch = probe_batch(vec![Some(20); 128]);
+    let (wrapper, _) = filter_batches(vec![
+        batch.clone(),
+        probe_batch(vec![]),
+        probe_batch(vec![Some(0), None, Some(20), Some(1)]),
+    ]);
+    let output = collect(Arc::clone(&wrapper), SessionContext::new().task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(output[0], batch.slice(0, 0));
+    let original = as_int32_array(batch.column(0).as_ref()).unwrap();
+    let empty = as_int32_array(output[0].column(0).as_ref()).unwrap();
+    assert_eq!(original.values().as_ptr(), empty.values().as_ptr());
+    assert_eq!(output[1].num_rows(), 0);
+    assert_eq!(output[2].num_rows(), 2);
+    assert_eq!(metric(&wrapper, "test_filter_rows_pruned"), 130);
+    assert_accounting(&wrapper, 2, 132);
+}
+
+#[tokio::test]
+async fn non_selective_stream_bypasses_and_periodically_samples() {
+    let rows = SELECTIVITY_WINDOW_ROWS / 8;
+    let batch = probe_batch(vec![Some(0); rows]);
+    let num_batches = 8 + 2 * BYPASS_SAMPLE_INTERVAL + 3;
+    let (wrapper, _) = filter_batches(vec![batch; num_batches]);
+    let output = collect(Arc::clone(&wrapper), SessionContext::new().task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(metric(&wrapper, "test_filter_rows_evaluated"), 10 * rows);
+    assert_eq!(
+        metric(&wrapper, "test_filter_rows_bypassed"),
+        (num_batches - 10) * rows
+    );
+    assert_eq!(metric(&wrapper, "test_filter_rows_pruned"), 0);
+    assert_eq!(metric(&wrapper, "test_filter_bypass_switches"), 1);
+    assert_accounting(&wrapper, row_count(&output), num_batches * rows);
+}
+
+#[tokio::test]
+async fn selective_suffix_reenables_filtering_without_a_predicate_update() {
+    let rows = SELECTIVITY_WINDOW_ROWS / 8;
+    let keep = probe_batch(vec![Some(0); rows]);
+    let reject = probe_batch(vec![Some(20); rows]);
+    let initial_batches = 8 + BYPASS_SAMPLE_INTERVAL - 1;
+    let mut batches = vec![keep; initial_batches];
+    batches.extend([reject.clone(), reject]);
+    let (wrapper, _) = filter_batches(batches);
+    let output = collect(Arc::clone(&wrapper), SessionContext::new().task_ctx())
+        .await
+        .unwrap();
+    assert!(output[initial_batches..]
+        .iter()
+        .all(|batch| batch.num_rows() == 0));
+    assert_eq!(metric(&wrapper, "test_filter_rows_pruned"), 2 * rows);
+    assert_eq!(metric(&wrapper, "test_filter_rows_evaluated"), 10 * rows);
+    assert_eq!(
+        metric(&wrapper, "test_filter_rows_bypassed"),
+        (BYPASS_SAMPLE_INTERVAL - 1) * rows
+    );
+    assert_eq!(metric(&wrapper, "test_filter_bypass_switches"), 1);
+    assert_accounting(&wrapper, row_count(&output), (initial_batches + 2) * rows);
+}
+
+#[tokio::test]
+async fn selective_streams_never_bypass_including_the_threshold() {
+    // Exactly 10% must remain selective, not just the all-false fast path.
+    for pruned_per_batch in [1000, 5000, 10_000] {
+        let mut values = vec![Some(0); 10_000];
+        values[..pruned_per_batch].fill(Some(20));
+        let (wrapper, _) = filter_batches(vec![probe_batch(values); 24]);
+        let output = collect(Arc::clone(&wrapper), SessionContext::new().task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(metric(&wrapper, "test_filter_rows_bypassed"), 0);
+        assert_eq!(metric(&wrapper, "test_filter_bypass_switches"), 0);
+        assert_eq!(
+            metric(&wrapper, "test_filter_rows_pruned"),
+            24 * pruned_per_batch
+        );
+        assert_accounting(&wrapper, row_count(&output), 240_000);
+    }
+}
+
+#[tokio::test]
+async fn producer_updates_reset_bypass_and_the_evaluation_window() {
+    let rows = SELECTIVITY_WINDOW_ROWS / 8;
+    let batch = probe_batch(vec![Some(0); rows]);
+    let (wrapper, predicate) = filter_batches(vec![batch; 12]);
+    let mut stream = wrapper.execute(0, SessionContext::new().task_ctx()).unwrap();
+    for _ in 0..9 {
+        assert_eq!(stream.next().await.unwrap().unwrap().num_rows(), rows);
+    }
+    assert_eq!(metric(&wrapper, "test_filter_rows_bypassed"), rows);
+    predicate.update(key_less_than(-1)).unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap().num_rows(), 0);
+    // The new window contains only this producer generation's observations.
+    predicate.update(key_less_than(10)).unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap().num_rows(), rows);
+    assert_eq!(stream.next().await.unwrap().unwrap().num_rows(), rows);
+    assert!(stream.next().await.is_none());
+    assert_eq!(metric(&wrapper, "test_filter_rows_evaluated"), 11 * rows);
+    assert_eq!(metric(&wrapper, "test_filter_rows_pruned"), rows);
+    assert_eq!(metric(&wrapper, "test_filter_rows_bypassed"), rows);
+    assert_eq!(metric(&wrapper, "test_filter_bypass_switches"), 1);
+    assert_accounting(&wrapper, 11 * rows, 12 * rows);
 }
 
 #[tokio::test]
