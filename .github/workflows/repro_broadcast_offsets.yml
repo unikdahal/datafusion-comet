@@ -1,0 +1,99 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Repro Broadcast Sliced Offsets
+
+on:
+  push:
+    branches:
+      - 'repro/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Repro Broadcast Sliced Offsets (Spark 3.5, JDK 17)
+    runs-on: ubuntu-24.04
+    container:
+      image: amd64/rust
+      env:
+        JAVA_TOOL_OPTIONS: '--add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=java.base/sun.util.calendar=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Rust & Java toolchain
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: 17
+
+      - name: Restore Cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('native/**/Cargo.lock', 'native/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ci-
+
+      - name: Restore Maven dependencies
+        id: maven-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.m2/repository
+            /root/.m2/repository
+          key: ${{ runner.os }}-java-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-java-maven-
+
+      - name: Build native library (CI profile)
+        run: |
+          cd native
+          cargo build --profile ci
+          mkdir -p target/release
+          cp target/ci/libcomet.so target/release/
+        env:
+          RUSTFLAGS: "-Ctarget-cpu=x86-64-v3 -Clink-arg=-fuse-ld=bfd"
+
+      - name: Run Scala tests
+        env:
+          SPARK_LOCAL_HOSTNAME: localhost
+          SPARK_LOCAL_IP: 127.0.0.1
+          MAVEN_OPTS: "-Xmx4G -Xms2G -XX:+UnlockDiagnosticVMOptions -XX:+ShowMessageBoxOnError -XX:+HeapDumpOnOutOfMemoryError"
+        run: |
+          SPARK_HOME="$GITHUB_WORKSPACE" ./mvnw -B -Pspark-3.5 -Pscala-2.12 -Prelease test \
+            -Dtest=none \
+            -Dsuites=org.apache.spark.sql.comet.util.UtilsSuite,org.apache.spark.sql.comet.CometBroadcastSlicedOffsetsSuite \
+            -DwildcardSuites=org.apache.spark.sql.comet.util.UtilsSuite,org.apache.spark.sql.comet.CometBroadcastSlicedOffsetsSuite \
+            -DfailIfNoTests=false
+
+      - name: Upload test reports
+        if: always()
+        uses: ./.github/actions/upload-artifact-retry
+        with:
+          name: surefire-reports-${{ github.sha }}
+          path: |
+            **/target/surefire-reports/*
+            **/target/unit-tests.log
+          if-no-files-found: ignore
