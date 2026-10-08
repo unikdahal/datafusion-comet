@@ -225,7 +225,9 @@ async fn producer_updates_reset_bypass_and_the_evaluation_window() {
     let rows = SELECTIVITY_WINDOW_ROWS / 8;
     let batch = probe_batch(vec![Some(0); rows]);
     let (wrapper, predicate) = filter_batches(vec![batch; 12]);
-    let mut stream = wrapper.execute(0, SessionContext::new().task_ctx()).unwrap();
+    let mut stream = wrapper
+        .execute(0, SessionContext::new().task_ctx())
+        .unwrap();
     for _ in 0..9 {
         assert_eq!(stream.next().await.unwrap().unwrap().num_rows(), rows);
     }
