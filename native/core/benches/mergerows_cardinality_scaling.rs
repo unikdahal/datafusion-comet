@@ -131,6 +131,20 @@ fn insert(design: &str, input: &[u64]) -> (usize, usize) {
             drop(set);
             (count, retained)
         }
+        "partitioned-append" => {
+            let mut set: HashMap<u32, RoaringBitmap> = HashMap::new();
+            for &id in input {
+                let bitmap = set.entry((id >> 32) as u32).or_default();
+                if bitmap.try_push(id as u32).is_err() {
+                    assert!(bitmap.insert(id as u32));
+                }
+            }
+            let retained = LIVE.load(Ordering::Relaxed) as usize;
+            let count = set.values().map(RoaringBitmap::len).sum::<u64>() as usize;
+            std::hint::black_box(&set);
+            drop(set);
+            (count, retained)
+        }
         "partitioned-direct" | "partitioned-sorted" => {
             let mut set: HashMap<u32, RoaringBitmap> = HashMap::new();
             if design == "partitioned-sorted" {
@@ -177,7 +191,7 @@ fn sample(design: &str, input: &[u64]) -> (f64, usize, usize) {
 fn main() {
     const N: usize = 5_000_000;
     let layouts = ["dense", "sparse-8", "sparse-200", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled"];
-    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-sorted", "segmented-adaptive"];
+    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-append", "partitioned-sorted", "segmented-adaptive"];
     println!("SCALING_BENCH,n,layout,design,median_ms,retained_bytes,peak_allocated_bytes");
     for layout in layouts {
         let input = ids(layout, N);
