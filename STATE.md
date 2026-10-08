@@ -44,3 +44,7 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - F4 (P2): detached delete-loading after cancel → leaked I/O + unreported metrics. Next after F1.
 - F5: shuffle-probe filter removal = cost policy, unproven; need selective shuffle probe bench.
 - F6 (P3): skipped-filter counter misses shuffle rejection; bundle into Comet pin bump.
+
+## 2026-10-08 11:00 — CI
+- iceberg fork CI run 37758600458 @5faa5bdba GREEN (verified via gh): fmt, clippy -D warnings, 2,360 tests, 95 doctests.
+- Comet validation 37755479696 @92bba61b6: integration (3.5) + (4.1) FAILED. Last green 37703958482 @058991ede. Diagnosis task rp-comet-integ-fail-r1. Top priority alongside F1.
