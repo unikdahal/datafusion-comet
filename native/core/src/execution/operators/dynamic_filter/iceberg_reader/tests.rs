@@ -1163,7 +1163,9 @@ fn filter_through_attaches_for_safe_deterministic_predicate() {
     use datafusion::physical_plan::filter::FilterExec;
     use datafusion_comet_spark_expr::{create_modulo_expr, RandExpr};
     use iceberg::scan::FileScanTask;
-    use iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
+    use iceberg::spec::{
+        DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
+    };
 
     let iceberg_schema = Arc::new(
         IcebergSchema::builder()
