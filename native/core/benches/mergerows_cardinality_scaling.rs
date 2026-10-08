@@ -185,10 +185,80 @@ fn segmented_anchored(input: &[u64]) -> (usize, usize) {
     (count, retained)
 }
 
+enum AnchoredHashSegment {
+    Dense { base_word: u32, words: Vec<u64>, count: usize },
+    Sparse(HashSet<u32>),
+}
+
+fn segmented_anchored_hash(input: &[u64]) -> (usize, usize) {
+    const MAX_WORDS: usize = 131_072;
+    let mut partitions: HashMap<u32, AnchoredHashSegment> = HashMap::new();
+    for &id in input {
+        let high = (id >> 32) as u32;
+        let low = id as u32;
+        let word = low >> 6;
+        let entry = partitions.entry(high).or_insert_with(|| AnchoredHashSegment::Dense {
+            base_word: word,
+            words: Vec::new(),
+            count: 0,
+        });
+        match entry {
+            AnchoredHashSegment::Sparse(bitmap) => {
+                assert!(bitmap.insert(low));
+            }
+            AnchoredHashSegment::Dense { base_word, words, count } => {
+                let current_end = (*base_word as u64) + words.len().saturating_sub(1) as u64;
+                let minimum = (*base_word).min(word);
+                let maximum = current_end.max(word as u64);
+                let proposed_words = (maximum - minimum as u64 + 1) as usize;
+                if proposed_words > MAX_WORDS
+                    || proposed_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1))
+                {
+                    let mut bitmap = HashSet::<u32>::new();
+                    for (i, &bits) in words.iter().enumerate() {
+                        let mut remaining = bits;
+                        while remaining != 0 {
+                            let bit = remaining.trailing_zeros() as u32;
+                            assert!(bitmap.insert(((*base_word as u64 + i as u64) * 64 + bit as u64) as u32));
+                            remaining &= remaining - 1;
+                        }
+                    }
+                    assert!(bitmap.insert(low));
+                    *entry = AnchoredHashSegment::Sparse(bitmap);
+                } else {
+                    if minimum < *base_word {
+                        let offset = (*base_word - minimum) as usize;
+                        let mut next = vec![0u64; proposed_words];
+                        next[offset..offset + words.len()].copy_from_slice(words);
+                        *words = next;
+                        *base_word = minimum;
+                    } else if proposed_words > words.len() {
+                        words.resize(proposed_words, 0);
+                    }
+                    let idx = (word - *base_word) as usize;
+                    let flag = 1u64 << (low & 63);
+                    assert_eq!(words[idx] & flag, 0);
+                    words[idx] |= flag;
+                    *count += 1;
+                }
+            }
+        }
+    }
+    let retained = LIVE.load(Ordering::Relaxed) as usize;
+    let count = partitions.values().map(|p| match p {
+        AnchoredHashSegment::Dense {count, ..} => *count,
+        AnchoredHashSegment::Sparse(b) => b.len() as usize,
+    }).sum();
+    std::hint::black_box(&partitions);
+    drop(partitions);
+    (count, retained)
+}
+
 fn insert(design: &str, input: &[u64]) -> (usize, usize) {
     match design {
         "segmented-adaptive" => segmented_adaptive(input),
         "segmented-anchored" => segmented_anchored(input),
+        "segmented-anchored-hash" => segmented_anchored_hash(input),
         "hash" => {
             let mut set = HashSet::new();
             for &id in input { assert!(set.insert(id)); }
@@ -267,7 +337,7 @@ fn sample(design: &str, input: &[u64]) -> (f64, usize, usize) {
 fn main() {
     const N: usize = 5_000_000;
     let layouts = ["dense", "sparse-8", "sparse-200", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled", "spark-200-high-offset"];
-    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-append", "partitioned-sorted", "segmented-adaptive", "segmented-anchored"];
+    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-append", "partitioned-sorted", "segmented-adaptive", "segmented-anchored", "segmented-anchored-hash"];
     println!("SCALING_BENCH,n,layout,design,median_ms,retained_bytes,peak_allocated_bytes");
     for layout in layouts {
         let input = ids(layout, N);
