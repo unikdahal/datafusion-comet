@@ -1,7 +1,7 @@
 {
  "updated": "2026-10-09 (W1 done)",
  "heads": {
-  "iceberg": "f3a157f81 GREEN (37831514218)",
+  "iceberg": "0c3d9eedec271c8b29b434cc1692c3caa5f5bd62 (R2/R3 rebased on f3a157f81; CI pending). Comet still pins f3a157f81.",
   "comet": "6e7d582b555c9bff90350ce060047028d0cd9be8 (pins iceberg f3a157f81; full CI running)",
   "bench": "c43593010 (targeted decimal)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
@@ -312,7 +312,8 @@
   "R23": {
    "item": "iceberg: remove cfg(test) semaphore from DeleteFilter, decoder expects->errors, named consts, pub API shrink (check Comet usage)",
    "agent": "gemini rp-r23-iceberg-refactor-r1",
-   "branch": "adaptive-ci/ws-r23-iceberg-hygiene"
+   "branch": "adaptive-ci/ws-r23-iceberg-hygiene",
+   "status": "MERGED (rebased). Follow-ups: include_column_stats test-only -> delete/move instead of allow(dead_code); R3a Notify strong_count waiter barrier is fragile \u2014 revisit"
   },
   "R5": {
    "item": "Comet: iceberg_scan cfg(test) method + cached unwrap, planner direct_minmax dedupe, threshold-8 const",

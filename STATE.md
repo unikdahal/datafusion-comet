@@ -132,3 +132,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Upstream audit done; refactor track R2/R3 (iceberg) + R5 (Comet) started on ws branches; R1/R4/R6 queued.
 - B4 merged into iceberg integration (f3a157f81). Await CI → Comet pin bump + B4 targeted bench.
 - Comet 6e7d582b5 pins iceberg f3a157f81 (B4+B6). B4 bench queued after decimal bench.
+- R2/R3 iceberg hygiene merged into iceberg integration (rebased).
