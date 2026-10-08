@@ -583,11 +583,11 @@ where
                             let exprs =
                                 build_projection_expressions(&self.schema, &file_schema, &adapter)
                                     .map_err(|e| {
-                                    DataFusionError::Execution(format!(
-                                        "Failed to build projection expressions: {}",
-                                        e
-                                    ))
-                                })?;
+                                        DataFusionError::Execution(format!(
+                                            "Failed to build projection expressions: {}",
+                                            e
+                                        ))
+                                    })?;
                             self.cached = Some(CachedProjection {
                                 file_schema,
                                 projection_exprs: exprs.clone(),
@@ -685,6 +685,12 @@ fn build_projection_expressions(
         .iter()
         .enumerate()
         .map(|(i, field)| {
+            let col_expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new_with_schema(
+                target_schema.field(i).name(),
+                target_schema.as_ref(),
+            )?);
+            // Retain the adapter's selected-column validation, including duplicate names.
+            let rewritten = adapter.rewrite(col_expr)?;
             // These layouts all store the same UTF-8 bytes. Iceberg decodes String to
             // Utf8; a native consumer may request a view, large offsets or a dictionary.
             // Use Arrow's representation cast without applying Spark SQL type coercions.
@@ -701,18 +707,13 @@ fn build_projection_expressions(
                     && is_arrow_string_type(field.data_type())
                 {
                     let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new(field.name(), *index));
-                    return Ok(Arc::new(CastExpr::new(
-                        column,
-                        field.data_type().clone(),
-                        None,
-                    )) as Arc<dyn PhysicalExpr>);
+                    return Ok(
+                        Arc::new(CastExpr::new(column, field.data_type().clone(), None))
+                            as Arc<dyn PhysicalExpr>,
+                    );
                 }
             }
-            let col_expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new_with_schema(
-                target_schema.field(i).name(),
-                target_schema.as_ref(),
-            )?);
-            adapter.rewrite(col_expr)
+            Ok(rewritten)
         })
         .collect::<DFResult<Vec<_>>>()
 }
@@ -1379,6 +1380,31 @@ mod tests {
             runtime_predicate_field_name(&scan(DataType::Int32, vec![case_task]), 0),
             None
         );
+    }
+
+    #[test]
+    fn string_layout_cast_preserves_selected_name_validation() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use datafusion_physical_expr_adapter::PhysicalExprAdapterFactory;
+
+        let options = super::SparkParquetOptions::new(super::EvalMode::Legacy, "UTC", false);
+        let factory = super::SparkPhysicalExprAdapterFactory::new(options, None);
+        for duplicate_name in ["key", "KEY"] {
+            let physical = Arc::new(ArrowSchema::new(vec![
+                Field::new("key", DataType::Utf8, true),
+                Field::new(duplicate_name, DataType::Utf8, true),
+            ]));
+            for target_type in [DataType::LargeUtf8, DataType::Utf8View] {
+                let target = Arc::new(ArrowSchema::new(vec![Field::new("key", target_type, true)]));
+                let adapter = factory
+                    .create(Arc::clone(&target), Arc::clone(&physical))
+                    .unwrap();
+                let error = super::build_projection_expressions(&target, &physical, &adapter)
+                    .expect_err("string representation changes must retain ambiguity errors")
+                    .to_string();
+                assert!(error.contains("duplicate"), "{error}");
+            }
+        }
     }
 
     #[test]

@@ -1936,19 +1936,21 @@ fn string_iceberg_probe(key_type: &DataType) -> (tempfile::NamedTempFile, Arc<dy
 
     let schema = Arc::new(
         IcebergSchema::builder()
-            .with_fields(vec![
-                NestedField::optional(1, "key", Type::Primitive(PrimitiveType::String)).into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "key",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into()])
             .build()
             .unwrap(),
     );
     let file = tempfile::NamedTempFile::new().unwrap();
-    let physical_schema = Arc::new(Schema::new(vec![
-        Field::new("key", DataType::Utf8, true).with_metadata(HashMap::from([(
+    let physical_schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, true)
+        .with_metadata(HashMap::from([(
             parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
             "1".to_string(),
-        )])),
-    ]));
+        )]))]));
     let values = vec![
         Some(""),
         Some("abcdefghijklmnop-first"),
@@ -1984,11 +1986,7 @@ fn string_iceberg_probe(key_type: &DataType) -> (tempfile::NamedTempFile, Arc<dy
     let probe: Arc<dyn ExecutionPlan> = Arc::new(
         crate::execution::operators::IcebergScanExec::new(
             file.path().to_string_lossy().into_owned(),
-            Arc::new(Schema::new(vec![Field::new(
-                "key",
-                key_type.clone(),
-                true,
-            )])),
+            Arc::new(Schema::new(vec![Field::new("key", key_type.clone(), true)])),
             Default::default(),
             String::new(),
             vec![task],
@@ -2043,10 +2041,8 @@ fn string_annotations_and_visible_casts_disable_pruning() {
         "__CHAR_VARCHAR_TYPE_STRING",
         "ARROW:extension:name",
     ] {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, true)
-                .with_metadata(HashMap::from([(annotation.into(), "non-binary".into())])),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, true)
+            .with_metadata(HashMap::from([(annotation.into(), "non-binary".into())]))]));
         let batch = RecordBatch::try_new(
             schema,
             vec![Arc::new(arrow::array::StringArray::from(vec!["x"]))],
@@ -2108,8 +2104,22 @@ async fn string_reader_join_preserves_nulls_duplicates_and_binary_values() {
             .unwrap();
         let runtime = wrapper.build_runtime_join().unwrap();
         assert!(runtime.reader_filter_attached, "{key_type:?}");
+        let consumer = runtime
+            .join
+            .right()
+            .downcast_ref::<super::super::consumer::ReaderFilterConsumerExec>()
+            .unwrap();
+        let reader = Arc::clone(&consumer.input);
         let session = SessionContext::new();
         let expected = collect(Arc::new(plain), session.task_ctx()).await.unwrap();
+        let adopted = collect(Arc::new(runtime.join), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(metric(&reader, "iceberg_runtime_predicate_tasks"), 1);
+        assert_eq!(
+            batches_to_sort_string(&adopted),
+            batches_to_sort_string(&expected)
+        );
         let filtered: Arc<dyn ExecutionPlan> = Arc::new(wrapper);
         let actual = collect(Arc::clone(&filtered), session.task_ctx())
             .await

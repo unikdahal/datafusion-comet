@@ -1406,11 +1406,16 @@ class CometIcebergNativeSuite
             withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
               spark.range(120000L).coalesce(1).sortWithinPartitions("id")
                 .selectExpr(
-                  "concat('abcdefghijklmnop', lpad(CAST(id AS STRING), 6, '0')) AS id",
+                  "concat('abcdefghijklmnop', " +
+                    "lpad(CAST(CAST(id / 32 AS BIGINT) AS STRING), 6, '0')) AS id",
                   "sha2(CAST(id AS STRING), 256) AS payload")
                 .write.format("iceberg").mode("append").saveAsTable(table)
-              spark.sql(s"""INSERT INTO $table VALUES
-                ('', 'empty'), ('é東京🙂', 'unicode'), (NULL, 'null')""")
+              // Repeated values keep dictionary encoding enabled for every file when requested.
+              spark.range(64L).selectExpr(
+                "CASE WHEN id % 2 = 0 THEN '' ELSE 'é東京🙂' END AS id",
+                "'special' AS payload")
+                .union(spark.sql("SELECT CAST(NULL AS STRING) AS id, 'null' AS payload"))
+                .coalesce(1).write.format("iceberg").mode("append").saveAsTable(table)
               spark.range(64L).filter("id % 2 = 0").coalesce(1)
                 .selectExpr("concat('abcdefghijklmnop', lpad(CAST(id AS STRING), 6, '0')) AS id")
                 .union(spark.sql("SELECT id FROM VALUES ('') , ('é東京🙂'), ('é東京🙂'), (NULL) AS d(id)"))
@@ -1454,7 +1459,7 @@ class CometIcebergNativeSuite
                 val scans = collectIcebergNativeScans(plan)
                 val joins = collect(plan) { case join: CometBroadcastHashJoinExec => join }
                 assert(scans.size == 1 && joins.size == 1, s"Expected native string join:\n$plan")
-                assert(joins.head.metrics("output_rows").value == 35L)
+                assert(joins.head.metrics("output_rows").value == 1120L)
                 val tasks = scans.head.metrics("iceberg_runtime_predicate_tasks").value
                 val pruned = scans.head.metrics("iceberg_runtime_row_groups_pruned").value +
                   scans.head.metrics("iceberg_runtime_file_tasks_pruned").value

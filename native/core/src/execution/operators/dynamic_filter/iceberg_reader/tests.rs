@@ -713,11 +713,8 @@ fn string_bounds_and_membership_translate_without_truncation() {
             Operator::GtEq,
             lit(scalar("")),
         ));
-        let upper: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
-            key,
-            Operator::LtEq,
-            lit(scalar("é東京🙂")),
-        ));
+        let upper: Arc<dyn PhysicalExpr> =
+            Arc::new(BinaryExpr::new(key, Operator::LtEq, lit(scalar("é東京🙂"))));
         let range: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(lower, Operator::And, upper));
         let both: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(range, Operator::And, list));
         assert_eq!(
