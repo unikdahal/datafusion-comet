@@ -3581,7 +3581,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.10.1"
-source = "git+https://github.com/unikdahal/iceberg-rust?rev=949cc88acb6d5e5d47e4a4362075c8bc5afb8314#949cc88acb6d5e5d47e4a4362075c8bc5afb8314"
+source = "git+https://github.com/unikdahal/iceberg-rust?rev=1e3f2a8689fc5a8aa203405411e791770d2cfc0e#1e3f2a8689fc5a8aa203405411e791770d2cfc0e"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3639,7 +3639,7 @@ dependencies = [
 [[package]]
 name = "iceberg-property-macro"
 version = "0.10.1"
-source = "git+https://github.com/unikdahal/iceberg-rust?rev=949cc88acb6d5e5d47e4a4362075c8bc5afb8314#949cc88acb6d5e5d47e4a4362075c8bc5afb8314"
+source = "git+https://github.com/unikdahal/iceberg-rust?rev=1e3f2a8689fc5a8aa203405411e791770d2cfc0e#1e3f2a8689fc5a8aa203405411e791770d2cfc0e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3649,7 +3649,7 @@ dependencies = [
 [[package]]
 name = "iceberg-storage-opendal"
 version = "0.10.1"
-source = "git+https://github.com/unikdahal/iceberg-rust?rev=949cc88acb6d5e5d47e4a4362075c8bc5afb8314#949cc88acb6d5e5d47e4a4362075c8bc5afb8314"
+source = "git+https://github.com/unikdahal/iceberg-rust?rev=1e3f2a8689fc5a8aa203405411e791770d2cfc0e#1e3f2a8689fc5a8aa203405411e791770d2cfc0e"
 dependencies = [
  "anyhow",
  "async-trait",
