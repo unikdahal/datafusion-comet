@@ -1,7 +1,7 @@
 {
  "updated": "2026-10-09 (W1 done)",
  "heads": {
-  "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
+  "iceberg": "3e0b1ca54b64e76f5cf9c1154b12166afe508ce7 (B6 merged, CI pending)",
   "comet": "bef150221 (GREEN 37820096779: decimal phase1)",
   "bench": "c43593010 (targeted decimal)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
@@ -94,10 +94,10 @@
  "tasks": [
   "rp-w1b-string-r1",
   "rp-w5-upstream-audit-r2",
-  "rp-w4-b6-impl-r3",
-  "sonnet:ws-b4-fix",
+  "sonnet:ws-b4-fix+rebase",
   "sonnet:ws-fast-ci-fix",
-  "gemini W6/W7 may have died on quota"
+  "sonnet:ws-b3+ws-b2-shepherd",
+  "bench c43593010 decimal targeted"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -257,7 +257,7 @@
    "item": "B4 advisory row-filter gate (iceberg)",
    "agent": "gemini rp-w2-b4-impl-r1",
    "branch": "adaptive-ci/ws-b4-rowfilter-gate",
-   "status": "ws-b4 6c86b0131 CI failed; sonnet subagent fixing (gemini quota)"
+   "status": "sonnet fixing CI; told to rebase onto 3e0b1ca54"
   },
   "W3": {
    "item": "Comet fast CI lane for ws-* + full only on integration",
@@ -269,7 +269,7 @@
    "item": "B6 safe float all-match (iceberg)",
    "agent": "gemini rp-w4-b6-impl-r3",
    "branch": "adaptive-ci/ws-b6-float-allmatch",
-   "status": "ws-b6 3e0b1ca54 CI running"
+   "status": "MERGED into iceberg integration 3e0b1ca54 (lead-reviewed: sound \u2014 no NaN rows, no \u00b10 literal, bounds exclude 0). Needs Comet pin bump (batch with B4)."
   },
   "W5": {
    "item": "upstreamability/refactor audit (read-only)",
@@ -279,13 +279,13 @@
    "item": "B3 NULLS FIRST Top-K translation (Comet)",
    "agent": "gemini rp-w6-b3-impl-r1",
    "branch": "adaptive-ci/ws-b3-nulls-first",
-   "status": "ws-b3 c74d3c531 full validation queued"
+   "status": "ws-b3 c74d3c531 pushed; sonnet shepherd fixing CI + correctness self-review"
   },
   "W7": {
    "item": "B2 Top-K/join filters through safe Filter + spark_modulo (ANSI-gated)",
    "agent": "gemini rp-w7-b2-impl-r1",
    "branch": "adaptive-ci/ws-b2-topk-filters",
-   "status": "ws-b2 15c727d9a full validation running"
+   "status": "ws-b2 15c727d9a pushed; sonnet shepherd fixing CI + correctness self-review"
   },
   "W1b": {
    "item": "B1 phase 2 string keys",

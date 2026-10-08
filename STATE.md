@@ -128,3 +128,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - W5 re-dispatched to opencode/big-pickle (glm-5.3-free channel unavailable).
 - W4 re-dispatched to gemini (glm-5.3-free unavailable; avoid tokenrouter free channel).
 - W1 decimal DONE (bef150221 green). Targeted decimal bench c43593010. W1b string started (codex). Gemini quota hit -> sonnet subagents fixing ws-b4 CI and fast-ci lane.
+- B6 merged into iceberg integration (3e0b1ca54). Sonnet shepherds on ws-b4, ws-fast-ci, ws-b3, ws-b2.
