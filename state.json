@@ -1,8 +1,8 @@
 {
- "updated": "2026-10-08T16:55Z",
+ "updated": "2026-10-08T17:10Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
-  "comet": "c739c322ea591cd40f23fc44c164f18ab6d38499",
+  "comet": "1bfd6239b (CI FAILED 37808593789: spark build + integration)",
   "bench": "21f15844d",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
@@ -92,7 +92,8 @@
   }
  ],
  "tasks": [
-  "rp-b4-design-r1"
+  "rp-b4-design-r1",
+  "rp-b1-decimal-r2"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -168,9 +169,6 @@
    "summary": "join dynamic filter (fork batch_filter.rs) evaluates+copies every probe batch even when non-selective; no zero-copy all-true path, no selectivity feedback. strjoin cand_on/cand_off 0.97x. Fix: zero-copy fast paths + adaptive bypass with periodic re-sampling."
   }
  ],
- "agent_limits": {
-  "codex": "usage limit until 17:07 UTC 2026-10-08"
- },
  "next": [
   "on comet green: after bench 37758359536 finishes, pin bench to comet 434d18333 / iceberg 1e3f2a868",
   "analyze bench 37758359536 artifacts (per-query RCA; join set = no-shuffle-filter variant)",
@@ -208,7 +206,7 @@
   {
    "id": "B1",
    "item": "string/decimal join-key pruning eligibility",
-   "status": "phase1 decimal: pushed 901348bea+1bfd6239b (CI 37808593789 running). UNCOMMITTED WIP in rp-work/comet-decimal: Spark-side decimal key lineage guard (operators.scala isDirectDecimalKey) + tests. Codex limited; resume after 17:07 UTC with continuation task."
+   "status": "decimal: CI failed on 1bfd6239b; codex rp-b1-decimal-r2 diagnosing + finishing lineage-guard decision. NOTE branch head currently RED."
   },
   {
    "id": "B2",
