@@ -26,6 +26,8 @@ import subprocess
 import sys
 import tomllib
 
+from run_suite import make_campaign, runner_environment
+
 MAIN_REPOSITORY = "https://github.com/apache/datafusion-comet.git"
 
 
@@ -75,6 +77,8 @@ def resolve(configuration, main_repository=MAIN_REPOSITORY):
     return {
         "resolved_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "harness": git("rev-parse", "HEAD"),
+        "environment": runner_environment(),
+        "campaign": make_campaign(configuration),
         "baseline": {
             "repository": MAIN_REPOSITORY,
             "ref": "refs/heads/main",

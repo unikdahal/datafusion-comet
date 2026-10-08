@@ -43,10 +43,14 @@ jobs:
     outputs:
       baseline: ${{ steps.resolve.outputs.baseline }}
       candidate: ${{ steps.resolve.outputs.candidate }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      data_matrix: ${{ steps.resolve.outputs.data_matrix }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Check correctness, shard coverage and targeted-campaign harness
+        run: python3 benchmarks/iceberg-runtime-pruning-detailed/check_harness.py
       - name: Resolve latest Apache main and validate candidate provenance
         id: resolve
         run: |
@@ -58,6 +62,8 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               for side in ("baseline", "candidate"):
                   out.write(f"{side}={revisions[side]['comet']}\n")
+              for key in ("matrix", "data_matrix"):
+                  out.write(f"{key}={json.dumps({'include': revisions['campaign'][key]}, separators=(',', ':'))}\n")
           PY
       - uses: actions/upload-artifact@v7
         with:
@@ -88,6 +94,7 @@ jobs:
         id: revision
         env:
           SIDE: ${{ matrix.side }}
+          BUILD_STEPS_HASH: ${{ hashFiles('.github/workflows/iceberg_adaptive_benchmark.yml', '.github/actions/setup-builder/**', '.github/actions/maven-bootstrap/**') }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 - <<'PY'
@@ -99,17 +106,35 @@ jobs:
               raise SystemExit(f"The {side} Comet revision must be a fixed 40-character SHA")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"sha={sha}\n")
+              iceberg = revisions[side]["iceberg_dependency"].get("source", "").rsplit("#", 1)[-1]
+              if not re.fullmatch("[0-9a-f]{40}", iceberg):
+                  raise SystemExit("Build cache requires a locked Iceberg git SHA")
+              key = f"comet-release-v1-{sha}-{iceberg}-rust-1.99.0-{os.environ['BUILD_STEPS_HASH']}"
+              out.write(f"cache_key={key}\n")
           with open(os.environ["GITHUB_ENV"], "a") as out:
               out.write(f"BENCH_SIDE={side}\n")
+          import shutil
+          shutil.copyfile("benchmarks/iceberg-runtime-pruning-detailed/run_suite.py", "/tmp/bench-run-suite.py")
+          shutil.copyfile("benchmarks/iceberg-runtime-pruning-detailed/lib.py", "/tmp/lib.py")
           repository = revisions[side].get("repository", "origin")
           subprocess.run(["git", "fetch", "--no-tags", repository, sha], check=True)
           subprocess.run(["git", "checkout", "--detach", sha], check=True)
           PY
+      - name: Restore exact release binaries
+        id: build_cache
+        uses: actions/cache@v4
+        with:
+          key: ${{ steps.revision.outputs.cache_key }}
+          path: |
+            dist/comet.jar
+            native/target/release/libcomet.so
+            build-cache-info.json
       - uses: ./.github/actions/setup-builder
         with:
           rust-version: '1.99.0'
           jdk-version: '17'
       - name: Build release native code and Spark 3.5 jar
+        if: steps.build_cache.outputs.cache-hit != 'true'
         env:
           COMET_COMMIT: ${{ steps.revision.outputs.sha }}
         run: |
@@ -118,14 +143,22 @@ jobs:
           cd ..
           ./mvnw -B install -Prelease -DskipTests -Pspark-3.5
           mkdir -p dist
+      - name: Validate cached or built binaries and record current provenance
+        env:
+          COMET_COMMIT: ${{ steps.revision.outputs.sha }}
+          BUILD_CACHE_HIT: ${{ steps.build_cache.outputs.cache-hit == 'true' }}
+          BUILD_CACHE_KEY: ${{ steps.revision.outputs.cache_key }}
+        run: |
+          python3 /tmp/bench-run-suite.py --environment /tmp/build-environment.json
           python3 - <<'PY'
-          import glob, hashlib, json, os, pathlib, shutil, subprocess, tomllib
-          root = pathlib.Path(".")
+          import glob, hashlib, json, os, pathlib, shutil, subprocess, tomllib, zipfile
           jars = [p for p in glob.glob("spark/target/comet-spark-spark3.5_2.12-*.jar")
                   if not p.endswith(("-sources.jar", "-tests.jar", "-javadoc.jar"))]
-          if len(jars) != 1:
-              raise SystemExit(f"Expected one assembly jar, found {jars}")
-          shutil.copyfile(jars[0], "dist/comet.jar")
+          hit = os.environ["BUILD_CACHE_HIT"] == "true"
+          if not hit:
+              if len(jars) != 1:
+                  raise SystemExit(f"Expected one assembly jar, found {jars}")
+              shutil.copyfile(jars[0], "dist/comet.jar")
           lock = tomllib.loads(pathlib.Path("native/Cargo.lock").read_text())
           dependencies = [{k: p[k] for k in ("name", "version", "source") if k in p}
                           for p in lock["package"] if p["name"] in ("iceberg", "datafusion", "arrow")]
@@ -147,6 +180,26 @@ jobs:
                       "rustflags": os.environ["RUSTFLAGS"], "profile": "release", "spark_profile": "3.5",
                       "cargo_lock_sha256": hashlib.sha256(pathlib.Path("native/Cargo.lock").read_bytes()).hexdigest(),
                       "jar_sha256": hashlib.sha256(pathlib.Path("dist/comet.jar").read_bytes()).hexdigest()}
+          native = pathlib.Path("native/target/release/libcomet.so")
+          metadata["native_sha256"] = hashlib.sha256(native.read_bytes()).hexdigest()
+          with zipfile.ZipFile("dist/comet.jar") as jar:
+              packaged = jar.read("org/apache/comet/linux/amd64/libcomet.so")
+              if hashlib.sha256(packaged).hexdigest() != metadata["native_sha256"]:
+                  raise SystemExit("Assembly jar does not embed the verified release native library")
+          metadata["cache_key"] = os.environ["BUILD_CACHE_KEY"]
+          metadata["cache_hit"] = hit
+          metadata["environment"] = json.loads(pathlib.Path("/tmp/build-environment.json").read_text())
+          cache_info = pathlib.Path("build-cache-info.json")
+          if hit:
+              producer = json.loads(cache_info.read_text())
+              for key in ("comet", "dependencies", "rust", "rustflags", "profile", "spark_profile",
+                          "cargo_lock_sha256", "jar_sha256", "native_sha256", "cache_key"):
+                  if producer[key] != metadata[key]:
+                      raise SystemExit(f"Cached binary provenance/digest mismatch: {key}")
+          else:
+              producer = {**metadata, "built_run_id": os.environ["GITHUB_RUN_ID"]}
+              cache_info.write_text(json.dumps(producer, indent=2) + "\n")
+          metadata["cache_provenance"] = producer
           pathlib.Path("dist/build-info.json").write_text(json.dumps(metadata, indent=2) + "\n")
           print(json.dumps(metadata, indent=2))
           PY
@@ -156,33 +209,121 @@ jobs:
           path: dist
           if-no-files-found: error
 
+  # One producer per suite prevents parallel cold misses creating different snapshots.
+  data:
+    name: data (${{ matrix.suite }})
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.resolve.outputs.data_matrix) }}
+    env:
+      BENCH_SUITE: ${{ matrix.suite }}
+      BENCH_ROWS: ${{ matrix.rows }}
+      BENCH_FILES: '16'
+      BENCH_FUZZ_ROWS: '4000000'
+      BENCH_EQUALITY_DELETE_KEYS: '4096'
+      TPCH_SF: '3'
+      WAREHOUSE: /mnt/pruning-bench/warehouse
+      SPARK_LOCAL_HOSTNAME: localhost
+      SPARK_LOCAL_IP: 127.0.0.1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Prepare snapshot storage
+        run: |
+          sudo mkdir -p /mnt/pruning-bench
+          sudo chown "$USER" /mnt/pruning-bench
+      - name: Restore generated Iceberg snapshot
+        id: data_cache
+        uses: actions/cache@v4
+        with:
+          key: ${{ matrix.data_key }}
+          path: |
+            /mnt/pruning-bench/warehouse
+            /mnt/pruning-bench/data.json
+      - name: Install generators on cache miss
+        if: steps.data_cache.outputs.cache-hit != 'true'
+        run: |
+          python3 -m pip install --user --break-system-packages pyspark==3.5.9
+          if [ "$BENCH_SUITE" = tpch ]; then
+            python3 -m pip install --user --break-system-packages duckdb==1.4.4
+          fi
+          mkdir -p jars
+          curl --retry 3 -fsSL -o jars/iceberg.jar \
+            https://repo.maven.apache.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.8.1/iceberg-spark-runtime-3.5_2.12-1.8.1.jar
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Generate TPC-H data
+        if: matrix.suite == 'tpch' && steps.data_cache.outputs.cache-hit != 'true'
+        run: python3 benchmarks/iceberg-runtime-pruning-detailed/tpch_generate.py "$TPCH_SF" /mnt/pruning-bench/tpch-parquet | tee tpch-generate.log
+      - name: Generate byte-identical shared Iceberg tables
+        if: steps.data_cache.outputs.cache-hit != 'true'
+        run: |
+          script=generate_data.py
+          if [ "$BENCH_SUITE" = tpch ]; then
+            script=tpch_iceberg.py
+            export TPCH_PARQUET=/mnt/pruning-bench/tpch-parquet
+          fi
+          spark-submit --master 'local[4]' --driver-memory 7g --jars jars/iceberg.jar \
+            --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+            --conf spark.sql.catalog.bench=org.apache.iceberg.spark.SparkCatalog \
+            --conf spark.sql.catalog.bench.type=hadoop \
+            --conf "spark.sql.catalog.bench.warehouse=$WAREHOUSE" \
+            --conf spark.sql.shuffle.partitions=16 \
+            --conf spark.ui.enabled=false \
+            benchmarks/iceberg-runtime-pruning-detailed/$script > "generate-$BENCH_SUITE.log" 2>&1 \
+            || { tail -100 "generate-$BENCH_SUITE.log"; exit 1; }
+          grep '^TABLE' "generate-$BENCH_SUITE.log"
+          rm -rf /mnt/pruning-bench/tpch-parquet
+          python3 benchmarks/iceberg-runtime-pruning-detailed/run_suite.py \
+            --data-manifest /mnt/pruning-bench/data.json
+      - name: Verify snapshot and record data runner environment
+        env:
+          DATA_CACHE_HIT: ${{ steps.data_cache.outputs.cache-hit == 'true' }}
+          DATA_CACHE_KEY: ${{ matrix.data_key }}
+        run: |
+          python3 benchmarks/iceberg-runtime-pruning-detailed/run_suite.py --data-manifest /mnt/pruning-bench/data.json --verify
+          python3 benchmarks/iceberg-runtime-pruning-detailed/run_suite.py --environment "environment-data-$BENCH_SUITE.json"
+      - name: Publish exact snapshot for cache-eviction fallback
+        uses: actions/upload-artifact@v7
+        with:
+          name: shared-data-${{ matrix.suite }}
+          path: |
+            /mnt/pruning-bench/warehouse
+            /mnt/pruning-bench/data.json
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: data-provenance-${{ matrix.suite }}
+          path: |
+            environment-data-*.json
+            generate-*.log
+            tpch-generate.log
+          if-no-files-found: error
+
   benchmark:
-    needs: build
+    name: benchmark (${{ matrix.suite }}, shard ${{ matrix.shard }})
+    needs: [resolve, build, data]
+    # A failed producer must not hide measurements from the other suites.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 355
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - suite: join
-            rows: '16000000'
-            reps: '2'
-          - suite: topk_minmax
-            rows: '16000000'
-            reps: '2'
-          - suite: layouts
-            rows: '8000000'
-            reps: '2'
-          - suite: fuzz
-            rows: '16000000'
-            reps: '1'
-          - suite: tpch
-            rows: '0'
-            reps: '1'
-          - suite: strjoin
-            rows: '16000000'
-            reps: '1'
+      max-parallel: 18
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     env:
+      BENCH_SHARD: ${{ matrix.shard }}
+      BENCH_SHARDS: ${{ matrix.shards }}
       BENCH_SUITE: ${{ matrix.suite }}
       BENCH_ROWS: ${{ matrix.rows }}
       BENCH_FILES: '16'
@@ -218,19 +359,36 @@ jobs:
           sudo chown "$USER" /mnt/pruning-bench
           echo "WAREHOUSE=/mnt/pruning-bench/warehouse" >> "$GITHUB_ENV"
           echo "BENCH_EXPECTED=/mnt/pruning-bench/expected" >> "$GITHUB_ENV"
-          echo "BENCH_PLANS=$GITHUB_WORKSPACE/plans/$BENCH_SUITE" >> "$GITHUB_ENV"
+          echo "BENCH_PLANS=$GITHUB_WORKSPACE/plans/$BENCH_SUITE/shard-$BENCH_SHARD" >> "$GITHUB_ENV"
           echo "BENCH_MANIFESTS=$GITHUB_WORKSPACE/manifests" >> "$GITHUB_ENV"
-          echo "BENCH_OUTPUT=$GITHUB_WORKSPACE/results-$BENCH_SUITE.jsonl" >> "$GITHUB_ENV"
-      - name: Check the benchmark harness
-        run: python3 benchmarks/iceberg-runtime-pruning-detailed/check_harness.py
+          echo "BENCH_OUTPUT=$GITHUB_WORKSPACE/results-$BENCH_SUITE-shard-$BENCH_SHARD.jsonl" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
           name: resolved-revisions
           path: resolved
+      - name: Restore shared suite snapshot
+        id: data_cache
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ matrix.data_key }}
+          path: |
+            /mnt/pruning-bench/warehouse
+            /mnt/pruning-bench/data.json
+      - name: Fetch producer snapshot if the cache was evicted
+        if: steps.data_cache.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: shared-data-${{ matrix.suite }}
+          path: /mnt/pruning-bench
       - name: Record environment and binary provenance
+        env:
+          DATA_CACHE_HIT: ${{ steps.data_cache.outputs.cache-hit == 'true' }}
+          DATA_CACHE_KEY: ${{ matrix.data_key }}
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, pathlib, platform, subprocess
+          import hashlib, json, os, pathlib, platform, subprocess, sys
+          sys.path.insert(0, "benchmarks/iceberg-runtime-pruning-detailed")
+          from run_suite import runner_environment
           builds = {side: json.loads(pathlib.Path(f"jars/pruning-{side}/build-info.json").read_text())
                     for side in ("baseline", "candidate")}
           resolved = json.loads(pathlib.Path("resolved/revisions.json").read_text())
@@ -239,6 +397,9 @@ jobs:
               if build["comet"] != resolved[side]["comet"] or build["jar_sha256"] != hashlib.sha256(jar.read_bytes()).hexdigest():
                   raise SystemExit(f"Binary provenance mismatch: {side}")
           environment = {"resolved_revisions": resolved, "warmups": os.environ["BENCH_WARMUPS"],
+                         "shard": int(os.environ["BENCH_SHARD"]), "shards": int(os.environ["BENCH_SHARDS"]),
+                         "runner": runner_environment(), "data_cache_hit": os.environ["DATA_CACHE_HIT"] == "true",
+                         "data_cache_key": os.environ["DATA_CACHE_KEY"],
                          "suite": os.environ["BENCH_SUITE"], "rows": os.environ["BENCH_ROWS"],
                          "rounds": os.environ["BENCH_ROUNDS"], "reps": os.environ["BENCH_REPS"],
                          "fuzz_rows": os.environ["BENCH_FUZZ_ROWS"], "fuzz_queries": os.environ["BENCH_FUZZ_QUERIES"],
@@ -249,50 +410,26 @@ jobs:
                          "java": subprocess.run(["java", "-version"], capture_output=True, text=True).stderr,
                          "spark": "3.5.9", "iceberg": "1.8.1", "builds": builds,
                          "iceberg_jar_sha256": hashlib.sha256(pathlib.Path("jars/iceberg.jar").read_bytes()).hexdigest()}
-          pathlib.Path(f"environment-{os.environ['BENCH_SUITE']}.json").write_text(json.dumps(environment, indent=2) + "\n")
+          pathlib.Path(f"environment-{os.environ['BENCH_SUITE']}-shard-{os.environ['BENCH_SHARD']}.json").write_text(json.dumps(environment, indent=2) + "\n")
           print(json.dumps(environment, indent=2))
           PY
-      - name: Generate TPC-H data
-        if: matrix.suite == 'tpch'
-        run: python3 benchmarks/iceberg-runtime-pruning-detailed/tpch_generate.py "$TPCH_SF" /mnt/pruning-bench/tpch-parquet | tee tpch-generate.log
-      - name: Generate byte-identical shared Iceberg tables
+      - name: Verify byte-identical shared snapshot
         run: |
-          script=generate_data.py
-          if [ "$BENCH_SUITE" = tpch ]; then
-            script=tpch_iceberg.py
-            export TPCH_PARQUET=/mnt/pruning-bench/tpch-parquet
-          fi
-          spark-submit --master 'local[4]' --driver-memory 7g --jars jars/iceberg.jar \
-            --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
-            --conf spark.sql.catalog.bench=org.apache.iceberg.spark.SparkCatalog \
-            --conf spark.sql.catalog.bench.type=hadoop \
-            --conf "spark.sql.catalog.bench.warehouse=$WAREHOUSE" \
-            --conf spark.sql.shuffle.partitions=16 \
-            --conf spark.ui.enabled=false \
-            benchmarks/iceberg-runtime-pruning-detailed/$script > "generate-$BENCH_SUITE.log" 2>&1 \
-            || { tail -100 "generate-$BENCH_SUITE.log"; exit 1; }
-          grep '^TABLE' "generate-$BENCH_SUITE.log"
-          rm -rf /mnt/pruning-bench/tpch-parquet
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib
-          root = pathlib.Path(os.environ["WAREHOUSE"])
-          entries = []
-          for path in sorted(root.rglob("*")):
-              if path.is_file() and path.suffix in (".parquet", ".avro", ".json"):
-                  digest = hashlib.sha256()
-                  with path.open("rb") as source:
-                      for block in iter(lambda: source.read(1048576), b""):
-                          digest.update(block)
-                  entries.append({"file": str(path.relative_to(root)), "bytes": path.stat().st_size, "sha256": digest.hexdigest()})
-          pathlib.Path(f"data-{os.environ['BENCH_SUITE']}.json").write_text(json.dumps(entries, indent=2) + "\n")
-          PY
+          python3 benchmarks/iceberg-runtime-pruning-detailed/run_suite.py \
+            --data-manifest /mnt/pruning-bench/data.json --verify
+          cp /mnt/pruning-bench/data.json "data-$BENCH_SUITE-shard-$BENCH_SHARD.json"
       - name: Run Spark oracle and matched variants in balanced order
         run: |
           python3 benchmarks/iceberg-runtime-pruning-detailed/run_suite.py
+      - name: Verify snapshot remained immutable throughout all variants
+        if: always()
+        run: |
+          python3 benchmarks/iceberg-runtime-pruning-detailed/run_suite.py \
+            --data-manifest /mnt/pruning-bench/data.json --verify
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: matched-${{ matrix.suite }}
+          name: matched-${{ matrix.suite }}-shard-${{ matrix.shard }}
           path: |
             resolved/revisions.json
             environment-*.json
@@ -315,12 +452,24 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          pattern: matched-*
+          pattern: matched-*-shard-*
           path: results
-          merge-multiple: true
+          merge-multiple: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: resolved-revisions
+          path: resolved
+      - name: Record report runner environment
+        run: python3 benchmarks/iceberg-runtime-pruning-detailed/run_suite.py --environment report-environment.json
       - name: Validate complete coverage and summarize matched results
+        env:
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
         run: |
-          python3 benchmarks/iceberg-runtime-pruning-detailed/summarize.py results --rounds 8 --require-latest-main > report.md || status=$?
+          python3 benchmarks/iceberg-runtime-pruning-detailed/summarize.py results --rounds 8 --require-latest-main --resolved resolved/revisions.json > report.md || status=$?
+          if [ "$BENCHMARK_RESULT" != success ]; then
+            echo "Benchmark job result: $BENCHMARK_RESULT; campaign failed." >> report.md
+            status=1
+          fi
           # The complete report is attached; the step summary has GitHub's size limit.
           head -c 950000 report.md >> "$GITHUB_STEP_SUMMARY"
           exit "${status:-0}"
@@ -328,5 +477,7 @@ jobs:
         if: always()
         with:
           name: matched-report
-          path: report.md
+          path: |
+            report.md
+            report-environment.json
           if-no-files-found: error

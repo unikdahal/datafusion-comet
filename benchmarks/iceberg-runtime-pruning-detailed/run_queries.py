@@ -27,8 +27,6 @@ results across variants. Planning and execution are timed separately.
 import random
 import sys
 
-from pyspark.sql import SparkSession
-
 from lib import (
     append,
     env,
@@ -307,8 +305,9 @@ def layouts_suite():
     return queries
 
 
-def fuzz_queries():
-    rng = random.Random(SEED)
+def fuzz_queries(seed=None):
+    seed = SEED if seed is None else seed
+    rng = random.Random(seed)
     tables = {
         "fz_sorted": "int",
         "fz_unsorted": "int",
@@ -379,7 +378,7 @@ def fuzz_queries():
             ]
         )
         t = f"{T}{table}"
-        name = f"fuzz{SEED}_{index:04d}_{kind}__{table}"
+        name = f"fuzz{seed}_{index:04d}_{kind}__{table}"
         if kind == "join":
             sql = f"SELECT /*+ BROADCAST(d) */ count(*), sum(f.value) FROM {t} f JOIN ({dim_from(ktype)}) d ON f.id = d.id"
             queries.append((name, sql, False, None))
@@ -458,7 +457,9 @@ def strjoin_suite():
     return queries
 
 
-def queries_for(suite):
+def queries_for(suite, seed=None):
+    if suite == "fuzz":
+        return fuzz_queries(seed)
     return {
         "join": join_suite,
         "topk_minmax": topk_minmax_suite,
@@ -469,10 +470,13 @@ def queries_for(suite):
 
 
 def main():
+    from pyspark.sql import SparkSession
+    from run_suite import select_queries
+
     spark = SparkSession.builder.appName(
         f"detailed-pruning-{SUITE}-{VARIANT}"
     ).getOrCreate()
-    queries = queries_for(SUITE)
+    queries = select_queries(queries_for(SUITE), SUITE, ROUND)
     names = [q[0] for q in queries]
     assert len(names) == len(set(names)), "duplicate query names"
     repetitions = 1 if SUITE == "fuzz" or VARIANT == "spark" else REPS

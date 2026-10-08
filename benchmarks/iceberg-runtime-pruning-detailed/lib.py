@@ -117,6 +117,8 @@ def env(name, default):
 
 
 def append(path, record):
+    if "BENCH_SHARD" in os.environ:
+        record = dict(record, shard=int(os.environ["BENCH_SHARD"]), shards=int(os.environ["BENCH_SHARDS"]))
     with open(path, "a", encoding="utf-8") as out:
         out.write(json.dumps(record, allow_nan=False) + "\n")
 
@@ -138,7 +140,8 @@ def record_warmup(record, suite, variant, round_number, iteration):
     validation.update(
         suite=suite, variant=variant, round=round_number, iteration=iteration
     )
-    append(f"warmup-validation-{suite}.jsonl", validation)
+    suffix = f"-shard-{os.environ['BENCH_SHARD']}" if "BENCH_SHARD" in os.environ else ""
+    append(f"warmup-validation-{suite}{suffix}.jsonl", validation)
 
 
 def signature(sql, confs=None):
@@ -387,11 +390,14 @@ def run_query(spark, name, sql, ordered=True, confs=None):
 def write_manifest(queries, suite, variant, round_number, reps):
     directory = Path(env("BENCH_MANIFESTS", "manifests"))
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{suite}-{variant}-{round_number}.json"
+    suffix = f"-shard-{os.environ['BENCH_SHARD']}" if "BENCH_SHARD" in os.environ else ""
+    path = directory / f"{suite}-{variant}-{round_number}{suffix}.json"
     manifest = {
         "suite": suite,
         "variant": variant,
         "round": round_number,
+        "shard": int(env("BENCH_SHARD", "0")),
+        "shards": int(env("BENCH_SHARDS", "1")),
         "reps": reps,
         "warmups": (
             0

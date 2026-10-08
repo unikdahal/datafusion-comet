@@ -25,45 +25,178 @@ import math
 from pathlib import Path
 import random
 import re
+import shutil
 import statistics
 
 from lib import VARIANTS
 from resolve_revisions import MAIN_REPOSITORY, fixed_sha
+from run_suite import PARAMETERS, SUITES, partition_queries, query_catalog
 
 
 def validate_provenance(directory, suites):
     failures, common = [], None
     for suite in suites:
-        path = directory / f"environment-{suite}.json"
-        try:
-            environment = json.loads(path.read_text())
-            resolved = environment["resolved_revisions"]
-            baseline = resolved["baseline"]
-            if (
-                baseline["repository"] != MAIN_REPOSITORY
-                or baseline["ref"] != "refs/heads/main"
-            ):
-                raise ValueError("Baseline is not Apache Comet main")
-            for side in ("baseline", "candidate"):
-                commit = fixed_sha(resolved[side]["comet"])
-                build = environment["builds"][side]
-                if build["comet"] != commit or build["resolved_revisions"] != resolved:
-                    raise ValueError(
-                        f"Build provenance differs from the resolver: {side}"
-                    )
-                dependency = [
-                    p for p in build["dependencies"] if p["name"] == "iceberg"
-                ]
-                if dependency != [resolved[side]["iceberg_dependency"]]:
-                    raise ValueError(
-                        f"Locked Iceberg dependency differs from the resolver: {side}"
-                    )
-            if common is not None and resolved != common:
-                raise ValueError("Suites used different resolved revisions")
-            common = resolved
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            failures.append(f"Invalid provenance for {suite}: {error}")
+        paths = sorted(directory.glob(f"environment-{suite}-shard-*.json"))
+        if not paths:
+            paths = [directory / f"environment-{suite}.json"]
+        for path in paths:
+            errors, resolved = validate_environment(path)
+            failures.extend(errors)
+            if resolved is not None:
+                if common is not None and resolved != common:
+                    failures.append("Shards used different resolved revisions")
+                common = resolved
     return failures, common
+
+
+def validate_environment(path):
+    failures, resolved = [], None
+    try:
+        environment = json.loads(path.read_text())
+        resolved = environment["resolved_revisions"]
+        baseline = resolved["baseline"]
+        if (baseline["repository"] != MAIN_REPOSITORY or baseline["ref"] != "refs/heads/main"):
+            raise ValueError("Baseline is not Apache Comet main")
+        for side in ("baseline", "candidate"):
+            commit = fixed_sha(resolved[side]["comet"])
+            build = environment["builds"][side]
+            if build["comet"] != commit or build["resolved_revisions"] != resolved:
+                raise ValueError(f"Build provenance differs from the resolver: {side}")
+            dependency = [p for p in build["dependencies"] if p["name"] == "iceberg"]
+            if dependency != [resolved[side]["iceberg_dependency"]]:
+                raise ValueError(f"Locked Iceberg dependency differs from the resolver: {side}")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        failures.append(f"Invalid provenance for {path.name}: {error}")
+    return failures, resolved
+
+
+def merge_shards(directory, resolved):
+    """Verify against the resolver's independent catalog, then join raw measurements.
+
+    Keep downloaded shard artifacts intact. The derived directory lets the existing
+    statistical/metric report consume one logical suite without dropping any samples.
+    """
+    campaign = resolved["campaign"]
+    failures = []
+    merged = directory / "merged"
+    if merged.exists():
+        shutil.rmtree(merged)
+    (merged / "manifests").mkdir(parents=True)
+    environments = []
+    if campaign["parameters"] != PARAMETERS:
+        failures.append("Resolved protocol differs from the report's canonical protocol")
+    if set(campaign["suites"]) != set(SUITES) and not campaign["partial"]:
+        failures.append("Omitted suites were not declared as a partial campaign")
+    expected_artifacts = {f"matched-{m['suite']}-shard-{m['shard']}" for m in campaign["matrix"]}
+    observed_artifacts = {p.name for p in directory.glob("matched-*") if p.is_dir()}
+    if expected_artifacts != observed_artifacts:
+        failures.append(f"Shard artifacts differ: missing={sorted(expected_artifacts - observed_artifacts)}, unexpected={sorted(observed_artifacts - expected_artifacts)}")
+    for suite in campaign["suites"]:
+        item = next(m for m in campaign["data_matrix"] if m["suite"] == suite)
+        shards = item["shards"]
+        catalogs = {str(r): query_catalog(suite, r) for r in range(int(PARAMETERS["rounds"]))}
+        if catalogs != campaign["catalog"][suite]:
+            failures.append(f"Resolved catalog differs from independently enumerated full query set: {suite}")
+        requested = campaign["selection"]["queries"].get(suite)
+        selected = {r: [q["query"] for q in queries if requested is None or q["query"] in requested]
+                    for r, queries in catalogs.items()}
+        if selected != campaign["query_sets"][suite]:
+            failures.append(f"Selected query set differs from campaign request: {suite}")
+        if any(len(selected[r]) != len(catalogs[r]) for r in catalogs) and not campaign["partial"]:
+            failures.append(f"Omitted queries were not declared as partial: {suite}")
+        assignments = {r: partition_queries(names, shards, suite) for r, names in selected.items()}
+        if assignments != campaign["assignments"][suite]:
+            failures.append(f"Shard assignments differ from deterministic partition: {suite}")
+        snapshot = None
+        for shard in range(shards):
+            root = directory / f"matched-{suite}-shard-{shard}"
+            suffix = f"{suite}-shard-{shard}"
+            environment_path = root / f"environment-{suffix}.json"
+            errors, provenance = validate_environment(environment_path)
+            failures.extend(errors)
+            if provenance != resolved:
+                failures.append(f"Shard provenance differs from campaign: {suffix}")
+            if environment_path.is_file():
+                environment = json.loads(environment_path.read_text())
+                if (environment.get("suite"), environment.get("shard"), environment.get("shards")) != (suite, shard, shards):
+                    failures.append(f"Runner shard identity differs: {suffix}")
+                if not all(k in environment.get("runner", {}) for k in ("cpu_model", "cores", "memory_mib", "cpuinfo", "free_m")):
+                    failures.append(f"Missing runner hardware metadata: {suffix}")
+                environments.append(environment)
+                shutil.copyfile(environment_path, merged / environment_path.name)
+            try:
+                data = json.loads((root / f"data-{suffix}.json").read_text())
+                if not data or (snapshot is not None and snapshot != data):
+                    failures.append(f"Shards did not use byte-identical shared data: {suffix}")
+                snapshot = data
+            except (OSError, ValueError) as error:
+                failures.append(f"Missing/invalid data digests for {suffix}: {error}")
+            for prefix in ("results", "warmup-validation"):
+                if prefix == "warmup-validation" and suite == "fuzz":
+                    continue
+                source = root / f"{prefix}-{suffix}.jsonl"
+                if not source.is_file():
+                    failures.append(f"Missing raw records: {source.name}")
+                    continue
+                for line in source.read_text().splitlines():
+                    if line.strip():
+                        record = json.loads(line)
+                        if (record.get("suite"), record.get("shard"), record.get("shards")) != (suite, shard, shards):
+                            failures.append(f"Raw record shard identity differs: {source.name}")
+                            break
+                with (merged / f"{prefix}-{suite}.jsonl").open("ab") as target:
+                    target.write(source.read_bytes())
+            plans = root / "plans" / suite / f"shard-{shard}"
+            if plans.is_dir():
+                # Preserve every shard's plans, including differing plans for identical SQL.
+                shutil.copytree(plans, merged / "plans" / suite / f"shard-{shard}")
+        for variant in VARIANTS + ["spark"]:
+            expected_rounds = range(int(PARAMETERS["rounds"])) if variant != "spark" or suite == "fuzz" else [0]
+            for round_number in expected_rounds:
+                r = str(round_number)
+                union = []
+                for shard in range(shards):
+                    path = directory / f"matched-{suite}-shard-{shard}" / "manifests" / f"{suite}-{variant}-{round_number}-shard-{shard}.json"
+                    expected_names = assignments[r][shard]
+                    expected_queries = [q for q in catalogs[r] if q["query"] in expected_names]
+                    reps = 1 if variant == "spark" or suite == "fuzz" else int(SUITES[suite]["reps"])
+                    warmups = 0 if variant == "spark" or suite == "fuzz" else int(PARAMETERS["warmups"])
+                    try:
+                        manifest = json.loads(path.read_text())
+                        identity = (manifest["suite"], manifest["variant"], manifest["round"], manifest["shard"], manifest["shards"], manifest["reps"], manifest["warmups"])
+                        if identity != (suite, variant, round_number, shard, shards, reps, warmups):
+                            failures.append(f"Manifest protocol/identity differs: {path.name}")
+                        queries = manifest["queries"]
+                        if sorted(queries, key=lambda q: q["query"]) != expected_queries:
+                            failures.append(f"Shard query set/SQL differs from full catalog assignment: {path.name}")
+                        union.extend(q["query"] for q in queries)
+                    except (OSError, ValueError, KeyError, TypeError) as error:
+                        failures.append(f"Missing/invalid shard manifest {path.name}: {error}")
+                # For a full campaign, selected[r] is the full query set. Partial mode
+                # changes only that explicit set, never the measurement protocol.
+                if Counter(union) != Counter(selected[r]):
+                    failures.append(f"Union of shard query sets != expected full/selected query set: {suite}/{variant}/{r}; missing={sorted(set(selected[r]) - set(union))}")
+                logical = {"suite": suite, "variant": variant, "round": round_number,
+                           "reps": reps, "warmups": warmups, "allow_empty": not selected[r],
+                           "queries": [q for q in catalogs[r] if q["query"] in selected[r]]}
+                (merged / "manifests" / f"{suite}-{variant}-{round_number}.json").write_text(json.dumps(logical))
+    return merged, failures, environments
+
+
+def report_shard_environment(environments, resolved):
+    campaign = resolved["campaign"]
+    label = "PARTIAL CAMPAIGN" if campaign["partial"] else "Full campaign"
+    print(f"## {label}\n")
+    print(f"Suites: {', '.join(campaign['suites'])}. Query selections: `{json.dumps(campaign['selection']['queries'], sort_keys=True)}`.\n")
+    print("Each shard retains all eight balanced rounds, the original warmups/repetitions and Spark oracle checks.\n")
+    print("## Runner hardware per shard\n")
+    print("| suite | shard | CPU model | cores | memory MiB | data cache hit | baseline/candidate build cache hit |")
+    print("|---|---:|---|---:|---:|---|---|")
+    for environment in environments:
+        runner = environment.get("runner", {})
+        hits = "/".join(str(environment["builds"][s].get("cache_hit")) for s in ("baseline", "candidate"))
+        print(f"| {environment['suite']} | {environment['shard']} / {environment['shards']} | {runner.get('cpu_model', 'missing')} | {runner.get('cores', 'missing')} | {runner.get('memory_mib', 'missing')} | {environment.get('data_cache_hit')} | {hits} |")
+    print()
 
 
 def quantile(values, q):
@@ -150,11 +283,23 @@ def native_scan_coverage(directory, suite, variant, sql_digest):
     """
     if sql_digest is None:
         return None
-    path = directory / "plans" / suite / variant / f"{sql_digest}.txt"
-    try:
-        plan = path.read_text()
-    except OSError:
-        return None
+    paths = sorted((directory / "plans" / suite).glob(f"shard-*/{variant}/{sql_digest}.txt"))
+    if not paths:
+        paths = [directory / "plans" / suite / variant / f"{sql_digest}.txt"]
+    coverages = []
+    for path in paths:
+        try:
+            plan = path.read_text()
+        except OSError:
+            return None
+        coverage = scan_coverage(plan)
+        if coverage is None:
+            return None
+        coverages.append(coverage)
+    return coverages[0] if all(c == coverages[0] for c in coverages) else None
+
+
+def scan_coverage(plan):
     if not plan.strip():
         return None
     locations = []
@@ -168,8 +313,9 @@ def native_scan_coverage(directory, suite, variant, sql_digest):
     return tuple(sorted(Counter(locations).items()))
 
 
-def validate(records, directory, suites, rounds, invalid_queries=None):
+def validate(records, directory, suites, rounds, invalid_queries=None, empty_rounds=None):
     failures = []
+    empty_rounds = set() if empty_rounds is None else empty_rounds
     invalid = set() if invalid_queries is None else invalid_queries
 
     def fail(message, query=None, suite=None):
@@ -211,7 +357,7 @@ def validate(records, directory, suites, rounds, invalid_queries=None):
                     fail(f"Missing manifest: {path.name}", suite=suite)
                     continue
                 manifest = json.loads(path.read_text(encoding="utf-8"))
-                if not manifest.get("queries") or manifest.get("reps", 0) < 1:
+                if (not manifest.get("queries") and (suite, round_number) not in empty_rounds) or manifest.get("reps", 0) < 1:
                     fail(f"Empty manifest: {path.name}", suite=suite)
                 for query in manifest["queries"]:
                     for rep in range(manifest["reps"]):
@@ -342,14 +488,28 @@ def main(argv=None):
     parser.add_argument("directory", type=Path)
     parser.add_argument("--rounds", type=int, default=4)
     parser.add_argument("--require-latest-main", action="store_true")
+    parser.add_argument("--resolved", type=Path)
     parser.add_argument(
         "--suites", default="join,topk_minmax,layouts,fuzz,tpch,strjoin"
     )
     args = parser.parse_args(argv)
     suites = args.suites.split(",")
+    shard_failures = []
+    empty_rounds = set()
+    if args.resolved:
+        resolved = json.loads(args.resolved.read_text())
+        suites = resolved["campaign"]["suites"]
+        empty_rounds = {(suite, int(r)) for suite in suites
+                        for r, names in resolved["campaign"]["query_sets"][suite].items() if not names}
+        if args.rounds != int(resolved["campaign"]["parameters"]["rounds"]):
+            shard_failures.append("Report round count differs from resolved campaign")
+        args.directory, errors, environments = merge_shards(args.directory, resolved)
+        shard_failures.extend(errors)
+        report_shard_environment(environments, resolved)
     records = load_results(args.directory)
     invalid_queries = set()
-    failures = validate(records, args.directory, suites, args.rounds, invalid_queries)
+    failures = validate(records, args.directory, suites, args.rounds, invalid_queries, empty_rounds)
+    failures.extend(shard_failures)
     warmup_failures, warmup_invalid = validate_warmups(
         args.directory, suites, require=args.require_latest_main
     )
@@ -371,7 +531,7 @@ def main(argv=None):
         dict(
             r,
             comparison_validated=(
-                not provenance_failures
+                not provenance_failures and not shard_failures
                 and (r["suite"], r["query"]) not in invalid_queries
             ),
         )

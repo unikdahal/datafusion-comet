@@ -34,6 +34,93 @@ import resolve_revisions
 
 
 class HarnessChecks(unittest.TestCase):
+    def test_campaign_shards_cover_full_catalog_and_preserve_all_fuzz_seeds(self):
+        campaign = run_suite.make_campaign({})
+        self.assertFalse(campaign["partial"])
+        self.assertEqual(len(campaign["matrix"]), 18)
+        for suite in campaign["suites"]:
+            for round_number, catalog in campaign["catalog"][suite].items():
+                assigned = [q for shard in campaign["assignments"][suite][round_number] for q in shard]
+                self.assertCountEqual(assigned, [q["query"] for q in catalog])
+                self.assertEqual(len(assigned), len(set(assigned)))
+                if suite == "fuzz":
+                    self.assertEqual(len(catalog), 500)
+                    self.assertTrue(all(q["query"].startswith(f"fuzz{int(round_number) + 1}_") for q in catalog))
+
+    def test_targeted_campaign_refuses_unknown_names_and_only_limits_query_sets(self):
+        name = run_suite.query_catalog("join", 0)[0]["query"]
+        campaign = run_suite.make_campaign({"suites": ["join"], "queries": {"join": [name]}})
+        self.assertTrue(campaign["partial"])
+        self.assertEqual(len(campaign["matrix"]), 1)
+        self.assertEqual(campaign["parameters"], run_suite.PARAMETERS)
+        self.assertEqual(campaign["query_sets"]["join"], {str(r): [name] for r in range(8)})
+        for configuration in ({"suites": ["unknown"]}, {"suites": []},
+                              {"queries": {"join": ["missing"]}},
+                              {"suites": ["join"], "queries": {"tpch": ["missing"]}}):
+            with self.assertRaises(ValueError):
+                run_suite.make_campaign(configuration)
+
+    def test_targeted_mode_uses_the_same_shard_independent_data_cache_key(self):
+        full = run_suite.make_campaign({"suites": ["join"]})
+        name = full["catalog"]["join"]["0"][0]["query"]
+        selected = run_suite.make_campaign({"suites": ["join"], "queries": {"join": [name]}})
+        self.assertEqual(full["data_matrix"][0]["data_key"], selected["data_matrix"][0]["data_key"])
+
+    def test_tpch_sharding_retains_q15_select_and_file_setup_cleanup(self):
+        catalog = run_tpch.queries_for()
+        q15 = [q[0] for q in catalog if "__q15" in q[0]]
+        self.assertEqual(len(q15), 2)
+        path = next(p for p in run_tpch.query_files() if Path(p).stem == "q15")
+        statements = run_tpch.statements(path)
+        self.assertTrue(any(not run_tpch.is_select(sql) for sql in statements))
+        for database in run_tpch.DATABASES:
+            selected = [run_tpch.query_name(database, path, i) for i, sql in enumerate(statements)
+                        if run_tpch.is_select(sql)]
+            self.assertEqual(len(selected), 1)
+            self.assertIn(selected[0], q15)
+
+    def test_report_rejects_a_query_omitted_by_every_shard_and_missing_shard(self):
+        # Valid synthetic artifacts use a real full-suite canonical catalog. An omitted
+        # query must fail even if all variants/manifests agree on that incomplete set.
+        campaign = run_suite.make_campaign({"suites": ["join"]})
+        resolved = {"campaign": campaign, "baseline": {"repository": resolve_revisions.MAIN_REPOSITORY,
+                    "ref": "refs/heads/main", "comet": "a" * 40, "iceberg_dependency": {"name": "iceberg"}},
+                    "candidate": {"comet": "b" * 40, "iceberg_dependency": {"name": "iceberg"}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for shard in range(3):
+                directory = root / f"matched-join-shard-{shard}"
+                (directory / "manifests").mkdir(parents=True)
+                suffix = f"join-shard-{shard}"
+                environment = {"resolved_revisions": resolved, "suite": "join", "shard": shard, "shards": 3,
+                               "runner": {"cpu_model": "fixture", "cores": 4, "memory_mib": 16000,
+                                          "cpuinfo": "fixture", "free_m": "fixture"},
+                               "builds": {side: {"comet": resolved[side]["comet"], "resolved_revisions": resolved,
+                                          "dependencies": [resolved[side]["iceberg_dependency"]]}
+                                          for side in ("baseline", "candidate")}}
+                (directory / f"environment-{suffix}.json").write_text(json.dumps(environment))
+                (directory / f"data-{suffix}.json").write_text(json.dumps([{"file": "data", "sha256": "x", "bytes": 1}]))
+                for prefix in ("results", "warmup-validation"):
+                    (directory / f"{prefix}-{suffix}.jsonl").write_text("")
+                for variant in lib.VARIANTS + ["spark"]:
+                    for r in (range(8) if variant != "spark" else [0]):
+                        names = campaign["assignments"]["join"][str(r)][shard]
+                        manifest = {"suite": "join", "variant": variant, "round": r, "shard": shard, "shards": 3,
+                                    "reps": 1 if variant == "spark" else 2,
+                                    "warmups": 0 if variant == "spark" else 4,
+                                    "queries": [q for q in campaign["catalog"]["join"][str(r)] if q["query"] in names]}
+                        (directory / "manifests" / f"join-{variant}-{r}-shard-{shard}.json").write_text(json.dumps(manifest))
+            self.assertEqual(summarize.merge_shards(root, resolved)[1], [])
+            for path in (root / "matched-join-shard-0/manifests").glob("*.json"):
+                manifest = json.loads(path.read_text())
+                manifest["queries"].pop(0)
+                path.write_text(json.dumps(manifest))
+            errors = summarize.merge_shards(root, resolved)[1]
+            self.assertTrue(any("Union of shard query sets" in error for error in errors))
+            import shutil
+            shutil.rmtree(root / "matched-join-shard-1")
+            self.assertTrue(any("missing=" in error for error in summarize.merge_shards(root, resolved)[1]))
+
     def test_stage_metric_preserves_missing_and_sums_zero_and_nonzero(self):
         self.assertIsNone(summarize.stage_metric({}, "rows"))
         self.assertIsNone(summarize.stage_metric({"stages": [{"metrics": {}}]}, "rows"))
