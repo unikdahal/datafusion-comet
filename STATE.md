@@ -48,3 +48,7 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 ## 2026-10-08 11:00 — CI
 - iceberg fork CI run 37758600458 @5faa5bdba GREEN (verified via gh): fmt, clippy -D warnings, 2,360 tests, 95 doctests.
 - Comet validation 37755479696 @92bba61b6: integration (3.5) + (4.1) FAILED. Last green 37703958482 @058991ede. Diagnosis task rp-comet-integ-fail-r1. Top priority alongside F1.
+
+## 2026-10-08 ~10:05 UTC
+- F1 fix pushed iceberg 5f326d103 (reader guard: float/double Binary+Set preds keep row filter; unit + e2e NaN equality-delete tests). CI 37760274980: fmt FAILED (line width) → local fix b3b63ba76 in rp-work/iceberg-nanfix, PUSH AFTER clippy/tests of 37760274980 finish.
+- Codex hit usage limit (resets 12:04 UTC). Reassigned: integration diagnosis → gemini (rp-comet-integ-fail-r1g); float-guard upstream review → gemini (rp-float-guard-review-r1).

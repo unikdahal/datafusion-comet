@@ -1,7 +1,7 @@
 {
- "updated": "2026-10-08T11:00Z",
+ "updated": "2026-10-08T10:05Z",
  "heads": {
-  "iceberg": "5faa5bdba9c33ca719ea548c2091002754182e9f",
+  "iceberg": "5f326d1035e0d0692bb2c934d22c35496481dd8c",
   "comet": "92bba61b68ec44f305e0519f507cd02ae4546ee0",
   "bench": "163b5c235e914f8a22af834e26e85b0a6a8ea6b0",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
@@ -14,9 +14,9 @@
    "investigation": "rp-comet-integ-fail-r1"
   },
   "iceberg_validation": {
-   "run": 37758600458,
-   "sha": "5faa5bdba",
-   "result": "success: fmt, clippy, 2360 tests, 95 doc tests"
+   "run": 37760274980,
+   "sha": "5f326d103",
+   "result": "fmt FAILED (2 rustfmt diffs, fixed locally b3b63ba76); clippy/tests running"
   }
  },
  "bench": [
@@ -43,8 +43,8 @@
   }
  ],
  "tasks": [
-  "rp-iceberg-float-guard-r2",
-  "rp-comet-integ-fail-r1"
+  "rp-comet-integ-fail-r1g",
+  "rp-float-guard-review-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -52,7 +52,7 @@
  "findings": [
   {
    "id": "F1",
-   "status": "verified-fix-in-progress",
+   "status": "fix-pushed-5f326d103-pending-ci-review",
    "summary": "all-match shortcut (pipeline.rs file_always_matches) disagrees with Arrow kernels on floats: NaN literal, NaN-only col (equality-deleted NaNs returned), signed zero. Decision: guard in reader excluding float/double binary+set preds; evaluator untouched. Task rp-iceberg-float-guard-r2. Comet unreachable today (no float stats serialized)."
   },
   {
@@ -80,5 +80,14 @@
    "status": "open-P3",
    "summary": "shuffle eligibility rejection bypasses skipped-filter counter (comet join.rs:326). Bundle with Comet pin bump."
   }
- ]
+ ],
+ "pending_push": {
+  "repo": "iceberg",
+  "worktree": "rp-work/iceberg-nanfix",
+  "local_commit": "b3b63ba76 (rustfmt fix)",
+  "when": "after run 37760274980 clippy+tests finish (push cancels it)"
+ },
+ "agent_limits": {
+  "codex": "usage limit until 17:34 IST (12:04 UTC) 2026-10-08"
+ }
 }
