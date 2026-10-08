@@ -83,3 +83,4 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 ## Standing instruction (user, 2026-10-08)
 Genuine bug on upstream main + not tracked upstream (read-only dedupe search) + 200% certain (GHA repro on unmodified main + root cause) → open issue on matching unikdahal fork. Never upstream. Unsure → skip.
 Candidate: Apache Comet main string-join wrong results seen in bench baseline (fuzz *_fz_str, strjoin broadcast_distinct) — needs confirmation.
+- ~13:05 UTC: F4 follow-up landed iceberg 157cf6475 (CI 37778485388 green); lead reviewed waiter loop. Comet 8cd4d9a98 pins it; CI running. Bench shard task should pin newest GREEN comet (may become 8cd4d9a98).

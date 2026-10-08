@@ -1,19 +1,19 @@
 {
- "updated": "2026-10-08T13:10Z",
+ "updated": "2026-10-08T13:05Z",
  "heads": {
-  "iceberg": "8294719e9b507c35976f6b1531a45d65121fe1ec",
-  "comet": "8d59a5855",
+  "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
+  "comet": "8cd4d9a98",
   "bench": "163b5c235e914f8a22af834e26e85b0a6a8ea6b0",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
  "ci": {
   "comet_validation": {
-   "sha": "8d59a5855",
-   "status": "running (pin iceberg 8294719e9)"
+   "sha": "8cd4d9a98",
+   "status": "running (pin iceberg 157cf6475); supersedes 8d59a5855 run"
   },
   "iceberg_validation": {
-   "run": 37775247993,
-   "sha": "8294719e9",
+   "run": 37778485388,
+   "sha": "157cf6475",
    "result": "success all jobs"
   }
  },
@@ -41,8 +41,7 @@
   }
  ],
  "tasks": [
-  "rp-bench-shard-r1",
-  "rp-f4-impl-r4"
+  "rp-bench-shard-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -65,7 +64,7 @@
   },
   {
    "id": "F4",
-   "status": "revising: 8294719e9 poisons shared cache on cancel (ArrowReader Clone shares cache) -> follow-up commit: cancel releases claim, waiters reload; DeleteLoad returns Result. Task rp-f4-impl-r4. Comet unaffected (fresh reader per partition).",
+   "status": "fixed 8294719e9+ecb1f5c4c+157cf6475; lead-reviewed waiter loop OK. Polish for upstream: cfg(test) semaphore field in DeleteFilter.",
    "summary": "delete loader spawned task detached on scan cancel; continues I/O, reads escape Spark metrics (caching_delete_file_loader.rs:209, iceberg_scan.rs:491).",
    "decision": "Pre-existing upstream detached spawn (b9b6c7e01, not fork regression). Minimal fix: load_deletes returns receiver paired with abort-on-drop JoinHandle (runtime JoinHandle wraps tokio, add abort); pipeline.rs:203 holds it. No waiter refcounting (cache per-scan; all waiters drop together; existing guards complete stragglers with error). Gemini's refcount design rejected as over-complex. Test: gated FileRead, drop stream, release gate, assert bytes_read unchanged. Implement via codex after 12:04 UTC."
   },
