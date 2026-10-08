@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T10:55Z",
+ "updated": "2026-10-08T11:50Z",
  "heads": {
   "iceberg": "1e3f2a8689fc5a8aa203405411e791770d2cfc0e",
   "comet": "434d18333",
@@ -10,7 +10,7 @@
   "comet_validation": {
    "run": 37761771346,
    "sha": "434d18333",
-   "status": "running (revert 9cccd0676 + iceberg pin 1e3f2a868)"
+   "result": "success all jobs incl integration 3.5/4.1 + spark_sql"
   },
   "iceberg_validation": {
    "run": 37761104305,
@@ -41,7 +41,9 @@
    "status": "running"
   }
  ],
- "tasks": [],
+ "tasks": [
+  "rp-f4-impl-r1"
+ ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
  ],

@@ -65,3 +65,8 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - Bench 37758359536 left running (pins 92bba61b6/949cc88); do NOT push bench until it finishes (~13:15 UTC).
 - F4 design delegated (gemini, rp-f4-design-r1).
 - F4 CONFIRMED (gemini design, lead verified spawn is upstream-original b9b6c7e01). DECISION: minimal abort-on-drop handle paired with receiver; reject waiter refcounting. Impl by codex after 12:04 UTC.
+
+## 2026-10-08 11:50 UTC heartbeat
+- Comet 434d18333 GREEN (run 37761771346, all jobs). Both impl branches now remotely validated.
+- F4 impl dispatched (codex, rp-f4-impl-r1).
+- Bench 37758359536 still running; when done: analyze + pin bench to comet 434d18333 / iceberg 1e3f2a868 (or later head if F4 lands green first).
