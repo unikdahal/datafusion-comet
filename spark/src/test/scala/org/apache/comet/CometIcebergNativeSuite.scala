@@ -1324,14 +1324,14 @@ class CometIcebergNativeSuite
               .format("iceberg")
               .mode("append")
               .saveAsTable(table)
-            for (precision <- Seq(18, 10)) {
+            for ((precision, scale) <- Seq((18, 2), (10, 2), (18, 3))) {
               spark
                 .range(-32L, 32L)
                 .filter("id % 2 = 0")
                 .coalesce(1)
-                .selectExpr(s"CAST(id / 100.0 AS DECIMAL($precision,2)) AS id")
+                .selectExpr(s"CAST(id / 100.0 AS DECIMAL($precision,$scale)) AS id")
                 .write
-                .parquet(new File(warehouseDir, s"decimal_dim_$precision").getAbsolutePath)
+                .parquet(new File(warehouseDir, s"decimal_dim_${precision}_$scale").getAbsolutePath)
             }
           }
           spark.read
@@ -1339,9 +1339,9 @@ class CometIcebergNativeSuite
             .option("split-size", "134217728")
             .load(table)
             .createOrReplaceTempView("decimal_fact")
-          for (precision <- Seq(18, 10)) {
+          for ((precision, scale) <- Seq((18, 2), (10, 2), (18, 3))) {
             spark.read
-              .parquet(new File(warehouseDir, s"decimal_dim_$precision").getAbsolutePath)
+              .parquet(new File(warehouseDir, s"decimal_dim_${precision}_$scale").getAbsolutePath)
               .createOrReplaceTempView("decimal_dim")
             for (enabled <- Seq(false, true)) {
               withSQLConf(
@@ -1353,11 +1353,12 @@ class CometIcebergNativeSuite
                 assert(scans.size == 1, s"Expected one native decimal Iceberg scan:\n$plan")
                 val joins = collect(plan) { case join: CometBroadcastHashJoinExec => join }
                 assert(joins.size == 1, s"Expected one native decimal broadcast join:\n$plan")
+                assert(joins.head.metrics("output_rows").value == 32L)
                 val scan = scans.head
                 val tasks = scan.metrics("iceberg_runtime_predicate_tasks").value
                 val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value +
                   scan.metrics("iceberg_runtime_file_tasks_pruned").value
-                if (enabled && precision == 18) {
+                if (enabled && precision == 18 && scale == 2) {
                   assert(tasks > 0L && pruned > 0L, s"Decimal Iceberg pruning missing: $plan")
                 } else {
                   assert(tasks == 0L && pruned == 0L, s"Unexpected decimal pruning: $plan")

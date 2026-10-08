@@ -379,6 +379,10 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
 
 /// A cast materialized by an input projection is still a computed decimal key,
 /// even when the join itself sees only the projection's output column.
+/// Spark exchange/JVM inputs are already materialized columns in the join's domain.
+/// Reader attachment stops at those boundaries; it cannot reach a pre-cast scan.
+/// In particular, a lossless build upcast below a broadcast exchange cannot change
+/// the probe reader's scale, so Spark-side lineage tracking adds no safety here.
 fn is_direct_decimal_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalExpr>) -> bool {
     use datafusion::physical_plan::filter::FilterExec;
 

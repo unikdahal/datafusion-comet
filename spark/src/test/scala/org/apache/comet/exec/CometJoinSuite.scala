@@ -454,7 +454,14 @@ class CometJoinSuite extends CometTestBase {
           withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
             for ((buildKey, table, eligible) <- Seq(
                 ("b.key", "decimal_build", true),
+                ("b.key_alias", "(SELECT key AS key_alias, payload FROM decimal_build)", true),
                 ("b.key", "decimal_narrow_build", false),
+                // The exchange materializes this lossless build upcast before pruning.
+                (
+                  "b.key",
+                  "(SELECT CAST(key AS DECIMAL(18,2)) AS key, payload " +
+                    "FROM decimal_narrow_build)",
+                  true),
                 ("CAST(b.key AS DECIMAL(18,3))", "decimal_build", false))) {
               val query = s"SELECT /*+ BROADCAST(b) */ p.payload, b.payload " +
                 s"FROM decimal_probe p JOIN $table b ON p.key = $buildKey"
@@ -469,6 +476,48 @@ class CometJoinSuite extends CometTestBase {
               } else {
                 assert(pruned.forall(_ == 0L), s"Unexpected decimal pruning: $plan")
               }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("decimal probe rescaling stays above the reader or is materialized by a shuffle") {
+    withSQLConf(
+      CometConf.COMET_BATCH_SIZE.key -> "16",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+      SQLConf.LEAF_NODE_DEFAULT_PARALLELISM.key -> "1") {
+      withTable("decimal_rescale_probe", "decimal_rescale_build") {
+        sql("CREATE TABLE decimal_rescale_probe (key DECIMAL(18,2), payload INT) USING PARQUET")
+        sql("CREATE TABLE decimal_rescale_build (key DECIMAL(18,1), payload INT) USING PARQUET")
+        sql(
+          "INSERT INTO decimal_rescale_probe VALUES " +
+            "(-1.24, 1), (-1.25, 2), (0.04, 3), (0.05, 4), (1.24, 5), (1.25, 6), (NULL, 7)")
+        sql(
+          "INSERT INTO decimal_rescale_build VALUES (-1.2, 1), (0.0, 2), (1.2, 3), " +
+            "(1.2, 4), (NULL, 5)")
+        for (strategy <- Seq("BROADCAST", "SHUFFLE_HASH"); enabled <- Seq(false, true)) {
+          withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+            val query = s"SELECT /*+ $strategy(b) */ p.payload, b.payload " +
+              "FROM (SELECT CAST(key AS DECIMAL(18,1)) AS key, payload " +
+              "FROM decimal_rescale_probe) p JOIN decimal_rescale_build b ON p.key = b.key"
+            val (_, plan) = checkSparkAnswerAndOperator(sql(query))
+            val joins = nativeHashJoins(plan)
+            assert(joins.size == 1, s"Expected one native decimal join:\n$plan")
+            val join = joins.head
+            assert(join.metrics("output_rows").value == 4L)
+            // Broadcast keeps the probe cast visible: native eligibility rejects it.
+            // Shuffle materializes it: batch pruning uses the cast output domain, and
+            // the shuffle scan is a boundary that prevents pruning the original reader.
+            val pruned = join.metrics.get("dynamic_filter_join_rows_pruned").map(_.value)
+            if (enabled && strategy == "SHUFFLE_HASH") {
+              assert(pruned.exists(_ > 0L), s"Materialized decimal batch pruning missing: $plan")
+              assert(join.metrics("dynamic_filter_join_filters_attached").value == 0L)
+            } else {
+              assert(pruned.forall(_ == 0L), s"Unexpected decimal pruning: $plan")
             }
           }
         }
