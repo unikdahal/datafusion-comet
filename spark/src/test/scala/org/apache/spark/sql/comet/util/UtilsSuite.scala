@@ -32,12 +32,13 @@ import org.apache.arrow.vector.ipc.message.ArrowFieldNode
 import org.apache.spark.SparkEnv
 import org.apache.spark.io.CompressionCodec
 import org.apache.spark.sql.CometTestBase
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType, TimestampType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.util.io.{ChunkedByteBuffer, ChunkedByteBufferOutputStream}
 
-import org.apache.comet.CometArrowAllocator
+import org.apache.comet.{CometArrowAllocator, CometConf}
 import org.apache.comet.vector.CometVector
 
 class UtilsSuite extends CometTestBase {
@@ -178,26 +179,25 @@ class UtilsSuite extends CometTestBase {
 
   test("broadcast join with DISTINCT string build keys matches Spark") {
     withSQLConf(
-      "spark.sql.adaptive.enabled" -> "false",
-      "spark.sql.autoBroadcastJoinThreshold" -> "10485760",
-      "spark.sql.shuffle.partitions" -> "4",
-      "spark.comet.exec.enabled" -> "true") {
-      val view = "broadcast_sliced_offsets"
-      spark
-        .range(0, 200000, 1, 4)
-        .selectExpr("concat('k', lpad(cast(id as string), 10, '0')) AS id")
-        .createOrReplaceTempView(view)
-      try {
-        checkSparkAnswer(sql(s"""
-          SELECT /*+ BROADCAST(d) */ count(*)
-          FROM $view t
-          JOIN (
-            SELECT DISTINCT concat('k', lpad(cast(id as string), 10, '0')) AS id
-            FROM range(0, 200000, 1, 4)
-          ) d ON t.id = d.id
-        """))
-      } finally {
-        spark.catalog.dropTempView(view)
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "10485760",
+      SQLConf.SHUFFLE_PARTITIONS.key -> "4",
+      CometConf.COMET_EXEC_ENABLED.key -> "true",
+      "spark.comet.expression.Cast.allowIncompatible" -> "true") {
+      withTempView("t") {
+        spark
+          .range(0, 200000, 1, 4)
+          .selectExpr("concat('k', lpad(cast(id as string), 10, '0')) AS id")
+          .createOrReplaceTempView("t")
+
+        checkSparkAnswer(sql(
+          """SELECT /*+ BROADCAST(d) */ count(*)
+            |FROM t
+            |JOIN (
+            |  SELECT DISTINCT concat('k', lpad(cast(id as string), 10, '0')) AS id
+            |  FROM range(0, 200000, 1, 4)
+            |) d ON t.id = d.id
+            |""".stripMargin))
       }
     }
   }
