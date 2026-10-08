@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T13:00Z",
+ "updated": "2026-10-08T13:10Z",
  "heads": {
   "iceberg": "8294719e9b507c35976f6b1531a45d65121fe1ec",
   "comet": "8d59a5855",
@@ -41,8 +41,8 @@
   }
  ],
  "tasks": [
-  "rp-f4-review-r1",
-  "rp-bench-shard-r1"
+  "rp-bench-shard-r1",
+  "rp-f4-impl-r4"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -65,7 +65,7 @@
   },
   {
    "id": "F4",
-   "status": "fixed-8294719e9-ci-green-review-pending",
+   "status": "revising: 8294719e9 poisons shared cache on cancel (ArrowReader Clone shares cache) -> follow-up commit: cancel releases claim, waiters reload; DeleteLoad returns Result. Task rp-f4-impl-r4. Comet unaffected (fresh reader per partition).",
    "summary": "delete loader spawned task detached on scan cancel; continues I/O, reads escape Spark metrics (caching_delete_file_loader.rs:209, iceberg_scan.rs:491).",
    "decision": "Pre-existing upstream detached spawn (b9b6c7e01, not fork regression). Minimal fix: load_deletes returns receiver paired with abort-on-drop JoinHandle (runtime JoinHandle wraps tokio, add abort); pipeline.rs:203 holds it. No waiter refcounting (cache per-scan; all waiters drop together; existing guards complete stragglers with error). Gemini's refcount design rejected as over-complex. Test: gated FileRead, drop stream, release gate, assert bytes_read unchanged. Implement via codex after 12:04 UTC."
   },
