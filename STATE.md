@@ -120,3 +120,8 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 16:55 UTC: targeted bench 37807233835: P1 accepted (eval cost 4-6x lower, selective pruning intact). dim_10pct regression confirmed -> B4 design (gemini). Decimal continuation waits for codex reset 17:07.
 - 17:10 UTC: Comet branch head 1bfd6239b RED (decimal). rp-b1-decimal-r2 fixing. Last green Comet: c739c322e.
 - B4 design accepted (gate advisory row_filter on actual RG/page pruning). Queued after decimal.
+
+## 2026-10-09 — parallel operating model (user directive: never idle)
+- Workstreams W1..W7 on separate adaptive-ci/ws-* branches (see state.json "workstreams"); lead reviews + merges into integration branch; full validation only on integration branch once fast lane (W3) lands.
+- Providers: codex, gemini-3.8-flash-high ×4, glm-5.3-free ×2 (grok disabled).
+- Next after merges: combined targeted bench (decimal, B4, B3, B2, B6 queries) → full sharded campaign.

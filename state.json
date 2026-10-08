@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T17:10Z",
+ "updated": "2026-10-09T00:00Z (user clock)",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "1bfd6239b (CI FAILED 37808593789: spark build + integration)",
@@ -92,7 +92,13 @@
   }
  ],
  "tasks": [
-  "rp-b1-decimal-r2"
+  "rp-b1-decimal-r2",
+  "rp-w2-b4-impl-r1",
+  "rp-w3-fast-ci-r1",
+  "rp-w4-b6-impl-r2",
+  "rp-w5-upstream-audit-r1",
+  "rp-w6-b3-impl-r1",
+  "rp-w7-b2-impl-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -235,5 +241,46 @@
  ],
  "policy": {
   "regression_rule": "count a regression only if CI<1.0 in two independent campaigns (cross-campaign noise \u00b15-10% on small queries; shard CPU heterogeneity: EPYC 7763/9V45/9V74, Xeon 8370C)"
+ },
+ "operating_model": {
+  "directive": "user: never idle; parallel workstreams; use other providers when limited; priorities speed, performance, upstreamability, correctness; keep refactoring",
+  "branches": "each workstream on adaptive-ci/ws-<name> (both forks); lead merges into adaptive-ci/runtime-pruning-rewrite-20261006 after green CI + review; integration branch keeps full validation",
+  "providers": "codex gpt-6.1-sol (limits often), antigravity gemini-3.8-flash-high (multiple), opencode tokenrouter/z-ai/glm-5.3-free; grok disabled in T3"
+ },
+ "workstreams": {
+  "W1": {
+   "item": "B1 decimal (Comet integration branch)",
+   "agent": "codex rp-b1-decimal-r2",
+   "branch": "adaptive-ci/runtime-pruning-rewrite-20261006"
+  },
+  "W2": {
+   "item": "B4 advisory row-filter gate (iceberg)",
+   "agent": "gemini rp-w2-b4-impl-r1",
+   "branch": "adaptive-ci/ws-b4-rowfilter-gate"
+  },
+  "W3": {
+   "item": "Comet fast CI lane for ws-* + full only on integration",
+   "agent": "gemini rp-w3-fast-ci-r1",
+   "branch": "adaptive-ci/ws-fast-ci"
+  },
+  "W4": {
+   "item": "B6 safe float all-match (iceberg)",
+   "agent": "glm-5.3-free rp-w4-b6-impl-r2",
+   "branch": "adaptive-ci/ws-b6-float-allmatch"
+  },
+  "W5": {
+   "item": "upstreamability/refactor audit (read-only)",
+   "agent": "glm-5.3-free rp-w5-upstream-audit-r1"
+  },
+  "W6": {
+   "item": "B3 NULLS FIRST Top-K translation (Comet)",
+   "agent": "gemini rp-w6-b3-impl-r1",
+   "branch": "adaptive-ci/ws-b3-nulls-first"
+  },
+  "W7": {
+   "item": "B2 Top-K/join filters through safe Filter + spark_modulo (ANSI-gated)",
+   "agent": "gemini rp-w7-b2-impl-r1",
+   "branch": "adaptive-ci/ws-b2-topk-filters"
+  }
  }
 }
