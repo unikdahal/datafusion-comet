@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T10:45Z",
+ "updated": "2026-10-08T10:55Z",
  "heads": {
   "iceberg": "1e3f2a8689fc5a8aa203405411e791770d2cfc0e",
   "comet": "434d18333",
@@ -41,9 +41,7 @@
    "status": "running"
   }
  ],
- "tasks": [
-  "rp-f4-design-r1"
- ],
+ "tasks": [],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
  ],
@@ -65,8 +63,9 @@
   },
   {
    "id": "F4",
-   "status": "open-P2",
-   "summary": "delete loader spawned task detached on scan cancel; continues I/O, reads escape Spark metrics (caching_delete_file_loader.rs:209, iceberg_scan.rs:491)."
+   "status": "confirmed-design-decided-pending-impl",
+   "summary": "delete loader spawned task detached on scan cancel; continues I/O, reads escape Spark metrics (caching_delete_file_loader.rs:209, iceberg_scan.rs:491).",
+   "decision": "Pre-existing upstream detached spawn (b9b6c7e01, not fork regression). Minimal fix: load_deletes returns receiver paired with abort-on-drop JoinHandle (runtime JoinHandle wraps tokio, add abort); pipeline.rs:203 holds it. No waiter refcounting (cache per-scan; all waiters drop together; existing guards complete stragglers with error). Gemini's refcount design rejected as over-complex. Test: gated FileRead, drop stream, release gate, assert bytes_read unchanged. Implement via codex after 12:04 UTC."
   },
   {
    "id": "F5",

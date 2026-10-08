@@ -64,3 +64,4 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - Comet pushed 72981e4c3 (revert 9cccd0676) + 434d18333 (pin iceberg 1e3f2a868). CI 37761771346 running.
 - Bench 37758359536 left running (pins 92bba61b6/949cc88); do NOT push bench until it finishes (~13:15 UTC).
 - F4 design delegated (gemini, rp-f4-design-r1).
+- F4 CONFIRMED (gemini design, lead verified spawn is upstream-original b9b6c7e01). DECISION: minimal abort-on-drop handle paired with receiver; reject waiter refcounting. Impl by codex after 12:04 UTC.
