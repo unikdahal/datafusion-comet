@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T15:20Z",
+ "updated": "2026-10-08T15:45Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
@@ -79,8 +79,8 @@
  ],
  "tasks": [
   "rp-bench-shard-r1",
-  "rp-perquery-rca-join-topk-r1",
-  "rp-adaptive-bypass-r1"
+  "rp-adaptive-bypass-r1",
+  "rp-b1-design-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -177,12 +177,45 @@
   "next": "triage fixes -> codex impl -> targeted bench (sharded workflow targeted mode); re-verify ledger on next full campaign; make ledger generation part of report job",
   "done": [
    "layouts+tpch (gemini)",
-   "strjoin+fuzz (gemini)"
+   "strjoin+fuzz (gemini)",
+   "join+topk (codex): 144 queries all exact; 5 join regressions (pruning-on costs 4-7% when no I/O saved)"
   ],
   "rejected_or_deferred": [
    "tpch clustered under-delivers: data layout (join keys uncorrelated with clustering) - not a defect",
    "cross-shuffle partition pruning / Range native support: large features, deferred",
    "count_all__f_evolved 0.88x: hypothesis unproven -> re-check in sharded campaign"
   ]
- }
+ },
+ "backlog": [
+  {
+   "id": "P1",
+   "item": "adaptive bypass + zero-copy batch filter",
+   "status": "impl rp-adaptive-bypass-r1"
+  },
+  {
+   "id": "B1",
+   "item": "string/decimal join-key pruning eligibility",
+   "status": "design rp-b1-design-r1 (decimal first)"
+  },
+  {
+   "id": "B2",
+   "item": "Top-K fusion through safe filters; spark_modulo whitelist",
+   "status": "queued after P1"
+  },
+  {
+   "id": "B3",
+   "item": "NULLS FIRST secondary-key bounds (attach but 0 reader preds)",
+   "status": "queued after P1"
+  },
+  {
+   "id": "B4",
+   "item": "reader-level cost gate when filtering saves no bytes (dim_10pct)",
+   "status": "measure after P1"
+  },
+  {
+   "id": "B5",
+   "item": "count_all__f_evolved 0.88x, anti join on-variant cost",
+   "status": "recheck in sharded campaign"
+  }
+ ]
 }

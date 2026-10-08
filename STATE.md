@@ -110,3 +110,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - RCA layouts/tpch + strjoin/fuzz done (reports/rca/). fuzz: candidate 4000/4000 exact.
 - P1: adaptive bypass + zero-copy for join dynamic filter (codex rp-adaptive-bypass-r1).
 - Deferred: tpch clustered under-delivery (layout-inherent), Range native, cross-shuffle pruning. count_all__f_evolved recheck in sharded campaign 37788815352.
+- 15:45 UTC: join/topk RCA done (144 exact; 5 small join regressions all "pruning-on costs time w/o I/O savings"). Backlog P1,B1..B5 in state.json. B1 design (gemini) started; B2/B3/B4 wait for P1 (same files).

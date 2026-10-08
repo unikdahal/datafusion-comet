@@ -4595,7 +4595,14 @@
             0.9157747889450308
           ]
         }
-      }
+      },
+      "classification": "regression",
+      "under_delivery": false,
+      "rca": "empty build short-circuits all fact I/O on every variant; driver/planning/task costs dominate; fact scan 0.00 MiB, 0 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI entirely below 1.0",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "join_inner__f_str__dim_10k",
@@ -9352,7 +9359,15 @@
             1.0130853203009968
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 573.50 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_inner__f_unsorted__dim_10pct",
@@ -13949,7 +13964,15 @@
             1.0138433913944298
           ]
         }
-      }
+      },
+      "classification": "regression",
+      "under_delivery": true,
+      "rca": "10% contiguous build on random rows: reader emits 1.6M fact rows but skips no groups or bytes; the on variant is measurably slower despite fewer emitted rows; fact scan 659.77 MiB, 1,600,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI entirely below 1.0",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_extra_predicate__f_sorted__dim_128",
@@ -18546,7 +18569,15 @@
             0.9915384096458845
           ]
         }
-      }
+      },
+      "classification": "regression",
+      "under_delivery": true,
+      "rca": "narrow broadcast equality plus value % 7; Spark filter blocks reader attachment (scalar spark_modulo is outside safety whitelist); fact scan 605.77 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI entirely below 1.0",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_inner__f_pos_deletes__dim_empty",
@@ -23143,7 +23174,13 @@
             0.9941278656429957
           ]
         }
-      }
+      },
+      "classification": "fixed-overhead",
+      "under_delivery": false,
+      "rca": "empty build short-circuits all fact I/O on every variant; driver/planning/task costs dominate; fact scan 0.00 MiB, 0 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)"
+      ]
     },
     {
       "query": "join_inner__f_str__dim_128",
@@ -27900,7 +27937,15 @@
             0.9509701139978431
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 573.50 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_inner__f_dec__dim_128",
@@ -32497,7 +32542,15 @@
             1.0276663985622045
           ]
         }
-      }
+      },
+      "classification": "regression",
+      "under_delivery": true,
+      "rca": "selective sorted decimal key opportunity rejected by type gates; fact scan 588.73 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI entirely below 1.0",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_anti__f_sorted__dim_128",
@@ -37094,7 +37147,14 @@
             1.276976396412952
           ]
         }
-      }
+      },
+      "classification": "regression",
+      "under_delivery": false,
+      "rca": "anti join must retain unmatched probe rows; membership pruning is ineligible; fact scan 66.74 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned; CI establishes a small timing slowdown, not a pruning fault",
+      "deep_dive_triggers": [
+        "95% CI entirely below 1.0",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "join_inner__f_nan__dim_128_spread",
@@ -41863,7 +41923,14 @@
             1.0495992931692422
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "float/NaN keys fail runtime type eligibility; NaN matches spread across files make numeric-only pruning unsafe; fact scan 587.63 MiB, 15,822,078 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "join_inner__f_nan__dim_10k",
@@ -46632,7 +46699,14 @@
             1.0177911810740528
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "float/NaN keys fail runtime type eligibility; NaN matches spread across files make numeric-only pruning unsafe; fact scan 587.63 MiB, 15,822,078 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "join_shuffled_hash__f_sorted__dim_128",
@@ -50977,7 +51051,14 @@
             0.9965649774493937
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "shuffle completes fact scan before reducer-side filter; both on variants evaluate 16M and discard 15,999,872 reducer rows; fact scan 605.77 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned; large total variance, no proven scan regression",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "join_inner__f_dec__dim_10k",
@@ -55574,7 +55655,15 @@
             1.0101776752754197
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted decimal key opportunity rejected by type gates; fact scan 588.73 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_inner__f_nan__dim_128",
@@ -60343,7 +60432,14 @@
             1.0402090768267882
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "float/NaN keys fail runtime type eligibility; NaN matches spread across files make numeric-only pruning unsafe; fact scan 587.63 MiB, 15,822,078 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "join_inner__f_dec__dim_128_spread",
@@ -64940,7 +65036,15 @@
             1.0031812977687875
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted decimal key opportunity rejected by type gates; fact scan 588.73 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_inner__f_str__dim_128_spread",
@@ -69697,7 +69801,14 @@
             1.0723720410543105
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 573.50 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_10k_spread",
@@ -74294,7 +74405,15 @@
             0.9816124913498191
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "10,000 scattered build keys exceed the 1,024-literal publication limit; full-range bounds retain nearly all fact rows; reader attachment suppresses the separate exact batch filter; fact scan 605.77 MiB, 15,998,401 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "join_inner__f_unsorted__dim_all",
@@ -78891,7 +79010,11 @@
             0.9679562686342292
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "full-domain build offers no selective pruning; modest engine changes dominate; fact scan 659.77 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_unsorted__dim_1pct",
@@ -83488,7 +83611,11 @@
             1.0381172073795732
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "160,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 659.77 MiB, 160,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_pos_deletes__dim_all",
@@ -88085,7 +88212,11 @@
             1.0361188083900756
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "full-domain build offers no selective pruning; modest engine changes dominate; fact scan 606.98 MiB, 15,841,584 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_unsorted__dim_10k",
@@ -92682,7 +92813,11 @@
             1.0016552930546725
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "10,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 659.43 MiB, 10,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_sort_merge__f_sorted__dim_128",
@@ -96959,7 +97094,13 @@
             2.1544682804921966
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "sort-merge exchanges materialize the full probe; this hash-join runtime filter cannot prune upstream scans; fact scan 605.77 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_empty",
@@ -101556,7 +101697,14 @@
             0.9904219102882076
           ]
         }
-      }
+      },
+      "classification": "fixed-overhead",
+      "under_delivery": false,
+      "rca": "empty build short-circuits all fact I/O on every variant; driver/planning/task costs dominate; fact scan 0.00 MiB, 0 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_all",
@@ -106153,7 +106301,11 @@
             1.0183030972552858
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "full-domain build offers no selective pruning; modest engine changes dominate; fact scan 605.77 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_sorted__dim_50pct",
@@ -110750,7 +110902,11 @@
             1.04045548815852
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "8M contiguous keys at 4M; supported bound reaches the reader and rejects file/group or row work; fact scan 304.30 MiB, 8,000,000 emitted rows, 9 file tasks / 5 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_grouped__f_sorted__dim_128",
@@ -115599,7 +115755,11 @@
             1.0014006668607522
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.19 MiB, 128 emitted rows, 18 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_pos_deletes__dim_10pct",
@@ -120196,7 +120356,11 @@
             1.026270722499225
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "1.6M contiguous keys at 6.4M; supported bound reaches the reader and rejects file/group or row work; fact scan 62.72 MiB, 1,584,159 emitted rows, 17 file tasks / 6 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_semi__f_pos_deletes__dim_128",
@@ -124793,7 +124957,11 @@
             0.9642447204300376
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 0.65 MiB, 126 emitted rows, 20 file tasks / 5 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_semi__f_sorted__dim_128",
@@ -129390,7 +129558,11 @@
             1.0037133556114592
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.17 MiB, 128 emitted rows, 18 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_sorted__dim_10pct",
@@ -133987,7 +134159,11 @@
             1.0294077080730408
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "1.6M contiguous keys at 6.4M; supported bound reaches the reader and rejects file/group or row work; fact scan 63.53 MiB, 1,600,000 emitted rows, 16 file tasks / 7 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_unsorted__dim_128_spread",
@@ -138584,7 +138760,11 @@
             0.9923339609304583
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 keys spread every 125,000 over the full range; supported bound reaches the reader and rejects file/group or row work; fact scan 155.55 MiB, 128 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_unsorted__dim_128",
@@ -143181,7 +143361,11 @@
             1.0313922160753228
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 149.52 MiB, 128 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_date__dim_128_spread",
@@ -147938,7 +148122,11 @@
             1.0453834269952178
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 keys spread every 125,000 over the full range; supported bound reaches the reader and rejects file/group or row work; fact scan 108.36 MiB, 512,000 emitted rows, 0 file tasks / 2 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_long__dim_128_spread",
@@ -152535,7 +152723,11 @@
             1.051381277261059
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 keys spread every 125,000 over the full range; supported bound reaches the reader and rejects file/group or row work; fact scan 105.08 MiB, 128 emitted rows, 0 file tasks / 3 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_pos_deletes__dim_128_spread",
@@ -157132,7 +157324,11 @@
             0.9380577065073524
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 keys spread every 125,000 over the full range; supported bound reaches the reader and rejects file/group or row work; fact scan 115.45 MiB, 126 emitted rows, 0 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_sorted__dim_128_spread",
@@ -161729,7 +161925,11 @@
             0.9848980046559965
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 keys spread every 125,000 over the full range; supported bound reaches the reader and rejects file/group or row work; fact scan 111.44 MiB, 128 emitted rows, 0 file tasks / 5 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_eq_deletes__dim_128_spread",
@@ -166326,7 +166526,11 @@
             0.9918928665092586
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 keys spread every 125,000 over the full range; supported bound reaches the reader and rejects file/group or row work; fact scan 43.59 MiB, 63 emitted rows, 0 file tasks / 0 RGs pruned; large cross-engine gain includes faster equality deletes",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_pos_deletes__dim_1pct",
@@ -170923,7 +171127,11 @@
             1.0153579376709823
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "160,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 7.04 MiB, 158,416 emitted rows, 20 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_sorted__dim_1pct",
@@ -175520,7 +175728,11 @@
             1.0297664805254925
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "160,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 8.05 MiB, 160,000 emitted rows, 18 file tasks / 3 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_date__dim_128",
@@ -180277,7 +180489,11 @@
             1.0241305485092782
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.01 MiB, 4,000 emitted rows, 19 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_inner__f_date__dim_10k",
@@ -185034,7 +185250,11 @@
             1.0392999192487071
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "10,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 1.48 MiB, 12,000 emitted rows, 19 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "equality_delete_scan__f_eq_deletes",
@@ -188339,7 +188559,14 @@
             1.0491211569223664
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "same 995,904 live rows and same byte work; large engine gain persists with pruning off and is consistent with compiled hash NOT IN replacing 4,096 comparison passes; fact scan 45.28 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_nulls__dim_128_spread",
@@ -192936,7 +193163,11 @@
             0.9871508148862073
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 keys spread every 125,000 over the full range; supported bound reaches the reader and rejects file/group or row work; fact scan 33.08 MiB, 0 emitted rows, 0 file tasks / 3 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "join_star__f_sorted__dim_128",
@@ -198017,7 +198248,13 @@
             1.047958626883784
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.68 MiB, 128 emitted rows, 18 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_pos_deletes__dim_10k",
@@ -202614,7 +202851,13 @@
             1.0060191038038144
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "10,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 1.85 MiB, 9,901 emitted rows, 20 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_128_high",
@@ -207211,7 +207454,13 @@
             1.0019713768204261
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [15,999,744, 16M); supported bound reaches the reader and rejects file/group or row work; fact scan 1.49 MiB, 128 emitted rows, 19 file tasks / 5 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_long__dim_10k",
@@ -211808,7 +212057,13 @@
             1.0016515654556746
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "10,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 1.58 MiB, 10,000 emitted rows, 19 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_1",
@@ -216405,7 +216660,13 @@
             0.9859893205884712
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "one key at 9,600,000; supported bound reaches the reader and rejects file/group or row work; fact scan 1.66 MiB, 1 emitted rows, 18 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_128",
@@ -221002,7 +221263,13 @@
             1.080985273370512
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.66 MiB, 128 emitted rows, 18 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_pos_deletes__dim_128",
@@ -225599,7 +225866,13 @@
             1.0054400246431563
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.06 MiB, 126 emitted rows, 20 file tasks / 5 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_10k",
@@ -230196,7 +230469,13 @@
             1.023695981451559
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "10,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 2.22 MiB, 10,000 emitted rows, 18 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_128_low",
@@ -234793,7 +235072,13 @@
             0.9744766533021183
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [0, 256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.28 MiB, 128 emitted rows, 19 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_long__dim_128",
@@ -239390,7 +239675,13 @@
             0.9825299893600913
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.06 MiB, 128 emitted rows, 19 file tasks / 4 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_sorted__dim_two_ranges",
@@ -243987,7 +244278,13 @@
             0.9886611548738071
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys split between short ranges at 1.6M and 14.4M; supported bound reaches the reader and rejects file/group or row work; fact scan 2.95 MiB, 128 emitted rows, 18 file tasks / 9 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_nulls__dim_10k",
@@ -248584,7 +248881,13 @@
             1.0063899968635832
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "10,000 contiguous keys at 9.6M; supported bound reaches the reader and rejects file/group or row work; fact scan 2.30 MiB, 9,000 emitted rows, 19 file tasks / 5 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_eq_deletes__dim_128",
@@ -253181,7 +253484,13 @@
             0.9361445198335158
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 2.16 MiB, 16 emitted rows, 15 file tasks / 0 RGs pruned; large cross-engine gain includes faster equality deletes",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_nulls__dim_128",
@@ -257778,7 +258087,13 @@
             1.044614853969219
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "128 even keys in [9,600,000, 9,600,256); supported bound reaches the reader and rejects file/group or row work; fact scan 1.78 MiB, 102 emitted rows, 19 file tasks / 5 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_eq_deletes_str__dim_128_spread",
@@ -262535,7 +262850,15 @@
             1.0012641784335954
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 43.20 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned; off/off gains and the compiled-set code support equality-delete acceleration as the dominant explanation; this is not a pruning win",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "join_inner__f_eq_deletes_str__dim_128",
@@ -267292,7 +267615,15 @@
             0.9806382955447199
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 43.20 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned; off/off gains and the compiled-set code support equality-delete acceleration as the dominant explanation; this is not a pruning win",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "equality_delete_scan__f_eq_deletes_str",
@@ -270597,7 +270928,14 @@
             1.0307681389368888
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "same 995,904 live rows and same byte work; large engine gain persists with pruning off and is consistent with compiled hash NOT IN replacing 4,096 comparison passes; fact scan 43.20 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "above 10x paired or pooled-median speedup"
+      ]
     }
   ],
   "topk_minmax": [
@@ -273852,7 +274190,15 @@
             1.0236738062814357
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 573.50 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "both__f_long",
@@ -277157,7 +277503,14 @@
             0.9756752069752634
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 25.57 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "topk10_two_keys__f_nan",
@@ -280410,7 +280763,13 @@
             0.9839424854351699
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "float/NaN keys fail runtime type eligibility; NaN matches spread across files make numeric-only pruning unsafe; fact scan 588.15 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)"
+      ]
     },
     {
       "query": "topk10_desc__f_str",
@@ -283663,7 +284022,15 @@
             0.9755790890749345
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 573.50 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "topk100_filtered__f_unsorted",
@@ -286968,7 +287335,15 @@
             0.9922754966405076
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "value % 3 = 0 retains every generated row; Spark filter blocks direct-scan-only Top-K fusion; fact scan 720.42 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "topk10_by_id1__f_sorted",
@@ -290221,7 +290596,11 @@
             1.0812873253524982
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "computed id + 1 is outside direct-column Top-K eligibility; fact scan 605.77 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_by_payload__f_unsorted",
@@ -293474,7 +293853,14 @@
             1.0009720982247154
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "random hash payload has unsupported string bounds and little physical clustering; fact scan 659.77 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "topk100_filtered__f_sorted",
@@ -296779,7 +297165,15 @@
             0.989818393375442
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "value % 3 = 0 retains every generated row; Spark filter blocks direct-scan-only Top-K fusion; fact scan 621.66 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "both__f_nan",
@@ -300084,7 +300478,14 @@
             1.0046910820259853
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "float/NaN keys fail runtime type eligibility; NaN matches spread across files make numeric-only pruning unsafe; fact scan 33.23 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "both__f_overlap",
@@ -303389,7 +303790,14 @@
             0.9965524543234419
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 54.05 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "topk10_desc_two_keys__f_nan",
@@ -306642,7 +307050,11 @@
             0.9923631153866047
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "float/NaN keys fail runtime type eligibility; NaN matches spread across files make numeric-only pruning unsafe; fact scan 588.15 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "both__f_sorted",
@@ -309947,7 +310359,13 @@
             0.9156574675632656
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 50.85 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)"
+      ]
     },
     {
       "query": "max__f_unsorted__filtered",
@@ -313356,7 +313774,15 @@
             0.8910665252582244
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "value % 3 = 0 retains every generated row; Spark filter blocks reader attachment (scalar spark_modulo is outside safety whitelist); fact scan 120.80 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "min__f_sorted__filtered",
@@ -316765,7 +317191,15 @@
             0.8540780881956306
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "value % 3 = 0 retains every generated row; Spark filter blocks reader attachment (scalar spark_modulo is outside safety whitelist); fact scan 66.74 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)",
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "count_all__f_sorted",
@@ -320070,7 +320504,11 @@
             0.9785664117581228
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 25.90 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "both__f_date",
@@ -323375,7 +323813,13 @@
             0.8127929677485977
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 10.06 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)"
+      ]
     },
     {
       "query": "min_grouped__f_sorted",
@@ -326984,7 +327428,13 @@
             0.9075943107274238
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 55.06 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "both__f_unsorted",
@@ -330289,7 +330739,13 @@
             1.0052456217867876
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 60.16 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)"
+      ]
     },
     {
       "query": "both__f_str",
@@ -333234,7 +333690,13 @@
             0.91273673622511
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 18.58 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0"
+      ]
     },
     {
       "query": "both__f_pos_deletes",
@@ -336539,7 +337001,13 @@
             0.8710329716282259
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 52.05 MiB, 15,841,584 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)"
+      ]
     },
     {
       "query": "both__f_nulls",
@@ -339844,7 +340312,13 @@
             1.0181394901915688
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "combined extrema, grouping, or ordinary aggregation has no eligible single-extremum bound; fact scan 47.30 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "95% CI overlaps below 1.0 (exploratory)"
+      ]
     },
     {
       "query": "topk10_desc_nulls_first_two_keys__f_nulls",
@@ -343168,7 +343642,14 @@
             0.9558530804640457
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "NULLS FIRST with repeated null primary keys records attachment but zero reader predicate tasks; null-threshold/secondary-key translation is the likely gap; fact scan 602.18 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned; off/off captures local Top-K fusion benefit",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "topk10_two_keys__f_nulls",
@@ -346492,7 +346973,14 @@
             0.9849651806223377
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "NULLS FIRST with repeated null primary keys records attachment but zero reader predicate tasks; null-threshold/secondary-key translation is the likely gap; fact scan 602.18 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned; off/off captures local Top-K fusion benefit",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "topk100_by_k2id_two_keys__f_sorted",
@@ -349816,7 +350304,13 @@
             0.9966596738007365
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "k2 repeats 0..999 in every file/group; first-key bound emits fewer rows but full bytes remain; no secondary-id bound pushed to the reader; fact scan 607.21 MiB, 889,903 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "topk1000__f_unsorted",
@@ -353140,7 +353634,13 @@
             0.9643836821066254
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "randomized layout is consistent with winners spread across groups/pages; observed file/RG pruning is zero, larger K reduces heap candidates but saves essentially no reader bytes; fact scan 659.43 MiB, 1,116,211 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "both__f_reversed_files",
@@ -356366,7 +356866,13 @@
             0.8272933521989692
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 51.86 MiB, 16,000,000 emitted rows, 0 file tasks / 0 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "coverage difference"
+      ]
     },
     {
       "query": "min__f_unsorted",
@@ -359671,7 +360177,11 @@
             0.9735086051279168
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 9.27 MiB, 1,097,364 emitted rows, 10 file tasks / 21 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "max__f_sorted",
@@ -362976,7 +363486,11 @@
             1.0049360918864194
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 4.38 MiB, 738,260 emitted rows, 15 file tasks / 11 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "max__f_unsorted",
@@ -366281,7 +366795,11 @@
             0.9458639187793674
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 6.26 MiB, 1,000,019 emitted rows, 10 file tasks / 30 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "min__f_sorted",
@@ -369586,7 +370104,11 @@
             0.8264653714293718
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 4.72 MiB, 874,580 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "max__f_pos_deletes",
@@ -372891,7 +373413,11 @@
             0.8731425798075091
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 6.11 MiB, 1,128,137 emitted rows, 15 file tasks / 18 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "min__f_overlap",
@@ -376196,7 +376722,11 @@
             0.98337434864216
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 6.36 MiB, 1,169,286 emitted rows, 10 file tasks / 30 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "min__f_pos_deletes",
@@ -379501,7 +380031,11 @@
             0.8945892717621587
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 5.36 MiB, 844,384 emitted rows, 15 file tasks / 8 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk100000__f_unsorted",
@@ -382825,7 +383359,13 @@
             0.9028886926839098
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "randomized layout is consistent with winners spread across groups/pages; observed file/RG pruning is zero, larger K reduces heap candidates but saves essentially no reader bytes; fact scan 659.77 MiB, 2,984,590 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "under-delivery opportunity"
+      ]
     },
     {
       "query": "max__f_overlap",
@@ -386130,7 +386670,11 @@
             0.9913246365898079
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 3.44 MiB, 154,133 emitted rows, 10 file tasks / 30 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "min__f_reversed_files",
@@ -389356,7 +389900,13 @@
             0.9600155460902018
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 6.04 MiB, 1,195,134 emitted rows, 16 file tasks / 6 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "coverage difference"
+      ]
     },
     {
       "query": "topk100000__f_overlap",
@@ -392680,7 +393230,11 @@
             0.9839369987401619
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 84.50 MiB, 1,919,465 emitted rows, 0 file tasks / 80 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "max__f_reversed_files",
@@ -395906,7 +396460,13 @@
             1.0181759990930608
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 4.07 MiB, 419,157 emitted rows, 16 file tasks / 24 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "coverage difference"
+      ]
     },
     {
       "query": "topk100_id_only__f_sorted",
@@ -399230,7 +399790,11 @@
             1.0346273359472906
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 4.72 MiB, 874,580 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk100000__f_pos_deletes",
@@ -402554,7 +403118,11 @@
             0.9686600588361636
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 50.85 MiB, 1,238,785 emitted rows, 13 file tasks / 17 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk100000__f_sorted",
@@ -405878,7 +406446,11 @@
             0.9763913267415368
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 42.98 MiB, 1,073,751 emitted rows, 14 file tasks / 17 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk100000__f_reversed_files",
@@ -408746,7 +409318,13 @@
             0.8682837131907916
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 48.49 MiB, 1,195,134 emitted rows, 14 file tasks / 8 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "coverage difference"
+      ]
     },
     {
       "query": "topk10__f_unsorted",
@@ -412070,7 +412648,11 @@
             0.9690684540263166
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 179.76 MiB, 1,097,506 emitted rows, 1 file tasks / 28 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_desc__f_unsorted",
@@ -415394,7 +415976,11 @@
             0.9746385147941065
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 168.52 MiB, 1,000,191 emitted rows, 0 file tasks / 40 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_two_keys__f_unsorted",
@@ -418718,7 +419304,11 @@
             1.009802793874477
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 179.76 MiB, 1,097,506 emitted rows, 1 file tasks / 28 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk1000__f_overlap",
@@ -422042,7 +422632,11 @@
             0.9693064984290595
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 60.83 MiB, 1,176,631 emitted rows, 0 file tasks / 80 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10__f_overlap",
@@ -425366,7 +425960,11 @@
             0.9339130091356482
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 60.83 MiB, 1,169,348 emitted rows, 0 file tasks / 80 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_two_keys__f_date",
@@ -428690,7 +429288,11 @@
             0.9736199622821176
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 39.62 MiB, 1,070,139 emitted rows, 15 file tasks / 13 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk1__f_unsorted",
@@ -432014,7 +432616,11 @@
             0.9724723962282336
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 60.41 MiB, 1,097,364 emitted rows, 10 file tasks / 21 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk1__f_overlap",
@@ -435338,7 +435944,11 @@
             0.9968914957903106
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 47.28 MiB, 1,169,286 emitted rows, 10 file tasks / 30 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_desc_two_keys__f_date",
@@ -438662,7 +439272,11 @@
             1.0471884484426817
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 36.51 MiB, 980,205 emitted rows, 15 file tasks / 8 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_nulls_last_two_keys__f_nulls",
@@ -441986,7 +442600,11 @@
             0.9911523098320216
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 38.86 MiB, 983,136 emitted rows, 16 file tasks / 14 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk1000__f_pos_deletes",
@@ -445310,7 +445928,11 @@
             0.9971998851672359
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 34.95 MiB, 844,384 emitted rows, 15 file tasks / 8 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10__f_long",
@@ -448634,7 +449256,11 @@
             0.9721022499288758
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 37.12 MiB, 970,276 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_desc__f_pos_deletes",
@@ -451958,7 +452584,11 @@
             0.9974454525375424
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 45.63 MiB, 1,128,137 emitted rows, 15 file tasks / 18 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10__f_pos_deletes",
@@ -455282,7 +455912,11 @@
             0.9839242487034723
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 34.95 MiB, 844,384 emitted rows, 15 file tasks / 8 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk1__f_pos_deletes",
@@ -458606,7 +459240,11 @@
             0.9713092940170016
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 34.95 MiB, 844,384 emitted rows, 15 file tasks / 8 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk1__f_sorted",
@@ -461930,7 +462568,11 @@
             0.980766860055728
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 35.06 MiB, 874,580 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk1000__f_sorted",
@@ -465254,7 +465896,11 @@
             1.0035433106885874
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 35.06 MiB, 874,580 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_by_value__f_sorted",
@@ -468578,7 +469224,11 @@
             1.0267745979218115
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 35.06 MiB, 874,580 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_offset__f_sorted",
@@ -471902,7 +472552,11 @@
             1.0018117845594328
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 35.06 MiB, 874,580 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_two_keys__f_sorted",
@@ -475226,7 +475880,11 @@
             0.9639792904062886
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 35.06 MiB, 874,580 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10__f_sorted",
@@ -478550,7 +479208,11 @@
             0.9753381914148812
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 35.06 MiB, 874,580 emitted rows, 15 file tasks / 12 RGs pruned",
+      "deep_dive_triggers": []
     },
     {
       "query": "topk10_desc__f_eq_deletes",
@@ -481874,7 +482536,13 @@
             0.9987184994914226
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 22.75 MiB, 499,231 emitted rows, 8 file tasks / 0 RGs pruned; large cross-engine gain includes faster equality deletes",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk10__f_eq_deletes",
@@ -485198,7 +485866,13 @@
             1.0020537972988237
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 22.66 MiB, 496,673 emitted rows, 8 file tasks / 0 RGs pruned; large cross-engine gain includes faster equality deletes",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk10_desc__f_long",
@@ -488522,7 +489196,13 @@
             0.9553496587299501
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 29.48 MiB, 742,519 emitted rows, 14 file tasks / 14 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk10_desc__f_sorted",
@@ -491846,7 +492526,13 @@
             0.9905692121027972
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 29.98 MiB, 738,260 emitted rows, 15 file tasks / 11 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "equality_delete_scan__f_eq_deletes",
@@ -495151,7 +495837,14 @@
             0.9904809428309567
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "same 995,904 live rows and same byte work; large engine gain persists with pruning off and is consistent with compiled hash NOT IN replacing 4,096 comparison passes; fact scan 11.61 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk1000_desc__f_sorted",
@@ -498475,7 +499168,13 @@
             0.9982662325649132
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 29.98 MiB, 738,260 emitted rows, 15 file tasks / 11 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk10_desc__f_overlap",
@@ -501799,7 +502498,13 @@
             0.9945262654606979
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 23.29 MiB, 154,219 emitted rows, 0 file tasks / 80 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk1000__f_reversed_files",
@@ -504667,7 +505372,14 @@
             0.8926628186495392
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 48.49 MiB, 1,195,134 emitted rows, 14 file tasks / 8 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup",
+        "coverage difference"
+      ]
     },
     {
       "query": "topk10_desc_two_keys__f_nulls",
@@ -507991,7 +508703,13 @@
             0.9854462109627866
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 14.71 MiB, 316,562 emitted rows, 15 file tasks / 13 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk10_two_keys__f_reversed_files",
@@ -510859,7 +511577,14 @@
             0.8609618025852956
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 48.49 MiB, 1,195,134 emitted rows, 14 file tasks / 8 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup",
+        "coverage difference"
+      ]
     },
     {
       "query": "both__f_eq_deletes",
@@ -514164,7 +514889,13 @@
             1.0128308563330792
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "same 995,904 live rows and same byte work; large engine gain persists with pruning off and is consistent with compiled hash NOT IN replacing 4,096 comparison passes; fact scan 10.69 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "max__f_eq_deletes",
@@ -517469,7 +518200,13 @@
             0.9902483191388379
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 5.41 MiB, 499,231 emitted rows, 8 file tasks / 0 RGs pruned; large cross-engine gain includes faster equality deletes",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk10__f_reversed_files",
@@ -520337,7 +521074,14 @@
             0.90268790632986
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 48.49 MiB, 1,195,134 emitted rows, 14 file tasks / 8 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup",
+        "coverage difference"
+      ]
     },
     {
       "query": "topk1__f_reversed_files",
@@ -523205,7 +523949,14 @@
             0.850697439348182
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 47.49 MiB, 1,195,134 emitted rows, 16 file tasks / 6 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup",
+        "coverage difference"
+      ]
     },
     {
       "query": "min__f_eq_deletes",
@@ -526510,7 +527261,13 @@
             0.9852181610068063
           ]
         }
-      }
+      },
+      "classification": "pruning-win",
+      "under_delivery": false,
+      "rca": "supported bound reaches the reader and rejects file/group or row work; fact scan 5.41 MiB, 496,673 emitted rows, 8 file tasks / 0 RGs pruned; large cross-engine gain includes faster equality deletes",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk10_desc__f_reversed_files",
@@ -529378,7 +530135,14 @@
             0.8865401790742587
           ]
         }
-      }
+      },
+      "classification": "coverage-diff",
+      "under_delivery": false,
+      "rca": "ordinary reversed-file table is Spark BatchScan on baseline and native Iceberg on candidate; fact scan 18.60 MiB, 419,157 emitted rows, 16 file tasks / 24 RGs pruned; results match but reader coverage differs",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup",
+        "coverage difference"
+      ]
     },
     {
       "query": "topk10_desc__f_eq_deletes_str",
@@ -532631,7 +533395,14 @@
             0.9966232961411943
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 43.20 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned; off/off gains and the compiled-set code support equality-delete acceleration as the dominant explanation; this is not a pruning win",
+      "deep_dive_triggers": [
+        "under-delivery opportunity",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "both__f_eq_deletes_str",
@@ -535576,7 +536347,14 @@
             0.9956379226776554
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "same 995,904 live rows and same byte work; large engine gain persists with pruning off and is consistent with compiled hash NOT IN replacing 4,096 comparison passes; fact scan 8.62 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "topk10__f_eq_deletes_str",
@@ -538829,7 +539607,14 @@
             0.998546219235565
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 43.20 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned; off/off gains and the compiled-set code support equality-delete acceleration as the dominant explanation; this is not a pruning win",
+      "deep_dive_triggers": [
+        "under-delivery opportunity",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "min__f_eq_deletes_str",
@@ -541774,7 +542559,15 @@
             0.9891935696506465
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 8.62 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned; off/off gains and the compiled-set code support equality-delete acceleration as the dominant explanation; this is not a pruning win",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "max__f_eq_deletes_str",
@@ -544719,7 +545512,15 @@
             0.9946062704341331
           ]
         }
-      }
+      },
+      "classification": "under-delivers",
+      "under_delivery": true,
+      "rca": "selective sorted string key opportunity rejected by type gates; fact scan 8.62 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned; off/off gains and the compiled-set code support equality-delete acceleration as the dominant explanation; this is not a pruning win",
+      "deep_dive_triggers": [
+        "candidate on/off point estimate or pooled-median speedup below 1.0",
+        "under-delivery opportunity",
+        "above 10x paired or pooled-median speedup"
+      ]
     },
     {
       "query": "equality_delete_scan__f_eq_deletes_str",
@@ -548024,7 +548825,13 @@
             0.9929494620215994
           ]
         }
-      }
+      },
+      "classification": "expected-parity",
+      "under_delivery": false,
+      "rca": "same 995,904 live rows and same byte work; large engine gain persists with pruning off and is consistent with compiled hash NOT IN replacing 4,096 comparison passes; fact scan 9.54 MiB, 995,904 emitted rows, 0 file tasks / 0 RGs pruned",
+      "deep_dive_triggers": [
+        "above 10x paired or pooled-median speedup"
+      ]
     }
   ]
 }
