@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T14:40Z",
+ "updated": "2026-10-08T15:20Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
@@ -41,12 +41,34 @@
    "status": "completed",
    "result": "strjoin+fuzz+report jobs failed; ALL 160 validation failures baseline-only (Apache main f80042f78); 0 candidate failures",
    "baseline_resolved": "f80042f78 @ 2026-10-08T09:42Z, apache iceberg af1da4c",
-   "analysis_r1": "PRELIMINARY (gemini): topk 4.11x, join 3.49x, layouts 2.75x, tpch 0.98x, strjoin 0.98x geomean; candidate 0 failures. NOT coverage-equal (main fell back to Spark on reversed_files/many_files/snapshots + fuzz). Round 2 requested."
+   "analysis_r1": "PRELIMINARY (gemini): topk 4.11x, join 3.49x, layouts 2.75x, tpch 0.98x, strjoin 0.98x geomean; candidate 0 failures. NOT coverage-equal (main fell back to Spark on reversed_files/many_files/snapshots + fuzz). Round 2 requested.",
+   "analysis_r2": {
+    "equal_coverage_cand_on_vs_base_on": {
+     "join": 3.49,
+     "topk_minmax": 3.87,
+     "layouts": 2.59,
+     "tpch": 0.98,
+     "strjoin": 0.98
+    },
+    "off_vs_off": {
+     "join": 1.36,
+     "topk_minmax": 1.66,
+     "layouts": 1.0,
+     "tpch": 0.99,
+     "strjoin": 1.03
+    },
+    "unequal_coverage": "25 queries: main falls back on tables named *_files/*_snapshots (suffix bug in main CometScanRule; fork fixed d78ed8356; ALREADY TRACKED upstream -> no fork issue)",
+    "caveats": "report claims of 'JIT profiling' unsupported (no profiling run); harness flagged 0 regressions <0.90x CI",
+    "followups": [
+     "pruning-on overhead strjoin/tpch cand_on/cand_off 0.97-0.99: measure dynamic-filter cost on non-selective joins",
+     "layouts count_all__f_evolved 0.88x [0.83,0.93]",
+     "join_inner__f_unsorted__dim_empty 0.88x"
+    ]
+   }
   }
  ],
  "tasks": [
-  "rp-bench-shard-r1",
-  "rp-bench-analysis-r2"
+  "rp-bench-shard-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -110,6 +132,11 @@
     },
     "note": "gemini task crashed after pushing; lead watching runs"
    }
+  },
+  {
+   "id": "M2",
+   "status": "skip-already-tracked-upstream",
+   "summary": "main CometScanRule.isIcebergMetadataTable suffix match without segment boundary -> native scan skipped for tables like f_many_files. Fork fix d78ed8356."
   }
  ],
  "agent_limits": {

@@ -92,3 +92,9 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 14:20 UTC: M1 (main bug) RCA: broadcast coalescing of sliced string vectors (offset[0]>0) in Utils.scala; fork fix 422cb76f1. Untracked upstream/fork. GHA proof task rp-strjoin-repro-r1 (test-only on main must fail; with fix pass). File fork issue only if confirmed.
 - 14:40 UTC: bench analysis r1 PRELIMINARY — headline geomeans mix unequal coverage (main Spark fallbacks); fallback reasons appeared guessed; shuffle-probe claim suspicious. Round 2 (rp-bench-analysis-r2) for coverage-equal numbers, on/off isolation, real fallback reasons, regression list. Do not cite r1 numbers as results.
 - M1 repro runs: A 37792317030 (main+tests) / B 37792322262 (+fix). Diff A vs B = Utils.scala only (lead verified).
+
+## 2026-10-08 15:20 UTC — bench 37758359536 analysis r2 (accepted with caveats)
+- Equal-coverage cand_on/base_on: join 3.49x, topk 3.87x, layouts 2.59x, tpch 0.98x, strjoin 0.98x. off/off: 1.36/1.66/1.00/0.99/1.03.
+- 25 unequal-coverage queries from main's metadata-table suffix bug (M2) — tracked upstream already → no fork issue.
+- Discounted: report's "JIT profiling" claims (no profiling exists).
+- Perf follow-ups: dynamic-filter overhead on non-selective joins (strjoin/tpch on/off 0.97-0.99); count_all__f_evolved 0.88x; join_inner__f_unsorted__dim_empty 0.88x.
