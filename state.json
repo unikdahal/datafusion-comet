@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T16:00Z",
+ "updated": "2026-10-08T16:20Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
@@ -76,12 +76,12 @@
    "status": "completed",
    "note": "lacks F4 157cf6475 (cancellation-only)",
    "wall": "1h46m (was ~4h)",
-   "result": "candidate 0 validation failures; baseline 120 (string-join bug #42); report exit 1 by design on any validation failure"
+   "result": "candidate 0 validation failures; baseline 120 (string-join bug #42); report exit 1 by design on any validation failure",
+   "delta": "baseline main 5db0efe69. shuffle-probe pruning restored (16M->128 rows); q17/q03 18M rows skipped at scan; count_all_evolved 1.03 (was 0.88 = noise); extra_predicate 1.01; strjoin 1.00; persistent: dim_empty 0.94 (fixed overhead), f_nan 0.97 (float guard cost, accepted), dec_dim_10k 0.96 (unconfirmed)."
   }
  ],
  "tasks": [
-  "rp-adaptive-bypass-r1",
-  "rp-delta-37788815352-r1"
+  "rp-adaptive-bypass-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -217,7 +217,15 @@
   {
    "id": "B5",
    "item": "count_all__f_evolved 0.88x, anti join on-variant cost",
-   "status": "recheck in sharded campaign"
+   "status": "mostly noise; remaining dim_empty 0.94 (0-row fixed overhead) - low priority"
+  },
+  {
+   "id": "B6",
+   "item": "restore float all-match fast path when provably safe (nan_count==0, literal not NaN, bounds don't straddle +-0)",
+   "status": "low priority"
   }
- ]
+ ],
+ "policy": {
+  "regression_rule": "count a regression only if CI<1.0 in two independent campaigns (cross-campaign noise \u00b15-10% on small queries; shard CPU heterogeneity: EPYC 7763/9V45/9V74, Xeon 8370C)"
+ }
 }

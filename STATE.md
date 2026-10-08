@@ -114,3 +114,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - B1 design accepted; decimal phase queued after P1.
 - Bench sharding landed (51478edbc); first sharded campaign 37788815352 shards ~45 min each. Watcher running.
 - 16:00 UTC: sharded campaign 37788815352 done in 1h46m. Candidate 0 failures; baseline string-join failures again. Delta-ledger task rp-delta-37788815352-r1 (gemini).
+- 16:20 UTC: delta analysis 37788815352 vs 37758359536: shuffle-probe revert confirmed beneficial; most small "regressions" were noise. POLICY: regression requires CI<1 in 2 campaigns. B6 added (safe float all-match).
