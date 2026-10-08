@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T13:55Z",
+ "updated": "2026-10-08T14:20Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
@@ -45,8 +45,8 @@
  ],
  "tasks": [
   "rp-bench-shard-r1",
-  "rp-strjoin-rca-r1",
-  "rp-bench-analysis-r1"
+  "rp-bench-analysis-r1",
+  "rp-strjoin-repro-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -92,6 +92,11 @@
    "id": "F8",
    "status": "decided-revert",
    "summary": "9cccd0676 broke CometJoinSuite 'join dynamic filter prunes probe rows: SHUFFLE_HASH, AQE=true' (3.5+4.1). Upstream behavior + upstream test; no perf evidence. Reverted locally 72981e4c3. F5/F6 moot."
+  },
+  {
+   "id": "M1",
+   "status": "rca-done-awaiting-gha-proof",
+   "summary": "Apache Comet main wrong results: broadcast batch coalescing (Utils.coalesceBroadcastBatches ~383 / serializeBatches ~270) appends sliced var-width vectors with offset[0]>0 via VectorSchemaRootAppender -> corrupt first row per batch (dropped join rows) + quadratic buffer growth (OversizedAllocationException). Fork fix 422cb76f1 (normalize via root.slice). Not tracked upstream or on fork (searched). Repro task rp-strjoin-repro-r1 (branches repro/broadcast-sliced-offsets-{main,fix}). If confirmed -> open issue on unikdahal/datafusion-comet."
   }
  ],
  "agent_limits": {
