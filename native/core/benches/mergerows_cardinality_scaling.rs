@@ -52,11 +52,12 @@ fn ids(layout: &str, n: usize) -> Vec<u64> {
         "spark-16k" => (16384, 1, false),
         "spark-200-shuffled" => (200, 1, true),
         "spark-16k-shuffled" => (16384, 1, true),
+        "spark-200-high-offset" => (200, 1, false),
         _ => unreachable!(),
     };
     (0..n as u64).map(|i| {
         let j = if shuffled { i.wrapping_mul(1_048_583) % n as u64 } else { i };
-        if stride != 1 { j * stride } else { ((j % partitions) << 33) + j / partitions }
+        if stride != 1 { j * stride } else { ((j % partitions) << 33) + j / partitions + if layout == "spark-200-high-offset" { 100_000_000 } else { 0 } }
     }).collect()
 }
 
@@ -110,9 +111,84 @@ fn segmented_adaptive(input: &[u64]) -> (usize, usize) {
     (count, retained)
 }
 
+
+enum AnchoredSegment {
+    Dense { base_word: u32, words: Vec<u64>, count: usize },
+    Roaring(RoaringBitmap),
+}
+
+fn segmented_anchored(input: &[u64]) -> (usize, usize) {
+    const MAX_WORDS: usize = 131_072;
+    let mut partitions: HashMap<u32, AnchoredSegment> = HashMap::new();
+    for &id in input {
+        let high = (id >> 32) as u32;
+        let low = id as u32;
+        let word = low >> 6;
+        let entry = partitions.entry(high).or_insert_with(|| AnchoredSegment::Dense {
+            base_word: word,
+            words: Vec::new(),
+            count: 0,
+        });
+        match entry {
+            AnchoredSegment::Roaring(bitmap) => {
+                if bitmap.try_push(low).is_err() {
+                    assert!(bitmap.insert(low));
+                }
+            }
+            AnchoredSegment::Dense { base_word, words, count } => {
+                let current_end = (*base_word as u64) + words.len().saturating_sub(1) as u64;
+                let minimum = (*base_word).min(word);
+                let maximum = current_end.max(word as u64);
+                let proposed_words = (maximum - minimum as u64 + 1) as usize;
+                if proposed_words > MAX_WORDS
+                    || proposed_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1))
+                {
+                    let mut bitmap = RoaringBitmap::new();
+                    for (i, &bits) in words.iter().enumerate() {
+                        let mut remaining = bits;
+                        while remaining != 0 {
+                            let bit = remaining.trailing_zeros() as u32;
+                            assert!(bitmap.insert(((*base_word as u64 + i as u64) * 64 + bit as u64) as u32));
+                            remaining &= remaining - 1;
+                        }
+                    }
+                    if bitmap.try_push(low).is_err() {
+                        assert!(bitmap.insert(low));
+                    }
+                    *entry = AnchoredSegment::Roaring(bitmap);
+                } else {
+                    if minimum < *base_word {
+                        let offset = (*base_word - minimum) as usize;
+                        let mut next = vec![0u64; proposed_words];
+                        next[offset..offset + words.len()].copy_from_slice(words);
+                        *words = next;
+                        *base_word = minimum;
+                    } else if proposed_words > words.len() {
+                        words.resize(proposed_words, 0);
+                    }
+                    let idx = (word - *base_word) as usize;
+                    let flag = 1u64 << (low & 63);
+                    assert_eq!(words[idx] & flag, 0);
+                    words[idx] |= flag;
+                    *count += 1;
+                }
+            }
+        }
+    }
+    let retained = LIVE.load(Ordering::Relaxed) as usize;
+    let count = partitions.values().map(|p| match p {
+        AnchoredSegment::Dense {count, ..} => *count,
+        AnchoredSegment::Roaring(b) => b.len() as usize,
+    }).sum();
+    std::hint::black_box(&partitions);
+    drop(partitions);
+    (count, retained)
+}
+
 fn insert(design: &str, input: &[u64]) -> (usize, usize) {
     match design {
         "segmented-adaptive" => segmented_adaptive(input),
+        "segmented-anchored" => segmented_anchored(input),
         "hash" => {
             let mut set = HashSet::new();
             for &id in input { assert!(set.insert(id)); }
@@ -190,8 +266,8 @@ fn sample(design: &str, input: &[u64]) -> (f64, usize, usize) {
 }
 fn main() {
     const N: usize = 5_000_000;
-    let layouts = ["dense", "sparse-8", "sparse-200", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled"];
-    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-append", "partitioned-sorted", "segmented-adaptive"];
+    let layouts = ["dense", "sparse-8", "sparse-200", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled", "spark-200-high-offset"];
+    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-append", "partitioned-sorted", "segmented-adaptive", "segmented-anchored"];
     println!("SCALING_BENCH,n,layout,design,median_ms,retained_bytes,peak_allocated_bytes");
     for layout in layouts {
         let input = ids(layout, N);
