@@ -1488,7 +1488,8 @@ private[arrow] class StructWriter(
     }
     require(
       sourceType.length >= declaredType.length,
-      s"Cannot write ${declaredType.length} fields of struct $name from ${sourceType.length} fields")
+      s"Cannot write ${declaredType.length} fields of struct $name " +
+        s"from ${sourceType.length} fields")
 
     val sourceToCompare =
       if (sourceType.length == declaredType.length) sourceType
