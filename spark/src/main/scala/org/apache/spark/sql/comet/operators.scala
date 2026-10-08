@@ -2782,12 +2782,16 @@ trait CometHashJoin {
   // Trace aliases to that metadata, including below exchanges. Stored Iceberg strings do not
   // promise CHAR padding, so reader pruning must not compare them to padded join literals.
   private def hasCharJoinKey(input: SparkPlan, keys: Seq[Expression]): Boolean = {
-    val references = keys.flatMap(_.references).map(_.exprId).toSet
+    val stringKeys = keys.filter(_.dataType.isInstanceOf[StringType])
+    if (stringKeys.isEmpty) {
+      return false
+    }
+    val references = stringKeys.flatMap(_.references).map(_.exprId).toSet
     def isChar(attribute: Attribute): Boolean =
       attribute.metadata.contains("__CHAR_VARCHAR_TYPE_STRING") &&
         attribute.metadata.getString("__CHAR_VARCHAR_TYPE_STRING")
           .toLowerCase(Locale.ROOT).startsWith("char(")
-    if (keys.flatMap(_.references).exists(isChar) ||
+    if (stringKeys.flatMap(_.references).exists(isChar) ||
       input.output.exists(a => references.contains(a.exprId) && isChar(a))) {
       true
     } else {
@@ -2799,7 +2803,7 @@ trait CometHashJoin {
       val sourceKeys = if (projects.nonEmpty) {
         projects.filter(p => references.contains(p.exprId))
       } else {
-        keys
+        stringKeys
       }
       input.children.exists(child => hasCharJoinKey(child, sourceKeys))
     }

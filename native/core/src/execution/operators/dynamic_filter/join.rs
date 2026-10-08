@@ -412,16 +412,19 @@ fn is_direct_pruning_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalE
     // If an external/native schema supplies semantic annotations, fail closed.
     let schema = input.schema();
     let field = schema.field(column.index());
-    if is_string_key_type(field.data_type())
-        && [
-            "__COLLATIONS",
-            "__CHAR_VARCHAR_TYPE_STRING",
-            "ARROW:extension:name",
-        ]
-        .iter()
-        .any(|name| field.metadata().contains_key(*name))
-    {
-        return false;
+    if is_string_key_type(field.data_type()) {
+        let metadata = field.metadata();
+        let annotated_comparison = ["__COLLATIONS", "ARROW:extension:name"]
+            .iter()
+            .any(|name| metadata.contains_key(*name));
+        // VARCHAR constrains writes but does not pad comparisons. CHAR and unknown
+        // raw type annotations cannot prove byte equality of the stored values.
+        let padded_or_unknown = metadata
+            .get("__CHAR_VARCHAR_TYPE_STRING")
+            .is_some_and(|raw_type| !raw_type.to_ascii_lowercase().starts_with("varchar("));
+        if annotated_comparison || padded_or_unknown {
+            return false;
+        }
     }
     if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
         return projection

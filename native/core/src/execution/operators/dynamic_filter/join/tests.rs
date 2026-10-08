@@ -2054,6 +2054,33 @@ fn string_annotations_and_visible_casts_disable_pruning() {
             &ConfigOptions::default(),
         );
     }
+    for (raw_type, eligible) in [
+        ("varchar(4)", true),
+        ("VARCHAR(24)", true),
+        ("char(4)", false),
+        ("CHAR(24)", false),
+    ] {
+        let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, true)
+            .with_metadata(HashMap::from([(
+                "__CHAR_VARCHAR_TYPE_STRING".into(),
+                raw_type.into(),
+            )]))]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::StringArray::from(vec!["x"]))],
+        )
+        .unwrap();
+        let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
+        let candidate =
+            single_key_join_plans(memory_exec(vec![batch]), probe, PartitionMode::CollectLeft);
+        assert_eq!(
+            ineligible_reason(&candidate, &ConfigOptions::default())
+                .unwrap()
+                .is_none(),
+            eligible,
+            "{raw_type}"
+        );
+    }
     for cast_build in [false, true] {
         let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
         let build = string_input(vec![Some("x")], &DataType::Utf8);

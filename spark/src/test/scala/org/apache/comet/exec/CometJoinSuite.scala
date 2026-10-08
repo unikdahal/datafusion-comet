@@ -641,8 +641,8 @@ class CometJoinSuite extends CometTestBase {
           joins.foreach { join =>
             assert(!join.nativeOp.getHashJoin.getDynamicFilterEnabled)
             assert(join.metrics("output_rows").value == 2L)
-            assert(join.metrics("dynamic_filter_join_filters_attached").value == 0L)
-            assert(join.metrics("dynamic_filter_join_rows_pruned").value == 0L)
+            assert(join.metrics.get("dynamic_filter_join_filters_attached").forall(_.value == 0L))
+            assert(join.metrics.get("dynamic_filter_join_rows_pruned").forall(_.value == 0L))
           }
         }
       } finally {
