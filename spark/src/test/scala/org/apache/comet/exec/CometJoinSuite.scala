@@ -441,12 +441,14 @@ class CometJoinSuite extends CometTestBase {
         sql("CREATE TABLE decimal_probe (key DECIMAL(18,2), payload BIGINT) USING PARQUET")
         sql("CREATE TABLE decimal_build (key DECIMAL(18,2), payload BIGINT) USING PARQUET")
         sql("CREATE TABLE decimal_narrow_build (key DECIMAL(10,2), payload BIGINT) USING PARQUET")
-        sql("INSERT INTO decimal_probe SELECT CAST(id / 100.0 AS DECIMAL(18,2)), id " +
-          "FROM range(-500, 500)")
+        sql(
+          "INSERT INTO decimal_probe SELECT CAST(id / 100.0 AS DECIMAL(18,2)), id " +
+            "FROM range(-500, 500)")
         sql("INSERT INTO decimal_probe VALUES (NULL, 1000)")
         for (table <- Seq("decimal_build", "decimal_narrow_build")) {
-          sql(s"INSERT INTO $table VALUES (-1.25, 1), (0.00, 2), (1.25, 3), (1.25, 4), " +
-            "(NULL, 5)")
+          sql(
+            s"INSERT INTO $table VALUES (-1.25, 1), (0.00, 2), (1.25, 3), (1.25, 4), " +
+              "(NULL, 5)")
         }
         for (enabled <- Seq(false, true)) {
           withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {

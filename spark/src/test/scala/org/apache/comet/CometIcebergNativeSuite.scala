@@ -1313,21 +1313,35 @@ class CometIcebergNativeSuite
             'write.parquet.compression-codec'='uncompressed')""")
         try {
           withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-            spark.range(-60000L, 60000L).coalesce(1).sortWithinPartitions("id")
+            spark
+              .range(-60000L, 60000L)
+              .coalesce(1)
+              .sortWithinPartitions("id")
               .selectExpr(
                 "CAST(id / 100.0 AS DECIMAL(18,2)) AS id",
                 "sha2(CAST(id AS STRING), 256) AS payload")
-              .write.format("iceberg").mode("append").saveAsTable(table)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
             for (precision <- Seq(18, 10)) {
-              spark.range(-32L, 32L).filter("id % 2 = 0").coalesce(1)
+              spark
+                .range(-32L, 32L)
+                .filter("id % 2 = 0")
+                .coalesce(1)
                 .selectExpr(s"CAST(id / 100.0 AS DECIMAL($precision,2)) AS id")
-                .write.parquet(new File(warehouseDir, s"decimal_dim_$precision").getAbsolutePath)
+                .write
+                .parquet(new File(warehouseDir, s"decimal_dim_$precision").getAbsolutePath)
             }
           }
-          spark.read.format("iceberg").option("split-size", "134217728").load(table)
+          spark.read
+            .format("iceberg")
+            .option("split-size", "134217728")
+            .load(table)
             .createOrReplaceTempView("decimal_fact")
           for (precision <- Seq(18, 10)) {
-            spark.read.parquet(new File(warehouseDir, s"decimal_dim_$precision").getAbsolutePath)
+            spark.read
+              .parquet(new File(warehouseDir, s"decimal_dim_$precision").getAbsolutePath)
               .createOrReplaceTempView("decimal_dim")
             for (enabled <- Seq(false, true)) {
               withSQLConf(
@@ -1347,8 +1361,10 @@ class CometIcebergNativeSuite
                   assert(tasks > 0L && pruned > 0L, s"Decimal Iceberg pruning missing: $plan")
                 } else {
                   assert(tasks == 0L && pruned == 0L, s"Unexpected decimal pruning: $plan")
-                  assert(joins.head.metrics.get("dynamic_filter_join_rows_pruned")
-                    .forall(_.value == 0L))
+                  assert(
+                    joins.head.metrics
+                      .get("dynamic_filter_join_rows_pruned")
+                      .forall(_.value == 0L))
                 }
               }
             }
