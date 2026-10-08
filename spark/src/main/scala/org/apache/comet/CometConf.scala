@@ -121,6 +121,26 @@ object CometConf extends ShimCometConf {
       .booleanConf
       .createWithDefault(true)
 
+  val COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED: ConfigEntry[Boolean] =
+    conf("spark.comet.scan.icebergNative.runtimeStatsCache.enabled")
+      .category(CATEGORY_SCAN)
+      .doc(
+        "Whether to cache runtime-filter column statistics on the driver for immutable " +
+          "Iceberg snapshots. Disabling the cache collects statistics on each eligible scan.")
+      .booleanConf
+      .createWithDefault(true)
+
+  val COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES: ConfigEntry[Int] =
+    conf("spark.comet.scan.icebergNative.runtimeStatsCache.maxEntries")
+      .category(CATEGORY_SCAN)
+      .doc(
+        "Maximum number of snapshot and runtime-key column combinations retained in the " +
+          "driver's least-recently-used Iceberg statistics cache. Each entry contains only " +
+          "selected data files and runtime-key column statistics.")
+      .intConf
+      .checkValue(_ > 0, "Runtime statistics cache maximum entries must be positive")
+      .createWithDefault(64)
+
   val COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.write.iceberg.splitOperator.enabled")
       .category(CATEGORY_TESTING)

@@ -27,7 +27,9 @@ import scala.util.control.NonFatal
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.internal.SQLConf
 
+import org.apache.comet.CometConf
 import org.apache.comet.util.ClassLoaders
 
 /**
@@ -492,17 +494,56 @@ object IcebergReflection extends Logging {
     }
   }
 
+  private case class RuntimeStatsKey(
+      metadataLocation: String,
+      snapshotId: Long,
+      fieldIds: Seq[Int])
+
+  // Access order provides strict LRU eviction, including when a session lowers the bound.
+  // Retain data files with selected column metrics, never tasks, residuals or delete files.
+  private val runtimeStatsCache =
+    new java.util.LinkedHashMap[RuntimeStatsKey, Map[String, AnyRef]](16, 0.75f, true)
+
+  private def trimRuntimeStatsCache(maxEntries: Int): Unit = {
+    val iterator = runtimeStatsCache.keySet().iterator()
+    while (runtimeStatsCache.size() > maxEntries && iterator.hasNext) {
+      iterator.next()
+      iterator.remove()
+    }
+  }
+
+  private def runtimeStatsKey(icebergScan: Any, scan: Any, columns: Seq[String])
+      : Option[RuntimeStatsKey] = {
+    for {
+      table <- getTable(scan)
+      location <- getMetadataLocation(table)
+      // Use the scan's pinned snapshot, never the table's current snapshot (time travel,
+      // branches and concurrent commits may make them different).
+      snapshot <- Option(getMethod(icebergScan.getClass, "snapshot").invoke(icebergScan))
+      schema = getMethod(icebergScan.getClass, "schema").invoke(icebergScan)
+      mapping = buildFieldIdMapping(schema)
+      if columns.forall(mapping.contains)
+    } yield {
+      RuntimeStatsKey(
+        location,
+        getMethod(snapshot.getClass, "snapshotId").invoke(snapshot).asInstanceOf[Long],
+        columns.map(mapping).distinct.sorted)
+    }
+  }
+
   /**
    * Spark strips column statistics from its FileScanTasks. Re-plan the same Iceberg scan with
    * statistics retained for `columns` only, without replacing Spark's tasks or splits, and keep
    * the data files Spark already selected. Absent metadata fails open. Staged scans, and scans
-   * without candidate key columns, keep row-group pruning only.
+   * without candidate key columns or with at most one task, keep row-group pruning only.
+   * Immutable snapshot metrics can be reused across filters only when every selected file is
+   * covered. Original Spark tasks still supply all splits, residuals and delete associations.
    */
   def runtimeFileStatistics(
       scan: Any,
       tasks: java.util.List[_],
       columns: Seq[String]): Map[String, AnyRef] = {
-    if (columns.isEmpty || isStagedScan(scan)) return Map.empty
+    if (columns.isEmpty || tasks.size() <= 1 || isStagedScan(scan)) return Map.empty
     try {
       val fileMethod = getMethod(loadClass(ClassNames.CONTENT_SCAN_TASK), "file")
       val selected = tasks.toArray.toSeq.flatMap { task =>
@@ -512,6 +553,21 @@ object IcebergReflection extends Logging {
         .map(_.invoke(scan))
         .orNull
       if (icebergScan == null) return Map.empty
+      val conf = SQLConf.get
+      val maxEntries = CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.get(conf)
+      val cacheKey = if (CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.get(conf)) {
+        // Missing identity/snapshot metadata disables caching, not statistics collection.
+        try { runtimeStatsKey(icebergScan, scan, columns) }
+        catch { case NonFatal(_) => None }
+      } else { None }
+      val cached = runtimeStatsCache.synchronized {
+        trimRuntimeStatsCache(maxEntries)
+        cacheKey.flatMap(key => Option(runtimeStatsCache.get(key)))
+      }
+      cached.filter(stats => selected.forall(stats.contains)) match {
+        case Some(stats) => return stats.filter { case (path, _) => selected.contains(path) }
+        case None =>
+      }
       val scanClass = loadClass("org.apache.iceberg.Scan")
       // Do not fall back to includeColumnStats() without a column list: that would decode
       // statistics for every column in the scan just to support one runtime-filter key.
@@ -534,7 +590,15 @@ object IcebergReflection extends Logging {
             result += path -> file
           }
         }
-        result.result()
+        val statistics = result.result()
+        // Do not cache an incomplete plan. A later scan needing additional paths must rescan.
+        if (selected.forall(statistics.contains)) {
+          runtimeStatsCache.synchronized {
+            cacheKey.foreach { key => runtimeStatsCache.put(key, statistics) }
+            trimRuntimeStatsCache(maxEntries)
+          }
+        }
+        statistics
       } finally { planned.asInstanceOf[AutoCloseable].close() }
     } catch {
       case NonFatal(e) =>
