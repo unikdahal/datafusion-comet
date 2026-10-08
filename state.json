@@ -1,7 +1,7 @@
 {
  "updated": "2026-10-09 (W1 done)",
  "heads": {
-  "iceberg": "0c3d9eede GREEN (37833488038)",
+  "iceberg": "c4e8a66e97fa9c838dec9ce58fe7afd36d68e089 (R4 split + stats API restored; branch CI green 37837062812; integration CI pending)",
   "comet": "681bdcbff68fe4ebb4a41bb682e2329266478c58 (fast lane merged on top of 6e7d582b5; full CI running)",
   "bench": "7c2dd47e8 (B4/B6 targeted)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
@@ -332,11 +332,20 @@
   "R4": {
    "item": "split pipeline.rs::process",
    "branch": "adaptive-ci/ws-r4-split-process",
-   "status": "c4e8a66e9: split 3f8b3fe60 + restore pub include_column_stats (lead: stats retention is intended public API for library users, fork PR#18 plan; R2 demotion reverted). Gemini falsely reported green (clippy failed). Pure-extraction review by big-pickle rp-r4-review-r1; CI pending."
+   "status": "MERGED c4e8a66e9 (pure extraction verified by big-pickle: process 720->77 lines; follow-up: resolve_projection_and_schema 323 lines)"
+  },
+  "FUZZ": {
+   "item": "extend fuzz coverage (decimal/string keys, NULLS FIRST, NaN/\u00b10, deletes+runtime filters, modulo filters)",
+   "agent": "gemini rp-fuzz-ext-r1",
+   "branch": "adaptive-bench/ws-fuzz-ext (no trigger)"
+  },
+  "DIMEMPTY": {
+   "item": "RCA dim_empty 0.94x fixed overhead",
+   "agent": "gemini rp-dim-empty-rca-r1"
   }
  },
  "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
  "pending": [
-  "batch integration push: Comet pin -> iceberg 0c3d9eede + merge ws-b3/ws-b2 once fast lane green + reviewed (avoid repeated cancel of integration full run)"
+  "batch Comet integration push: pin iceberg -> c4e8a66e9 (after its CI) + ws-b3/ws-b2 merges"
  ]
 }
