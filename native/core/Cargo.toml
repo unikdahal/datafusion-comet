@@ -157,3 +157,7 @@ harness = false
 [[bench]]
 name = "mergerows_cardinality_adaptive"
 harness = false
+
+[[bench]]
+name = "mergerows_cardinality_scaling"
+harness = false
