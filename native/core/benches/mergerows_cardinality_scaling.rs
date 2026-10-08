@@ -115,7 +115,7 @@ fn segmented_adaptive(input: &[u64]) -> (usize, usize) {
 
 enum AnchoredSegment {
     Dense { base_word: u32, words: Vec<u64>, count: usize },
-    Roaring(RoaringBitmap),
+    Roaring { bitmap: RoaringBitmap, prefer_append: bool },
 }
 
 fn segmented_anchored(input: &[u64]) -> (usize, usize) {
@@ -131,8 +131,8 @@ fn segmented_anchored(input: &[u64]) -> (usize, usize) {
             count: 0,
         });
         match entry {
-            AnchoredSegment::Roaring(bitmap) => {
-                if bitmap.try_push(low).is_err() {
+            AnchoredSegment::Roaring { bitmap, prefer_append } => {
+                if !*prefer_append || bitmap.try_push(low).is_err() {
                     assert!(bitmap.insert(low));
                 }
             }
@@ -141,9 +141,9 @@ fn segmented_anchored(input: &[u64]) -> (usize, usize) {
                 let minimum = (*base_word).min(word);
                 let maximum = current_end.max(word as u64);
                 let proposed_words = (maximum - minimum as u64 + 1) as usize;
-                if proposed_words > MAX_WORDS
-                    || proposed_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1))
-                {
+                let poor_density =
+                    proposed_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1));
+                if proposed_words > MAX_WORDS || poor_density {
                     let mut bitmap = RoaringBitmap::new();
                     for (i, &bits) in words.iter().enumerate() {
                         let mut remaining = bits;
@@ -153,10 +153,10 @@ fn segmented_anchored(input: &[u64]) -> (usize, usize) {
                             remaining &= remaining - 1;
                         }
                     }
-                    if bitmap.try_push(low).is_err() {
+                    if !poor_density || bitmap.try_push(low).is_err() {
                         assert!(bitmap.insert(low));
                     }
-                    *entry = AnchoredSegment::Roaring(bitmap);
+                    *entry = AnchoredSegment::Roaring { bitmap, prefer_append: poor_density };
                 } else {
                     if minimum < *base_word {
                         let offset = (*base_word - minimum) as usize;
@@ -179,7 +179,7 @@ fn segmented_anchored(input: &[u64]) -> (usize, usize) {
     let retained = LIVE.load(Ordering::Relaxed) as usize;
     let count = partitions.values().map(|p| match p {
         AnchoredSegment::Dense {count, ..} => *count,
-        AnchoredSegment::Roaring(b) => b.len() as usize,
+        AnchoredSegment::Roaring { bitmap, .. } => bitmap.len() as usize,
     }).sum();
     std::hint::black_box(&partitions);
     drop(partitions);
