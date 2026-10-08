@@ -138,3 +138,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 19:58 UTC heartbeat: iceberg 0c3d9eede green; batching Comet pin bump with ws-b3/ws-b2 merges. Cancelled stale ws-b3 full run.
 - R4: gemini claimed CI green but clippy failed (ColumnStatsSelection dead after making include_column_stats cfg(test)). Lead decision: stats retention is intended public API → restored pub (c4e8a66e9); split kept; independent pure-extraction review running. LESSON: always verify agent CI claims with gh.
 - R4 merged into iceberg integration (c4e8a66e9). Started fuzz-coverage extension + dim_empty RCA (gemini).
+- dim_empty RCA: second driver manifest scan per runtime-filtered scan (+4.9ms on 16 files; scales). Design task started.

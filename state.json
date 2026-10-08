@@ -341,7 +341,12 @@
   },
   "DIMEMPTY": {
    "item": "RCA dim_empty 0.94x fixed overhead",
-   "agent": "gemini rp-dim-empty-rca-r1"
+   "agent": "gemini rp-dim-empty-rca-r1",
+   "status": "DONE: regression is driver plan_ms (+4.87ms) from SECOND full manifest scan (runtimeFileStatistics planFiles) for every runtime-filtered scan; exec identical. Fix1 (empty-build special case) rejected as too narrow."
+  },
+  "MANIFEST": {
+   "item": "eliminate/cheapen second manifest scan for runtime stats (scales with manifests)",
+   "agent": "gemini rp-manifest-rescan-design-r1 (design)"
   }
  },
  "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
