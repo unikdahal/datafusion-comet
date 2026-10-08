@@ -263,11 +263,107 @@ fn segmented_anchored_hash(input: &[u64]) -> (usize, usize) {
     (count, retained)
 }
 
+
+enum AutoSegment {
+    Dense { base_word: u32, words: Vec<u64>, count: usize, last_low: u32, ordered: bool },
+    Roaring { bitmap: RoaringBitmap, append: bool },
+    Hash(HashSet<u32>),
+}
+
+fn segmented_auto_fallback(input: &[u64]) -> (usize, usize) {
+    const MAX_WORDS: usize = 1_048_576;
+    const WARMUP_WORD_CAP: usize = 4_096;
+    const MIN_DENSITY_SAMPLES: usize = 256;
+    let mut partitions: HashMap<u32, AutoSegment> = HashMap::new();
+    for &id in input {
+        let high = (id >> 32) as u32;
+        let low = id as u32;
+        let word = low >> 6;
+        let entry = partitions.entry(high).or_insert_with(|| AutoSegment::Dense {
+            base_word: word, words: Vec::new(), count: 0, last_low: low, ordered: true,
+        });
+        match entry {
+            AutoSegment::Hash(set) => { assert!(set.insert(low)); }
+            AutoSegment::Roaring { bitmap, append } => {
+                if !*append || bitmap.try_push(low).is_err() {
+                    assert!(bitmap.insert(low));
+                }
+            }
+            AutoSegment::Dense { base_word, words, count, last_low, ordered } => {
+                if *count > 0 && low <= *last_low { *ordered = false; }
+                *last_low = low;
+                let last = (*base_word as u64) + words.len().saturating_sub(1) as u64;
+                let minimum = (*base_word).min(word);
+                let maximum = last.max(word as u64);
+                let new_words = (maximum - minimum as u64 + 1) as usize;
+                let poor_density = *count >= MIN_DENSITY_SAMPLES
+                    && new_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1));
+                let early_wide = *count < MIN_DENSITY_SAMPLES && new_words > WARMUP_WORD_CAP;
+                if new_words > MAX_WORDS || early_wide || poor_density {
+                    if early_wide || (poor_density && !*ordered) {
+                        let mut set = HashSet::<u32>::new();
+                        for (i, &bits) in words.iter().enumerate() {
+                            let mut remaining = bits;
+                            while remaining != 0 {
+                                let bit = remaining.trailing_zeros() as u64;
+                                assert!(set.insert(((*base_word as u64 + i as u64) * 64 + bit) as u32));
+                                remaining &= remaining - 1;
+                            }
+                        }
+                        assert!(set.insert(low));
+                        *entry = AutoSegment::Hash(set);
+                    } else {
+                        let mut bitmap = RoaringBitmap::new();
+                        for (i, &bits) in words.iter().enumerate() {
+                            let mut remaining = bits;
+                            while remaining != 0 {
+                                let bit = remaining.trailing_zeros() as u64;
+                                assert!(bitmap.insert(((*base_word as u64 + i as u64) * 64 + bit) as u32));
+                                remaining &= remaining - 1;
+                            }
+                        }
+                        let append = poor_density && *ordered;
+                        if !append || bitmap.try_push(low).is_err() {
+                            assert!(bitmap.insert(low));
+                        }
+                        *entry = AutoSegment::Roaring { bitmap, append };
+                    }
+                } else {
+                    if minimum < *base_word {
+                        let prepend = (*base_word - minimum) as usize;
+                        let mut replacement = vec![0u64; new_words];
+                        replacement[prepend..prepend + words.len()].copy_from_slice(words);
+                        *base_word = minimum;
+                        *words = replacement;
+                    } else if new_words > words.len() {
+                        words.resize(new_words, 0);
+                    }
+                    let offset = (word - *base_word) as usize;
+                    let mask = 1u64 << (low & 63);
+                    assert_eq!(words[offset] & mask, 0);
+                    words[offset] |= mask;
+                    *count += 1;
+                }
+            }
+        }
+    }
+    let retained = LIVE.load(Ordering::Relaxed) as usize;
+    let count = partitions.values().map(|part| match part {
+        AutoSegment::Dense { count, .. } => *count,
+        AutoSegment::Hash(set) => set.len(),
+        AutoSegment::Roaring { bitmap, .. } => bitmap.len() as usize,
+    }).sum();
+    std::hint::black_box(&partitions);
+    drop(partitions);
+    (count, retained)
+}
+
 fn insert(design: &str, input: &[u64]) -> (usize, usize) {
     match design {
         "segmented-adaptive" => segmented_adaptive(input),
         "segmented-anchored" => segmented_anchored(input),
         "segmented-anchored-hash" => segmented_anchored_hash(input),
+        "segmented-auto-fallback" => segmented_auto_fallback(input),
         "hash" => {
             let mut set = HashSet::new();
             for &id in input { assert!(set.insert(id)); }
@@ -346,7 +442,13 @@ fn sample(design: &str, input: &[u64]) -> (f64, usize, usize) {
 fn main() {
     const N: usize = 5_000_000;
     let layouts = ["dense", "sparse-8", "sparse-200", "sparse-200-shuffled", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled", "spark-200-high-offset"];
-    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-append", "partitioned-sorted", "segmented-adaptive", "segmented-anchored", "segmented-anchored-hash"];
+    let designs: &[&str] = if std::env::var_os("CARDINALITY_CANDIDATES_ONLY").is_some() {
+        &["hash", "segmented-adaptive", "segmented-anchored", "segmented-anchored-hash", "segmented-auto-fallback"]
+    } else {
+        &["hash", "treemap", "partitioned-direct", "partitioned-append",
+          "partitioned-sorted", "segmented-adaptive", "segmented-anchored",
+          "segmented-anchored-hash", "segmented-auto-fallback"]
+    };
     println!("SCALING_BENCH,n,layout,design,median_ms,retained_bytes,peak_allocated_bytes");
     for layout in layouts {
         let input = ids(layout, N);
