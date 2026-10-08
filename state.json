@@ -79,8 +79,7 @@
  ],
  "tasks": [
   "rp-bench-shard-r1",
-  "rp-adaptive-bypass-r1",
-  "rp-b1-design-r1"
+  "rp-adaptive-bypass-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -195,7 +194,7 @@
   {
    "id": "B1",
    "item": "string/decimal join-key pruning eligibility",
-   "status": "design rp-b1-design-r1 (decimal first)"
+   "status": "design accepted (reports/b1-string-decimal-design.md). Phase1 decimal (strict build==probe type, no rescale) queued after P1 (join.rs overlap). Phase2 string: inclusive pruning only, keep file_always_matches off for strings (lead: spec-incremented truncated upper bounds are sound, but conservative choice kept), reject non-UTF8_BINARY collation natively too."
   },
   {
    "id": "B2",
