@@ -31,3 +31,9 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 1. Collect reviews; triage findings; regression tests via GHA.
 2. Analyze run 37758359536 artifacts (per-query RCA on regressions).
 3. Investigate baseline string-join mismatch (does candidate contain a fix not in main? or harness?).
+
+## 2026-10-08 10:30 — iceberg review r1b (gemini-3.8-flash) triaged by lead
+- F1 VERIFIED latent defect: strict evaluator `not_eq`/`not_in` NaN literal → MUST_MATCH; reader fast path skips row filter → NaN rows leak. Library-only (Comet unreachable). Fix task rp-iceberg-nan-literal-fix-r1 (codex 6.1 sol), worktree rp-work/iceberg-nanfix.
+- F2 rejected (file bounds cover splits). F3 only consequence of F1.
+- Judged SAFE by reviewer (not yet independently re-verified): empty projection w/ deletes, range reuse, truncated bounds, 3VL.
+- After fix lands + Comet review returns: bump Comet iceberg pin in one commit.
