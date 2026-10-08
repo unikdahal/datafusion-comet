@@ -337,7 +337,8 @@
   "FUZZ": {
    "item": "extend fuzz coverage (decimal/string keys, NULLS FIRST, NaN/\u00b10, deletes+runtime filters, modulo filters)",
    "agent": "gemini rp-fuzz-ext-r1",
-   "branch": "adaptive-bench/ws-fuzz-ext (no trigger)"
+   "branch": "adaptive-bench/ws-fuzz-ext (no trigger)",
+   "status": "DONE c8437490b on adaptive-bench/ws-fuzz-ext (6 feature areas; 500 q/round unchanged). Merge into bench branch for next FULL campaign (after B4 targeted bench)."
   },
   "DIMEMPTY": {
    "item": "RCA dim_empty 0.94x fixed overhead",
@@ -351,6 +352,7 @@
  },
  "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
  "pending": [
-  "batch Comet integration push: pin iceberg -> c4e8a66e9 (after its CI) + ws-b3/ws-b2 merges"
+  "batch Comet integration push: pin iceberg -> c4e8a66e9 (after its CI) + ws-b3/ws-b2 merges",
+  "next full campaign: merge ws-fuzz-ext into bench branch + pin newest green Comet/iceberg"
  ]
 }
