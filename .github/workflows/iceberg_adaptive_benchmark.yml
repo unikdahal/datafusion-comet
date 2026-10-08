@@ -188,7 +188,7 @@ jobs:
       BENCH_FILES: '16'
       BENCH_ROUNDS: '8'
       BENCH_REPS: ${{ matrix.reps }}
-      BENCH_WARMUPS: '2'
+      BENCH_WARMUPS: '4'
       BENCH_FUZZ_ROWS: '4000000'
       BENCH_FUZZ_QUERIES: '500'
       BENCH_EQUALITY_DELETE_KEYS: '4096'

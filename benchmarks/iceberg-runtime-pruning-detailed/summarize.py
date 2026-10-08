@@ -79,6 +79,16 @@ def median(records, name):
     return statistics.median(values) if values else None
 
 
+def stage_metric(record, name):
+    """Sum an operator counter without turning absent instrumentation into zero."""
+    values = [
+        stage["metrics"][name]
+        for stage in record.get("stages", [])
+        if stage.get("metrics", {}).get(name) is not None
+    ]
+    return sum(values) if values else None
+
+
 def paired_ratio(baseline, candidate, metric="total_ms", samples=4000):
     """Bootstrap independent JVM rounds, retaining paired variants and repetitions."""
     if any(
@@ -499,6 +509,9 @@ def main(argv=None):
     fallback = []
     coverage_changes = []
     regression = []
+    inspection = []
+    byte_increases = []
+    valid_timings = set()
     for suite in suites:
         if suite == "fuzz":
             continue
@@ -519,6 +532,10 @@ def main(argv=None):
             print(
                 f"| {query} | {times} | {ratio_cell(total)} | {ratio_cell(execution)} | {ratio_cell(old_pruning)} | {ratio_cell(new_pruning)} |"
             )
+            if total:
+                valid_timings.add((suite, query))
+            if total and total[2] is not None and total[2] < 1:
+                inspection.append(f"{suite}/{query}: {ratio_cell(total)}")
             if total and total[2] is not None and total[2] < 0.9:
                 regression.append(f"{suite}/{query}: {ratio_cell(total)}")
             if any(
@@ -535,6 +552,12 @@ def main(argv=None):
         )
         print("and each physical plan is included in the artifact.")
         print(
+            "Zero reader predicate tasks does not imply zero runtime filtering: a join can"
+        )
+        print(
+            "filter decoded batches after a Spark exchange. Batch filtering is reported separately; its time is aggregate operator work."
+        )
+        print(
             "Bytes and output rows cover native Iceberg scans only, including dimension scans."
         )
         print(
@@ -544,9 +567,11 @@ def main(argv=None):
             "only after checking the counted native tables; different or unknown coverage is not an I/O gain or increase.\n"
         )
         print(
-            "| query | variant | SQL ms | plan ms | exec ms, IQR | native MiB read | native rows out | native scan coverage vs main-on | splits | predicate tasks | files pruned | RG pruned | live RG, min/max | refreshes | decoder rebuilds |"
+            "| query | variant | SQL ms | plan ms | exec ms, IQR | native MiB read | native rows out | native scan coverage vs main-on | splits | predicate tasks | files pruned | RG pruned | live RG, min/max | refreshes | decoder rebuilds | batch rows evaluated | batch rows pruned | batch eval ms |"
         )
-        print("|---|---|---:|---:|---|---:|---:|---|---:|---:|---:|---:|---|---:|---:|")
+        print(
+            "|---|---|---:|---:|---|---:|---:|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|"
+        )
         for _, query in [key for key in queries if key[0] == suite]:
             query_runs = [
                 r for variant in VARIANTS for r in grouped[(suite, query, variant)]
@@ -565,6 +590,21 @@ def main(argv=None):
                 and main_coverage != candidate_coverage
             ):
                 coverage_changes.append(f"{suite}/{query}")
+            main_bytes = median(grouped[(suite, query, "baseline_on")], "bytes_scanned")
+            candidate_bytes = median(
+                grouped[(suite, query, "candidate_on")], "bytes_scanned"
+            )
+            if (
+                (suite, query) in valid_timings
+                and main_coverage is not None
+                and main_coverage == candidate_coverage
+                and main_bytes is not None
+                and candidate_bytes is not None
+                and candidate_bytes > main_bytes
+            ):
+                byte_increases.append(
+                    f"{suite}/{query}: main {main_bytes:,.0f}, candidate {candidate_bytes:,.0f} native bytes requested"
+                )
             for variant in VARIANTS:
                 runs = grouped[(suite, query, variant)]
                 coverage = native_scan_coverage(args.directory, suite, variant, digest)
@@ -589,13 +629,23 @@ def main(argv=None):
                     if r.get("iceberg_runtime_row_groups_pruned_live") is not None
                 ]
                 med = lambda name: median(runs, name)
+                batch = {
+                    key: median([{key: stage_metric(r, key)} for r in runs], key)
+                    for key in (
+                        "dynamic_filter_join_rows_evaluated",
+                        "dynamic_filter_join_rows_pruned",
+                        "dynamic_filter_join_eval_time",
+                    )
+                }
+                batch_ms = batch["dynamic_filter_join_eval_time"]
+                batch_ms = None if batch_ms is None else batch_ms / 1_000_000
                 live_range = (
                     "n/a"
                     if not live
                     else f"{fmt(statistics.median(live))} [{min(live)}, {max(live)}]"
                 )
                 print(
-                    f"| {query} | {variant} | {fmt(med('sql_ms'))} | {fmt(med('plan_ms'))} | {iqr} | {mib(med('bytes_scanned'))} | {fmt(med('output_rows'))} | {scope} | {fmt(med('num_splits'))} | {fmt(med('iceberg_runtime_predicate_tasks'))} | {fmt(med('iceberg_runtime_file_tasks_pruned'))} | {fmt(med('iceberg_runtime_row_groups_pruned'))} | {live_range} | {fmt(med('iceberg_runtime_predicate_refreshes'))} | {fmt(med('iceberg_runtime_decoder_rebuilds'))} |"
+                    f"| {query} | {variant} | {fmt(med('sql_ms'))} | {fmt(med('plan_ms'))} | {iqr} | {mib(med('bytes_scanned'))} | {fmt(med('output_rows'))} | {scope} | {fmt(med('num_splits'))} | {fmt(med('iceberg_runtime_predicate_tasks'))} | {fmt(med('iceberg_runtime_file_tasks_pruned'))} | {fmt(med('iceberg_runtime_row_groups_pruned'))} | {live_range} | {fmt(med('iceberg_runtime_predicate_refreshes'))} | {fmt(med('iceberg_runtime_decoder_rebuilds'))} | {fmt(batch['dynamic_filter_join_rows_evaluated'])} | {fmt(batch['dynamic_filter_join_rows_pruned'])} | {fmt(batch_ms)} |"
                 )
     print("\n## Queries with at least one physical fallback\n")
     print("Inspect the captured plans before attributing timing changes to pruning.\n")
@@ -608,6 +658,16 @@ def main(argv=None):
     print("\n".join(f"- {query}" for query in coverage_changes) or "None observed.")
     print("\n## Possible regressions (entire interval below 0.9x)\n")
     print("\n".join(f"- {r}" for r in regression) or "None observed.")
+    print("\n## Cases requiring closer inspection (entire interval below parity)\n")
+    print(
+        "Exploratory intervals are not adjusted for multiple comparisons and do not establish the cause.\n"
+    )
+    print("\n".join(f"- {r}" for r in inspection) or "None observed.")
+    print("\n## Native byte increases with the same counted scan coverage\n")
+    print(
+        "Inspect predicate/index reads, coalesced gaps and repeated requests before attributing a cause.\n"
+    )
+    print("\n".join(f"- {r}" for r in byte_increases) or "None observed.")
     if failures:
         print("\n## Validation failures\n")
         for failure in failures:

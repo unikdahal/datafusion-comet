@@ -34,6 +34,21 @@ import resolve_revisions
 
 
 class HarnessChecks(unittest.TestCase):
+    def test_stage_metric_preserves_missing_and_sums_zero_and_nonzero(self):
+        self.assertIsNone(summarize.stage_metric({}, "rows"))
+        self.assertIsNone(summarize.stage_metric({"stages": [{"metrics": {}}]}, "rows"))
+        self.assertEqual(
+            summarize.stage_metric(
+                {"stages": [{"metrics": {"rows": 0}}, {"metrics": {"rows": 12}}]},
+                "rows",
+            ),
+            12,
+        )
+        self.assertEqual(
+            summarize.stage_metric({"stages": [{"metrics": {"rows": 0}}]}, "rows"),
+            0,
+        )
+
     def test_native_scan_coverage_distinguishes_partial_fallback_and_repeated_tables(
         self,
     ):

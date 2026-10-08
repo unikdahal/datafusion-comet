@@ -84,7 +84,7 @@ and decoder rebuilds expose whether a tightening bound arrived in time to save r
 
 Eight balanced rounds (two complete four-round blocks) run every native variant in a fresh JVM. Each variant occupies each
 execution position twice; every ordered adjacent pair appears twice. Each JVM warms every
-query twice before two timed repetitions (one for TPC-H/string joins). Fuzz queries run once per
+query four times before two timed repetitions (one for TPC-H/string joins). Fuzz queries run once per
 seed for correctness and are excluded from speedup headlines. Query order is deterministically shuffled between
 passes, using the same permutation for every variant. SQL construction/analysis, physical planning and collection are timed separately;
 headline total time includes all three.
@@ -106,10 +106,14 @@ on shared CI runners. Exploratory bootstrap intervals do not adjust for multiple
 comparisons and do not establish a root cause. Driver GC count/time and JIT compilation
 time are sampled outside the timed region and retained as diagnostics; these driver-wide
 counters include overlapping background work and must not be subtracted from query time.
+The extra fixed warmup passes reduce compilation during measurement; compilation diagnostics
+still need inspection, since a fixed warmup count cannot guarantee that JIT work has finished.
 
 Reader bytes, file tasks, rows, file pruning, row-group pruning, live pruning, predicate
 refreshes and decoder rebuilds are reported per variant. Missing counters are `n/a`, never
-zero. All exposed SQL metrics are captured by physical stage and physical plans are saved.
+zero. Join batch-filter evaluation, rows evaluated and rows pruned are reported separately: an
+exchange blocks reader attachment but can still permit filtering of decoded batches. All
+exposed SQL metrics are captured by physical stage and physical plans are saved.
 Reader byte totals quantify requested ranged I/O; scheduling-dependent pruning is shown
 with a range. Byte and output-row counters cover native Iceberg scans only. Main can fall
 back to Spark for a fact scan while retaining a counted native dimension scan; its smaller
