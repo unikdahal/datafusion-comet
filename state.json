@@ -78,7 +78,6 @@
   }
  ],
  "tasks": [
-  "rp-bench-shard-r1",
   "rp-adaptive-bypass-r1"
  ],
  "missing_evidence": [
@@ -167,7 +166,8 @@
  "bench_infra": {
   "decision": "shard suites by query (full protocol per shard, same-runner pairing), cache builds per SHA, cache data-gen, record runner CPU, targeted mode via revisions.json",
   "owner": "rp-bench-shard-r1",
-  "constraint": "no bench push before run 37758359536 completes"
+  "constraint": "no bench push before run 37758359536 completes",
+  "status": "landed 51478edbc: 18 shards (join3 topk5 layouts2 fuzz2 tpch3 strjoin3), build cache, data cache, per-shard hardware, targeted mode; shard run steps ~43-48 min (was up to 209). Cache hits untested yet."
  },
  "perquery_rca": {
   "directive": "user 15:30 UTC: per-query RCA for every query slowest->fastest; deep-dive slow/suspicious; find and fix issues",
