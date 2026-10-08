@@ -125,3 +125,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Workstreams W1..W7 on separate adaptive-ci/ws-* branches (see state.json "workstreams"); lead reviews + merges into integration branch; full validation only on integration branch once fast lane (W3) lands.
 - Providers: codex, gemini-3.8-flash-high ×4, glm-5.3-free ×2 (grok disabled).
 - Next after merges: combined targeted bench (decimal, B4, B3, B2, B6 queries) → full sharded campaign.
+- W5 re-dispatched to opencode/big-pickle (glm-5.3-free channel unavailable).
