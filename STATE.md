@@ -135,3 +135,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - R2/R3 iceberg hygiene merged into iceberg integration (rebased).
 - Fast CI lane merged into Comet integration (681bdcbff). ws-* branches now ~30 min CI.
 - Decimal bench: f_dec queries 0.96x -> 2.06-5.19x (I/O 588->12 MiB). B4/B6 targeted bench 7c2dd47e8 started.
+- 19:58 UTC heartbeat: iceberg 0c3d9eede green; batching Comet pin bump with ws-b3/ws-b2 merges. Cancelled stale ws-b3 full run.

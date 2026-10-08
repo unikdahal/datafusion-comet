@@ -1,7 +1,7 @@
 {
  "updated": "2026-10-09 (W1 done)",
  "heads": {
-  "iceberg": "0c3d9eedec271c8b29b434cc1692c3caa5f5bd62 (R2/R3 rebased on f3a157f81; CI pending). Comet still pins f3a157f81.",
+  "iceberg": "0c3d9eede GREEN (37833488038)",
   "comet": "681bdcbff68fe4ebb4a41bb682e2329266478c58 (fast lane merged on top of 6e7d582b5; full CI running)",
   "bench": "7c2dd47e8 (B4/B6 targeted)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
@@ -332,6 +332,6 @@
  },
  "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
  "pending": [
-  "when iceberg 0c3d9eede green: bump Comet pin"
+  "batch integration push: Comet pin -> iceberg 0c3d9eede + merge ws-b3/ws-b2 once fast lane green + reviewed (avoid repeated cancel of integration full run)"
  ]
 }
