@@ -686,3 +686,115 @@ fn decimal_bounds_and_membership_translate_exactly() {
         )
     );
 }
+
+#[test]
+fn filter_through_attaches_for_safe_deterministic_predicate() {
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::execution::context::SessionContext;
+    use datafusion::physical_plan::filter::FilterExec;
+    use datafusion_comet_spark_expr::{create_modulo_expr, RandExpr};
+    use iceberg::scan::FileScanTask;
+    use iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
+
+    let iceberg_schema = Arc::new(
+        IcebergSchema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(2, "value", Type::Primitive(PrimitiveType::Int)).into(),
+            ])
+            .build()
+            .unwrap(),
+    );
+    let task = FileScanTask::builder()
+        .with_data_file_path("/tmp/test.parquet".into())
+        .with_data_file_format(DataFileFormat::Parquet)
+        .with_file_size_in_bytes(1024)
+        .with_start(0)
+        .with_length(1024)
+        .with_record_count(Some(10))
+        .with_schema(iceberg_schema)
+        .with_project_field_ids(vec![1, 2])
+        .with_case_sensitive(false)
+        .build()
+        .unwrap();
+    let arrow_schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Int32, true),
+        Field::new("value", DataType::Int32, true),
+    ]));
+    let scan: Arc<dyn ExecutionPlan> = Arc::new(
+        IcebergScanExec::new(
+            "/tmp/metadata.json".into(),
+            Arc::clone(&arrow_schema),
+            Default::default(),
+            String::new(),
+            vec![task],
+            1,
+        )
+        .unwrap(),
+    );
+
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+    let value: Arc<dyn PhysicalExpr> = Arc::new(Column::new("value", 1));
+    let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(
+        vec![Arc::clone(&key)],
+        lit(true),
+    ));
+    let session = SessionContext::new();
+
+    // 1. Safe deterministic predicate (spark_modulo by non-zero literal): attaches through filter
+    let modulo_lit = create_modulo_expr(
+        Arc::clone(&value),
+        lit(3_i32),
+        DataType::Int32,
+        Arc::clone(&arrow_schema),
+        true,
+        &session.state(),
+    )
+    .unwrap();
+    let safe_pred: Arc<dyn PhysicalExpr> =
+        Arc::new(BinaryExpr::new(modulo_lit, Operator::Eq, lit(0_i32)));
+    let filter_safe: Arc<dyn ExecutionPlan> =
+        Arc::new(FilterExec::try_new(safe_pred, Arc::clone(&scan)).unwrap());
+
+    assert!(reaches_iceberg_reader(&filter_safe));
+    let attached =
+        try_attach_iceberg_reader_filter(&filter_safe, Arc::clone(&dynamic), None).unwrap();
+    assert!(attached.is_some());
+    let attached_plan = attached.unwrap();
+    assert!(attached_plan.is::<FilterExec>());
+    let children = attached_plan.children();
+    assert_eq!(children.len(), 1);
+    assert!(children[0].is::<IcebergScanExec>());
+
+    // 2. Non-deterministic predicate (rand): does NOT attach through filter
+    let rand_pred: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::new(RandExpr::new(42)),
+        Operator::Lt,
+        lit(0.5_f64),
+    ));
+    let filter_rand: Arc<dyn ExecutionPlan> =
+        Arc::new(FilterExec::try_new(rand_pred, Arc::clone(&scan)).unwrap());
+    assert!(!reaches_iceberg_reader(&filter_rand));
+    let not_attached =
+        try_attach_iceberg_reader_filter(&filter_rand, Arc::clone(&dynamic), None).unwrap();
+    assert!(not_attached.is_none());
+
+    // 3. Fallible predicate (ANSI modulo by column): does NOT attach through filter
+    let modulo_col = create_modulo_expr(
+        Arc::clone(&value),
+        Arc::clone(&key),
+        DataType::Int32,
+        Arc::clone(&arrow_schema),
+        true,
+        &session.state(),
+    )
+    .unwrap();
+    let fallible_pred: Arc<dyn PhysicalExpr> =
+        Arc::new(BinaryExpr::new(modulo_col, Operator::Eq, lit(0_i32)));
+    let filter_fallible: Arc<dyn ExecutionPlan> =
+        Arc::new(FilterExec::try_new(fallible_pred, Arc::clone(&scan)).unwrap());
+    assert!(!reaches_iceberg_reader(&filter_fallible));
+    let not_attached_col =
+        try_attach_iceberg_reader_filter(&filter_fallible, Arc::clone(&dynamic), None).unwrap();
+    assert!(not_attached_col.is_none());
+}
