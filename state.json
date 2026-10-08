@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T15:45Z",
+ "updated": "2026-10-08T16:00Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
@@ -73,12 +73,15 @@
     "comet": "434d18333",
     "iceberg": "1e3f2a868"
    },
-   "status": "running",
-   "note": "lacks F4 157cf6475 (cancellation-only)"
+   "status": "completed",
+   "note": "lacks F4 157cf6475 (cancellation-only)",
+   "wall": "1h46m (was ~4h)",
+   "result": "candidate 0 validation failures; baseline 120 (string-join bug #42); report exit 1 by design on any validation failure"
   }
  ],
  "tasks": [
-  "rp-adaptive-bypass-r1"
+  "rp-adaptive-bypass-r1",
+  "rp-delta-37788815352-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"

@@ -113,3 +113,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 15:45 UTC: join/topk RCA done (144 exact; 5 small join regressions all "pruning-on costs time w/o I/O savings"). Backlog P1,B1..B5 in state.json. B1 design (gemini) started; B2/B3/B4 wait for P1 (same files).
 - B1 design accepted; decimal phase queued after P1.
 - Bench sharding landed (51478edbc); first sharded campaign 37788815352 shards ~45 min each. Watcher running.
+- 16:00 UTC: sharded campaign 37788815352 done in 1h46m. Candidate 0 failures; baseline string-join failures again. Delta-ledger task rp-delta-37788815352-r1 (gemini).
