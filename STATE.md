@@ -58,3 +58,9 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - Comet integration failure root cause (gemini, verified by lead): 9cccd0676 disables upstream-tested shuffle-probe dynamic filter → CometJoinSuite SHUFFLE_HASH/AQE assertions fail. DECISION: revert (local 72981e4c3); do not weaken test. Re-propose only as benchmarked cost policy. Bench run 37758359536 includes 9cccd0676 → its join numbers = "no shuffle-probe filter" variant; useful A/B evidence.
 - iceberg float guard: 5f326d103 failed fmt + clippy (f32 literal fallback). Amended → 1e3f2a868 pushed; CI running (watcher).
 - NEXT: on iceberg green, bump Comet pin to 1e3f2a868 + push with revert; then bench pins update.
+
+## 2026-10-08 10:45 UTC
+- iceberg 1e3f2a868 GREEN (run 37761104305).
+- Comet pushed 72981e4c3 (revert 9cccd0676) + 434d18333 (pin iceberg 1e3f2a868). CI 37761771346 running.
+- Bench 37758359536 left running (pins 92bba61b6/949cc88); do NOT push bench until it finishes (~13:15 UTC).
+- F4 design delegated (gemini, rp-f4-design-r1).

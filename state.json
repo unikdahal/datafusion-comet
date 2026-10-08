@@ -1,22 +1,21 @@
 {
- "updated": "2026-10-08T10:30Z",
+ "updated": "2026-10-08T10:45Z",
  "heads": {
   "iceberg": "1e3f2a8689fc5a8aa203405411e791770d2cfc0e",
-  "comet": "92bba61b68ec44f305e0519f507cd02ae4546ee0",
+  "comet": "434d18333",
   "bench": "163b5c235e914f8a22af834e26e85b0a6a8ea6b0",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
  "ci": {
   "comet_validation": {
-   "run": 37755479696,
-   "sha": "92bba61b6",
-   "result": "FAILED integration 3.5 + 4.1; native+rust ok; spark_sql running",
-   "investigation": "rp-comet-integ-fail-r1"
+   "run": 37761771346,
+   "sha": "434d18333",
+   "status": "running (revert 9cccd0676 + iceberg pin 1e3f2a868)"
   },
   "iceberg_validation": {
+   "run": 37761104305,
    "sha": "1e3f2a868",
-   "status": "running",
-   "note": "previous 5f326d103 failed fmt + clippy float_literal_f32_fallback; fixed by amend"
+   "result": "success all jobs"
   }
  },
  "bench": [
@@ -42,7 +41,9 @@
    "status": "running"
   }
  ],
- "tasks": [],
+ "tasks": [
+  "rp-f4-design-r1"
+ ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
  ],
@@ -91,10 +92,10 @@
  "agent_limits": {
   "codex": "usage limit until 17:34 IST (12:04 UTC) 2026-10-08"
  },
- "pending_push": {
-  "repo": "comet",
-  "worktree": "rp-work/comet",
-  "local_commit": "72981e4c3 revert of 9cccd0676",
-  "plan": "when iceberg CI on 1e3f2a868 green: add commit bumping native/Cargo.toml + Cargo.lock iceberg rev to 1e3f2a868, push both together (one Comet CI run)"
- }
+ "next": [
+  "on comet green: after bench 37758359536 finishes, pin bench to comet 434d18333 / iceberg 1e3f2a868",
+  "analyze bench 37758359536 artifacts (per-query RCA; join set = no-shuffle-filter variant)",
+  "F4 implement (codex after 12:04 UTC) from design",
+  "investigate baseline string-join mismatches in Apache main"
+ ]
 }
