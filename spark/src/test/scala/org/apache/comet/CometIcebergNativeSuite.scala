@@ -1220,44 +1220,51 @@ class CometIcebergNativeSuite
             expected = spark.sql(query).collect().toSeq
           }
           assert(expected == Seq(Row(expectedRows * 64L)))
-          val readings = Seq(false, true).map { enabled =>
-            var bytes = 0L
-            withSQLConf(
-              CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
-              val df = spark.sql(query)
-              assert(df.collect().toSeq == expected)
-              val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
-              assert(scans.nonEmpty)
-              bytes = scans.map(_.metrics("bytes_scanned").value).sum
-              val pruned = scans.map(_.metrics("iceberg_runtime_file_tasks_pruned").value).sum
-              if (enabled) {
-                assert(
-                  pruned >= fileCount - 2,
-                  s"too few tasks rejected before footer I/O: $pruned; " +
-                    s"metrics=${scans.map(_.metrics.map { case (k, v) => k -> v.value })}; " +
-                    s"plan=${df.queryExecution.executedPlan}")
-                val idFieldId = icebergTable.schema().findField("id").fieldId()
-                scans.foreach { scan =>
-                  val common = OperatorOuterClass.IcebergScanCommon.parseFrom(scan.commonData)
-                  assert(common.getFileMetricsPoolCount > 0)
-                  common.getFileMetricsPoolList.asScala.foreach { metrics =>
-                    val serializedFieldIds =
-                      metrics.getValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
-                        metrics.getNullValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
-                        metrics.getNanValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
-                        metrics.getLowerBoundsMap.keySet().asScala.map(_.intValue()).toSet ++
-                        metrics.getUpperBoundsMap.keySet().asScala.map(_.intValue()).toSet
+          // Exercise uncached, cold-cache and warm-cache execution, including both kinds of
+          // deletes below. All must preserve Spark's answer and whole-file pruning savings.
+          val readings =
+            Seq((false, false), (true, false), (true, true), (true, true)).map {
+              case (enabled, cacheEnabled) =>
+                var bytes = 0L
+                withSQLConf(
+                  CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString,
+                  CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key -> cacheEnabled.toString) {
+                  val df = spark.sql(query)
+                  assert(df.collect().toSeq == expected)
+                  val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
+                  assert(scans.nonEmpty)
+                  bytes = scans.map(_.metrics("bytes_scanned").value).sum
+                  val pruned = scans.map(_.metrics("iceberg_runtime_file_tasks_pruned").value).sum
+                  if (enabled) {
                     assert(
-                      serializedFieldIds == Set(idFieldId),
-                      s"runtime file statistics should contain only join key id=$idFieldId, " +
-                        s"got $serializedFieldIds")
-                  }
+                      pruned >= fileCount - 2,
+                      s"too few tasks rejected before footer I/O: $pruned; " +
+                        s"metrics=${scans.map(_.metrics.map { case (k, v) => k -> v.value })}; " +
+                        s"plan=${df.queryExecution.executedPlan}")
+                    val idFieldId = icebergTable.schema().findField("id").fieldId()
+                    scans.foreach { scan =>
+                      val common = OperatorOuterClass.IcebergScanCommon.parseFrom(scan.commonData)
+                      assert(common.getFileMetricsPoolCount > 0)
+                      common.getFileMetricsPoolList.asScala.foreach { metrics =>
+                        val serializedFieldIds =
+                          metrics.getValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
+                            metrics.getNullValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
+                            metrics.getNanValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
+                            metrics.getLowerBoundsMap.keySet().asScala.map(_.intValue()).toSet ++
+                            metrics.getUpperBoundsMap.keySet().asScala.map(_.intValue()).toSet
+                        assert(
+                          serializedFieldIds == Set(idFieldId),
+                          s"runtime file statistics should contain only join key id=$idFieldId, " +
+                            s"got $serializedFieldIds")
+                      }
+                    }
+                  } else { assert(pruned == 0) }
                 }
-              } else { assert(pruned == 0) }
+                bytes
             }
-            bytes
-          }
-          assert(readings(1) < readings(0) / 3, s"file pruning did not reduce I/O: $readings")
+          assert(
+            readings.tail.forall(_ < readings.head / 3),
+            s"file pruning did not reduce I/O with cache on/off: $readings")
         }
         try {
           checkMode(16)
@@ -1473,6 +1480,12 @@ class CometIcebergNativeSuite
             val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
             assert(scans.length == 1, s"expected one native Iceberg scan, got ${scans.length}")
             val scan = scans.head
+            if (scan.metrics("num_splits").value == 1) {
+              // The skip guard omits file metrics while native row-group/page pruning below
+              // must still reject unread row groups and preserve answers, including deletes.
+              val common = OperatorOuterClass.IcebergScanCommon.parseFrom(scan.commonData)
+              assert(common.getFileMetricsPoolCount == 0)
+            }
             // Completed hash-join bounds should prune at task startup. This
             // fixture must not attribute those savings to live refreshes.
             assert(scan.metrics("iceberg_runtime_row_groups_pruned_live").value == 0)
