@@ -1,9 +1,9 @@
 {
- "updated": "2026-10-09T00:00Z (user clock)",
+ "updated": "2026-10-09 (W1 done)",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
-  "comet": "1bfd6239b (CI FAILED 37808593789: spark build + integration)",
-  "bench": "21f15844d",
+  "comet": "bef150221 (GREEN 37820096779: decimal phase1)",
+  "bench": "c43593010 (targeted decimal)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
  "ci": {
@@ -92,13 +92,12 @@
   }
  ],
  "tasks": [
-  "rp-b1-decimal-r2",
-  "rp-w2-b4-impl-r1",
-  "rp-w3-fast-ci-r1",
-  "rp-w4-b6-impl-r3",
+  "rp-w1b-string-r1",
   "rp-w5-upstream-audit-r2",
-  "rp-w6-b3-impl-r1",
-  "rp-w7-b2-impl-r1"
+  "rp-w4-b6-impl-r3",
+  "sonnet:ws-b4-fix",
+  "sonnet:ws-fast-ci-fix",
+  "gemini W6/W7 may have died on quota"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -251,22 +250,26 @@
   "W1": {
    "item": "B1 decimal (Comet integration branch)",
    "agent": "codex rp-b1-decimal-r2",
-   "branch": "adaptive-ci/runtime-pruning-rewrite-20261006"
+   "branch": "adaptive-ci/runtime-pruning-rewrite-20261006",
+   "status": "DONE bef150221 green; lineage guard dropped (hidden casts only lose reader pruning); targeted bench c43593010"
   },
   "W2": {
    "item": "B4 advisory row-filter gate (iceberg)",
    "agent": "gemini rp-w2-b4-impl-r1",
-   "branch": "adaptive-ci/ws-b4-rowfilter-gate"
+   "branch": "adaptive-ci/ws-b4-rowfilter-gate",
+   "status": "ws-b4 6c86b0131 CI failed; sonnet subagent fixing (gemini quota)"
   },
   "W3": {
    "item": "Comet fast CI lane for ws-* + full only on integration",
    "agent": "gemini rp-w3-fast-ci-r1",
-   "branch": "adaptive-ci/ws-fast-ci"
+   "branch": "adaptive-ci/ws-fast-ci",
+   "status": "ws-fast-ci 3fb61aecb: jvm-targeted failed, rust uses stable (must match full toolchain), no cargo test; sonnet subagent fixing"
   },
   "W4": {
    "item": "B6 safe float all-match (iceberg)",
    "agent": "gemini rp-w4-b6-impl-r3",
-   "branch": "adaptive-ci/ws-b6-float-allmatch"
+   "branch": "adaptive-ci/ws-b6-float-allmatch",
+   "status": "ws-b6 3e0b1ca54 CI running"
   },
   "W5": {
    "item": "upstreamability/refactor audit (read-only)",
@@ -275,12 +278,20 @@
   "W6": {
    "item": "B3 NULLS FIRST Top-K translation (Comet)",
    "agent": "gemini rp-w6-b3-impl-r1",
-   "branch": "adaptive-ci/ws-b3-nulls-first"
+   "branch": "adaptive-ci/ws-b3-nulls-first",
+   "status": "ws-b3 c74d3c531 full validation queued"
   },
   "W7": {
    "item": "B2 Top-K/join filters through safe Filter + spark_modulo (ANSI-gated)",
    "agent": "gemini rp-w7-b2-impl-r1",
-   "branch": "adaptive-ci/ws-b2-topk-filters"
+   "branch": "adaptive-ci/ws-b2-topk-filters",
+   "status": "ws-b2 15c727d9a full validation running"
+  },
+  "W1b": {
+   "item": "B1 phase 2 string keys",
+   "agent": "codex rp-w1b-string-r1",
+   "branch": "adaptive-ci/ws-b1-string (both repos)"
   }
- }
+ },
+ "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback"
 }
