@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T12:50Z",
+ "updated": "2026-10-08T13:00Z",
  "heads": {
   "iceberg": "8294719e9b507c35976f6b1531a45d65121fe1ec",
   "comet": "8d59a5855",
@@ -41,7 +41,8 @@
   }
  ],
  "tasks": [
-  "rp-f4-review-r1"
+  "rp-f4-review-r1",
+  "rp-bench-shard-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -97,5 +98,10 @@
   "analyze bench 37758359536 artifacts (per-query RCA; join set = no-shuffle-filter variant)",
   "F4 implement (codex after 12:04 UTC) from design",
   "investigate baseline string-join mismatches in Apache main"
- ]
+ ],
+ "bench_infra": {
+  "decision": "shard suites by query (full protocol per shard, same-runner pairing), cache builds per SHA, cache data-gen, record runner CPU, targeted mode via revisions.json",
+  "owner": "rp-bench-shard-r1",
+  "constraint": "no bench push before run 37758359536 completes"
+ }
 }

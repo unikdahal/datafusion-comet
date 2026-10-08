@@ -77,3 +77,4 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - Comet 8d59a5855 pins iceberg 8294719e9; CI running.
 - F4 upstream-style review (gemini rp-f4-review-r1) running — key Q: abort mid-load leaving half-populated delete state visible as complete?
 - Bench target after Comet green: comet 8d59a5855 / iceberg 8294719e9.
+- 13:00 UTC: user asked faster benchmarks w/o accuracy loss. Decision: query sharding (each shard = full 8-round balanced protocol, paired on same runner), build cache per SHA, data-gen cache, runner CPU metadata, targeted mode. Codex task rp-bench-shard-r1 (waits for bench 37758359536 before push; also repins candidate to newest green Comet).
