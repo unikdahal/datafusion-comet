@@ -452,7 +452,7 @@ fn main() {
     println!("SCALING_BENCH,n,layout,design,median_ms,retained_bytes,peak_allocated_bytes");
     for layout in layouts {
         let input = ids(layout, N);
-        for &design in &designs { let _ = sample(design, &input); }
+        for &design in designs { let _ = sample(design, &input); }
         let mut results: Vec<Vec<(f64, usize, usize)>> = vec![Vec::new(); designs.len()];
         for rep in 0..5 {
             for off in 0..designs.len() {
