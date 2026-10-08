@@ -59,8 +59,60 @@ fn ids(layout: &str, n: usize) -> Vec<u64> {
         if stride != 1 { j * stride } else { ((j % partitions) << 33) + j / partitions }
     }).collect()
 }
+
+enum Segment {
+    Dense { words: Vec<u64>, count: usize },
+    Roaring(RoaringBitmap),
+}
+fn segmented_adaptive(input: &[u64]) -> (usize, usize) {
+    let mut sets: HashMap<u32, Segment> = HashMap::new();
+    for &id in input {
+        let high = (id >> 32) as u32;
+        let low = id as u32;
+        let segment = sets.entry(high)
+            .or_insert_with(|| Segment::Dense { words: Vec::new(), count: 0 });
+        match segment {
+            Segment::Roaring(bitmap) => { assert!(bitmap.insert(low)); }
+            Segment::Dense { words, count } => {
+                // Reject bitsets whose span becomes expensive relative to membership density.
+                // One megabit of headroom accommodates reordering within a normal Spark partition.
+                let allowable_span = 1_048_576usize.saturating_add(32 * (*count + 1));
+                if (low as usize) >= 64_000_000 || (low as usize) > allowable_span {
+                    let mut bitmap = RoaringBitmap::new();
+                    for (word_index, &original) in words.iter().enumerate() {
+                        let mut word = original;
+                        while word != 0 {
+                            let bit = word.trailing_zeros() as usize;
+                            assert!(bitmap.insert((word_index * 64 + bit) as u32));
+                            word &= word - 1;
+                        }
+                    }
+                    assert!(bitmap.insert(low));
+                    *segment = Segment::Roaring(bitmap);
+                } else {
+                    let index = (low >> 6) as usize;
+                    if index >= words.len() { words.resize(index + 1, 0); }
+                    let flag = 1u64 << (low & 63);
+                    assert_eq!(words[index] & flag, 0);
+                    words[index] |= flag;
+                    *count += 1;
+                }
+            }
+        }
+    }
+    let retained = LIVE.load(Ordering::Relaxed) as usize;
+    let count: usize = sets.values().map(|segment| match segment {
+        Segment::Dense { count, .. } => *count,
+        Segment::Roaring(bitmap) => bitmap.len() as usize,
+    }).sum();
+    std::hint::black_box(&sets);
+    drop(sets);
+    (count, retained)
+}
+
 fn insert(design: &str, input: &[u64]) -> (usize, usize) {
     match design {
+        "segmented-adaptive" => segmented_adaptive(input),
         "hash" => {
             let mut set = HashSet::new();
             for &id in input { assert!(set.insert(id)); }
@@ -125,7 +177,7 @@ fn sample(design: &str, input: &[u64]) -> (f64, usize, usize) {
 fn main() {
     const N: usize = 5_000_000;
     let layouts = ["dense", "sparse-8", "sparse-200", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled"];
-    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-sorted"];
+    let designs = ["hash", "treemap", "partitioned-direct", "partitioned-sorted", "segmented-adaptive"];
     println!("SCALING_BENCH,n,layout,design,median_ms,retained_bytes,peak_allocated_bytes");
     for layout in layouts {
         let input = ids(layout, N);
