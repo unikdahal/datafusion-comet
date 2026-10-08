@@ -98,3 +98,8 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 25 unequal-coverage queries from main's metadata-table suffix bug (M2) — tracked upstream already → no fork issue.
 - Discounted: report's "JIT profiling" claims (no profiling exists).
 - Perf follow-ups: dynamic-filter overhead on non-selective joins (strjoin/tpch on/off 0.97-0.99); count_all__f_evolved 0.88x; join_inner__f_unsorted__dim_empty 0.88x.
+
+## 2026-10-08 15:35 UTC — per-query RCA program (user directive)
+- Every query: ledger sorted slowest→fastest, RCA line + classification, deep dives on CI<1, pruning-costs-time, under-delivers, >10x suspicious.
+- Tasks: join+topk (codex), layouts+tpch (gemini), strjoin+fuzz (gemini). Outputs rp-work/reports/rca/.
+- Then: fixes (codex) → targeted bench → re-verify on next full campaign. TODO: emit ledger automatically in bench report job (after shard task lands).

@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T15:20Z",
+ "updated": "2026-10-08T15:35Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
@@ -68,7 +68,10 @@
   }
  ],
  "tasks": [
-  "rp-bench-shard-r1"
+  "rp-bench-shard-r1",
+  "rp-perquery-rca-join-topk-r1",
+  "rp-perquery-rca-layouts-tpch-r1",
+  "rp-perquery-rca-strjoin-fuzz-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -152,5 +155,11 @@
   "decision": "shard suites by query (full protocol per shard, same-runner pairing), cache builds per SHA, cache data-gen, record runner CPU, targeted mode via revisions.json",
   "owner": "rp-bench-shard-r1",
   "constraint": "no bench push before run 37758359536 completes"
+ },
+ "perquery_rca": {
+  "directive": "user 15:30 UTC: per-query RCA for every query slowest->fastest; deep-dive slow/suspicious; find and fix issues",
+  "data": "bench 37758359536 (stale candidate: has 9cccd0676, lacks F1/F4 fixes)",
+  "outputs": "rp-work/reports/rca/<suite>.md + ledger CSVs",
+  "next": "triage fixes -> codex impl -> targeted bench (sharded workflow targeted mode); re-verify ledger on next full campaign; make ledger generation part of report job"
  }
 }
