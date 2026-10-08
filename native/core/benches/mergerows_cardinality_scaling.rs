@@ -46,6 +46,7 @@ fn ids(layout: &str, n: usize) -> Vec<u64> {
         "dense" => (1u64, 1u64, false),
         "sparse-8" => (1, 8, false),
         "sparse-200" => (1, 200, false),
+        "sparse-200-shuffled" => (1, 200, true),
         "spark-8" => (8, 1, false),
         "spark-200" => (200, 1, false),
         "spark-2k" => (2048, 1, false),
@@ -336,7 +337,7 @@ fn sample(design: &str, input: &[u64]) -> (f64, usize, usize) {
 }
 fn main() {
     const N: usize = 5_000_000;
-    let layouts = ["dense", "sparse-8", "sparse-200", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled", "spark-200-high-offset"];
+    let layouts = ["dense", "sparse-8", "sparse-200", "sparse-200-shuffled", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled", "spark-200-high-offset"];
     let designs = ["hash", "treemap", "partitioned-direct", "partitioned-append", "partitioned-sorted", "segmented-adaptive", "segmented-anchored", "segmented-anchored-hash"];
     println!("SCALING_BENCH,n,layout,design,median_ms,retained_bytes,peak_allocated_bytes");
     for layout in layouts {
