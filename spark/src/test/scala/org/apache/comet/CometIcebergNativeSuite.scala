@@ -1404,31 +1404,53 @@ class CometIcebergNativeSuite
               'write.parquet.compression-codec'='uncompressed')""")
           try {
             withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-              spark.range(120000L).coalesce(1).sortWithinPartitions("id")
+              spark
+                .range(120000L)
+                .coalesce(1)
+                .sortWithinPartitions("id")
                 .selectExpr(
                   "concat('abcdefghijklmnop', " +
                     "lpad(CAST(CAST(id / 32 AS BIGINT) AS STRING), 6, '0')) AS id",
                   "sha2(CAST(id AS STRING), 256) AS payload")
-                .write.format("iceberg").mode("append").saveAsTable(table)
+                .write
+                .format("iceberg")
+                .mode("append")
+                .saveAsTable(table)
               // Repeated values keep dictionary encoding enabled for every file when requested.
-              spark.range(64L).selectExpr(
-                "CASE WHEN id % 2 = 0 THEN '' ELSE 'é東京🙂' END AS id",
-                "'special' AS payload")
+              spark
+                .range(64L)
+                .selectExpr(
+                  "CASE WHEN id % 2 = 0 THEN '' ELSE 'é東京🙂' END AS id",
+                  "'special' AS payload")
                 .union(spark.sql("SELECT CAST(NULL AS STRING) AS id, 'null' AS payload"))
-                .coalesce(1).write.format("iceberg").mode("append").saveAsTable(table)
-              spark.range(64L).filter("id % 2 = 0").coalesce(1)
+                .coalesce(1)
+                .write
+                .format("iceberg")
+                .mode("append")
+                .saveAsTable(table)
+              spark
+                .range(64L)
+                .filter("id % 2 = 0")
+                .coalesce(1)
                 .selectExpr("concat('abcdefghijklmnop', lpad(CAST(id AS STRING), 6, '0')) AS id")
-                .union(spark.sql("SELECT id FROM VALUES ('') , ('é東京🙂'), ('é東京🙂'), (NULL) AS d(id)"))
-                .write.parquet(dimPath)
+                .union(
+                  spark.sql("SELECT id FROM VALUES ('') , ('é東京🙂'), ('é東京🙂'), (NULL) AS d(id)"))
+                .write
+                .parquet(dimPath)
               // Verify that the adversarial fixture really has truncated manifest bounds.
-              val bounds = spark.read.format("iceberg").load(s"$table.files")
-                .select("lower_bounds", "upper_bounds", "file_path").collect()
-              assert(bounds.exists { row =>
-                val lower = row.getMap[Int, Array[Byte]](0).get(1)
-                val upper = row.getMap[Int, Array[Byte]](1).get(1)
-                lower.exists(bytes => new String(bytes, UTF_8) == "abcdefghijklmnop") &&
+              val bounds = spark.read
+                .format("iceberg")
+                .load(s"$table.files")
+                .select("lower_bounds", "upper_bounds", "file_path")
+                .collect()
+              assert(
+                bounds.exists { row =>
+                  val lower = row.getMap[Int, Array[Byte]](0).get(1)
+                  val upper = row.getMap[Int, Array[Byte]](1).get(1)
+                  lower.exists(bytes => new String(bytes, UTF_8) == "abcdefghijklmnop") &&
                   upper.exists(bytes => new String(bytes, UTF_8) == "abcdefghijklmnoq")
-              }, "Expected truncated lower and rounded-up upper string bounds")
+                },
+                "Expected truncated lower and rounded-up upper string bounds")
               bounds.foreach { row =>
                 val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
                   org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
@@ -1436,7 +1458,8 @@ class CometIcebergNativeSuite
                     spark.sessionState.newHadoopConf()))
                 try {
                   val encodings = reader.getRowGroups.asScala.flatMap { group =>
-                    group.getColumns.asScala.filter(_.getPath.toDotString == "id")
+                    group.getColumns.asScala
+                      .filter(_.getPath.toDotString == "id")
                       .flatMap(_.getEncodings.asScala)
                   }
                   val usesDictionary = encodings.exists(encoding =>
@@ -1448,11 +1471,15 @@ class CometIcebergNativeSuite
                 }
               }
             }
-            spark.read.format("iceberg").option("split-size", "134217728").load(table)
+            spark.read
+              .format("iceberg")
+              .option("split-size", "134217728")
+              .load(table)
               .createOrReplaceTempView("string_fact")
             spark.read.parquet(dimPath).createOrReplaceTempView("string_dim")
             for (enabled <- Seq(false, true)) {
-              withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+              withSQLConf(
+                CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
                 val query = "SELECT /*+ BROADCAST(d) */ f.id, f.payload " +
                   "FROM string_fact f JOIN string_dim d ON f.id = d.id"
                 val (_, plan) = checkSparkAnswer(query)
@@ -1473,7 +1500,8 @@ class CometIcebergNativeSuite
             val charTable = s"runtime_string_char_dim_$dictionary"
             val charPath = new File(warehouseDir, charTable).getAbsolutePath
             withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-              spark.sql(s"CREATE TABLE $charTable (id CHAR(24)) USING parquet LOCATION '$charPath'")
+              spark.sql(
+                s"CREATE TABLE $charTable (id CHAR(24)) USING parquet LOCATION '$charPath'")
               spark.sql(s"INSERT INTO $charTable VALUES ('abcdefghijklmnop000000')")
             }
             try {

@@ -622,7 +622,8 @@ class CometJoinSuite extends CometTestBase {
       val factPath = new java.io.File(dir, "char_fact").getAbsolutePath
       val dimPath = new java.io.File(dir, "char_dim").getAbsolutePath
       withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-        spark.sql(s"CREATE TABLE runtime_char_fact (id CHAR(4)) USING parquet LOCATION '$factPath'")
+        spark.sql(
+          s"CREATE TABLE runtime_char_fact (id CHAR(4)) USING parquet LOCATION '$factPath'")
         spark.sql(s"CREATE TABLE runtime_char_dim (id CHAR(6)) USING parquet LOCATION '$dimPath'")
         spark.sql("INSERT INTO runtime_char_fact VALUES ('a'), ('ab'), (NULL)")
         spark.sql("INSERT INTO runtime_char_dim VALUES ('a'), ('ab'), ('z'), (NULL)")

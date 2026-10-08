@@ -2789,8 +2789,10 @@ trait CometHashJoin {
     val references = stringKeys.flatMap(_.references).map(_.exprId).toSet
     def isChar(attribute: Attribute): Boolean =
       attribute.metadata.contains("__CHAR_VARCHAR_TYPE_STRING") &&
-        attribute.metadata.getString("__CHAR_VARCHAR_TYPE_STRING")
-          .toLowerCase(Locale.ROOT).startsWith("char(")
+        attribute.metadata
+          .getString("__CHAR_VARCHAR_TYPE_STRING")
+          .toLowerCase(Locale.ROOT)
+          .startsWith("char(")
     if (stringKeys.flatMap(_.references).exists(isChar) ||
       input.output.exists(a => references.contains(a.exprId) && isChar(a))) {
       true
