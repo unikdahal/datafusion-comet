@@ -45,6 +45,18 @@ fn partitioned_direct(ids: &[i64]) -> u64 {
     seen.values().map(RoaringBitmap::len).sum()
 }
 
+fn partitioned_append(ids: &[i64]) -> u64 {
+    let mut seen: HashMap<u32, RoaringBitmap> = HashMap::new();
+    for &id in ids {
+        let id = id as u64;
+        let bitmap = seen.entry((id >> 32) as u32).or_default();
+        if bitmap.try_push(id as u32).is_err() {
+            assert!(bitmap.insert(id as u32));
+        }
+    }
+    seen.values().map(RoaringBitmap::len).sum()
+}
+
 fn partitioned_sorted_batches(ids: &[i64]) -> u64 {
     let mut seen: HashMap<u32, RoaringBitmap> = HashMap::new();
     let mut batch = Vec::with_capacity(4096);
@@ -93,6 +105,9 @@ fn bench(c: &mut Criterion) {
         });
         group.bench_with_input(BenchmarkId::new("partitioned-direct", N), &input, |b, v| {
             b.iter(|| black_box(partitioned_direct(black_box(v))))
+        });
+        group.bench_with_input(BenchmarkId::new("partitioned-append", N), &input, |b, v| {
+            b.iter(|| black_box(partitioned_append(black_box(v))))
         });
         group.bench_with_input(BenchmarkId::new("partitioned-sorted-batches", N), &input, |b, v| {
             b.iter(|| black_box(partitioned_sorted_batches(black_box(v))))
