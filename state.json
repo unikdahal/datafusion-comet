@@ -3,7 +3,7 @@
  "heads": {
   "iceberg": "0c3d9eedec271c8b29b434cc1692c3caa5f5bd62 (R2/R3 rebased on f3a157f81; CI pending). Comet still pins f3a157f81.",
   "comet": "681bdcbff68fe4ebb4a41bb682e2329266478c58 (fast lane merged on top of 6e7d582b5; full CI running)",
-  "bench": "c43593010 (targeted decimal)",
+  "bench": "7c2dd47e8 (B4/B6 targeted)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
  "ci": {
@@ -89,6 +89,15 @@
    "queries": "13 (strjoin shuffled_hash 3M non-selective + 100k selective, join shuffled_hash/semi/unsorted, topk)",
    "status": "completed success",
    "result": "P1: strjoin 3M non-selective cand_on/cand_off 0.98-1.04 (eval 3-8ms vs 15-33ms baseline); selective kept (semi 1.71x, unsorted dim_128 2.41x). dim_10pct 0.95x [0.92,0.98] confirmed -> B4."
+  },
+  {
+   "run": 37829425897,
+   "type": "targeted decimal",
+   "pins": {
+    "comet": "bef150221",
+    "iceberg": "157cf6475"
+   },
+   "result": "SUCCESS validation; f_dec dim_10k 5.19x [4.89,5.48] (588.8->12.8 MiB), dim_128 4.52x, dim_128_spread 2.06x; sorted dim_128 4.75x control; dim_10pct 0.93x (pre-B4)"
   }
  ],
  "tasks": [
@@ -267,7 +276,7 @@
    "item": "B1 decimal (Comet integration branch)",
    "agent": "codex rp-b1-decimal-r2",
    "branch": "adaptive-ci/runtime-pruning-rewrite-20261006",
-   "status": "DONE bef150221 green; lineage guard dropped (hidden casts only lose reader pruning); targeted bench c43593010"
+   "status": "DONE + BENCHMARKED: decimal 2-5x wins"
   },
   "W2": {
    "item": "B4 advisory row-filter gate (iceberg)",
@@ -323,7 +332,6 @@
  },
  "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
  "pending": [
-  "after decimal bench 37829425897: push B4 targeted bench with candidate comet 6e7d582b5 / iceberg f3a157f81 (dim_10pct, f_sorted dim_128, pos_deletes dim_10k, semi dim_128, topk10__f_unsorted, f_nan dim_128_spread)",
   "when iceberg 0c3d9eede green: bump Comet pin"
  ]
 }
