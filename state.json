@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T16:40Z",
+ "updated": "2026-10-08T16:55Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "c739c322ea591cd40f23fc44c164f18ab6d38499",
@@ -80,17 +80,19 @@
    "delta": "baseline main 5db0efe69. shuffle-probe pruning restored (16M->128 rows); q17/q03 18M rows skipped at scan; count_all_evolved 1.03 (was 0.88 = noise); extra_predicate 1.01; strjoin 1.00; persistent: dim_empty 0.94 (fixed overhead), f_nan 0.97 (float guard cost, accepted), dec_dim_10k 0.96 (unconfirmed)."
   },
   {
-   "run": "pending (21f15844d)",
+   "run": 37807233835,
    "type": "targeted",
    "pins": {
     "comet": "c739c322e",
     "iceberg": "157cf6475"
    },
-   "queries": "13 (strjoin shuffled_hash 3M non-selective + 100k selective, join shuffled_hash/semi/unsorted, topk)"
+   "queries": "13 (strjoin shuffled_hash 3M non-selective + 100k selective, join shuffled_hash/semi/unsorted, topk)",
+   "status": "completed success",
+   "result": "P1: strjoin 3M non-selective cand_on/cand_off 0.98-1.04 (eval 3-8ms vs 15-33ms baseline); selective kept (semi 1.71x, unsorted dim_128 2.41x). dim_10pct 0.95x [0.92,0.98] confirmed -> B4."
   }
  ],
  "tasks": [
-  "rp-b1-decimal-r1"
+  "rp-b4-design-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -201,7 +203,7 @@
   {
    "id": "P1",
    "item": "adaptive bypass + zero-copy batch filter",
-   "status": "landed 8e7073b1d+c739c322e (65,536-row window, <10% pruned -> bypass, sample every 16th batch, generation reset, bypass_switches metric); CI green; targeted bench 21f15844d running"
+   "status": "ACCEPTED (targeted bench 37807233835)"
   },
   {
    "id": "B1",
@@ -221,7 +223,7 @@
   {
    "id": "B4",
    "item": "reader-level cost gate when filtering saves no bytes (dim_10pct)",
-   "status": "measure after P1"
+   "status": "CONFIRMED regression (3 runs). Reader row filter on random 10% match: 0 bytes saved, +40ms. Design rp-b4-design-r1 (gemini)."
   },
   {
    "id": "B5",

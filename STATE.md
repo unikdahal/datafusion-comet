@@ -117,3 +117,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 16:20 UTC: delta analysis 37788815352 vs 37758359536: shuffle-probe revert confirmed beneficial; most small "regressions" were noise. POLICY: regression requires CI<1 in 2 campaigns. B6 added (safe float all-match).
 - 16:45 UTC: P1 adaptive bypass landed c739c322e (CI green). Targeted bench 21f15844d pushed. B1 decimal impl started (codex).
 - 16:40 UTC: B1 decimal pushed 901348bea/1bfd6239b; uncommitted Spark lineage-guard WIP in comet-decimal; codex limited until 17:07 UTC -> resume.
+- 16:55 UTC: targeted bench 37807233835: P1 accepted (eval cost 4-6x lower, selective pruning intact). dim_10pct regression confirmed -> B4 design (gemini). Decimal continuation waits for codex reset 17:07.
