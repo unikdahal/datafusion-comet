@@ -1966,7 +1966,7 @@ fn string_iceberg_probe(key_type: &DataType) -> (tempfile::NamedTempFile, Arc<dy
     )
     .unwrap();
     let properties = WriterProperties::builder()
-        .set_max_row_group_size(2)
+        .set_max_row_group_row_count(Some(2))
         .build();
     let mut writer =
         ArrowWriter::try_new(file.reopen().unwrap(), physical_schema, Some(properties)).unwrap();
