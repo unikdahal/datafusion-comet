@@ -119,7 +119,9 @@ enum AnchoredSegment {
 }
 
 fn segmented_anchored(input: &[u64]) -> (usize, usize) {
-    const MAX_WORDS: usize = 131_072;
+    const MAX_WORDS: usize = 1_048_576;
+    const WARMUP_WORD_CAP: usize = 4_096;
+    const MIN_DENSITY_SAMPLES: usize = 256;
     let mut partitions: HashMap<u32, AnchoredSegment> = HashMap::new();
     for &id in input {
         let high = (id >> 32) as u32;
@@ -141,9 +143,11 @@ fn segmented_anchored(input: &[u64]) -> (usize, usize) {
                 let minimum = (*base_word).min(word);
                 let maximum = current_end.max(word as u64);
                 let proposed_words = (maximum - minimum as u64 + 1) as usize;
-                let poor_density =
-                    proposed_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1));
-                if proposed_words > MAX_WORDS || poor_density {
+                let poor_density = *count >= MIN_DENSITY_SAMPLES
+                    && proposed_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1));
+                let too_wide_during_sampling =
+                    *count < MIN_DENSITY_SAMPLES && proposed_words > WARMUP_WORD_CAP;
+                if proposed_words > MAX_WORDS || too_wide_during_sampling || poor_density {
                     let mut bitmap = RoaringBitmap::new();
                     for (i, &bits) in words.iter().enumerate() {
                         let mut remaining = bits;
@@ -192,7 +196,9 @@ enum AnchoredHashSegment {
 }
 
 fn segmented_anchored_hash(input: &[u64]) -> (usize, usize) {
-    const MAX_WORDS: usize = 131_072;
+    const MAX_WORDS: usize = 1_048_576;
+    const WARMUP_WORD_CAP: usize = 4_096;
+    const MIN_DENSITY_SAMPLES: usize = 256;
     let mut partitions: HashMap<u32, AnchoredHashSegment> = HashMap::new();
     for &id in input {
         let high = (id >> 32) as u32;
@@ -213,7 +219,9 @@ fn segmented_anchored_hash(input: &[u64]) -> (usize, usize) {
                 let maximum = current_end.max(word as u64);
                 let proposed_words = (maximum - minimum as u64 + 1) as usize;
                 if proposed_words > MAX_WORDS
-                    || proposed_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1))
+                    || (proposed_words > WARMUP_WORD_CAP && *count < MIN_DENSITY_SAMPLES)
+                    || (*count >= MIN_DENSITY_SAMPLES
+                        && proposed_words > 16usize.saturating_add(2usize.saturating_mul(*count + 1)))
                 {
                     let mut bitmap = HashSet::<u32>::new();
                     for (i, &bits) in words.iter().enumerate() {
