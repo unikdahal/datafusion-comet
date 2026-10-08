@@ -25,7 +25,8 @@ use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::expressions::{
     BinaryExpr, Column, InListExpr, IsNotNullExpr, IsNullExpr, Literal,
 };
-use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::{PhysicalExpr, ScalarFunctionExpr};
+use datafusion_comet_spark_expr::IfExpr;
 use std::sync::Arc;
 
 /// Whether skipping input rows preserves both expression values and evaluation errors.
@@ -82,6 +83,11 @@ pub(super) fn is_safe_to_prune_before(
             })
     } else if let Some(not) = expr.downcast_ref::<NotExpr>() {
         not.arg().data_type(schema).ok() == Some(DataType::Boolean)
+    } else if let Some(func) = expr.downcast_ref::<ScalarFunctionExpr>() {
+        is_safe_spark_modulo(func, schema)
+    } else if let Some(if_expr) = expr.downcast_ref::<IfExpr>() {
+        let children = if_expr.children();
+        children.len() == 3 && children[0].data_type(schema).ok() == Some(DataType::Boolean)
     } else {
         expr.is::<IsNullExpr>() || expr.is::<IsNotNullExpr>()
     };
@@ -92,12 +98,107 @@ pub(super) fn is_safe_to_prune_before(
             .all(|child| is_safe_to_prune_before(child, schema))
 }
 
+fn is_safe_spark_modulo(func: &ScalarFunctionExpr, schema: &arrow::datatypes::Schema) -> bool {
+    if func.name() != "spark_modulo" && func.fun().name() != "spark_modulo" {
+        return false;
+    }
+    let args = func.args();
+    if args.len() != 2 {
+        return false;
+    }
+    let left_type = args[0].data_type(schema).ok();
+    if !left_type.as_ref().is_some_and(is_comparable_type) {
+        return false;
+    }
+    if left_type != args[1].data_type(schema).ok() {
+        return false;
+    }
+
+    let divisor = &args[1];
+    // In non-ANSI mode, Comet wraps the divisor with `null_if_zero_primitive` (an `IfExpr`),
+    // replacing zero with NULL so modulo evaluates to NULL without division-by-zero error.
+    // In ANSI mode, modulo can error on zero divisor; only a constant nonzero literal other
+    // than -1 is infallible.
+    is_non_ansi_zero_guard(divisor)
+        || divisor
+            .downcast_ref::<Literal>()
+            .is_some_and(|lit| is_safe_integer_divisor(lit.value()))
+}
+
+fn is_non_ansi_zero_guard(expr: &Arc<dyn PhysicalExpr>) -> bool {
+    let Some(if_expr) = expr.downcast_ref::<IfExpr>() else {
+        return false;
+    };
+    let children = if_expr.children();
+    if children.len() != 3 {
+        return false;
+    }
+    let Some(true_lit) = children[1].downcast_ref::<Literal>() else {
+        return false;
+    };
+    if !true_lit.value().is_null() {
+        return false;
+    }
+    let Some(binary) = children[0].downcast_ref::<BinaryExpr>() else {
+        return false;
+    };
+    if binary.op() != &Operator::Eq {
+        return false;
+    }
+    let Some(zero_lit) = binary.right().downcast_ref::<Literal>() else {
+        return false;
+    };
+    if !is_zero(zero_lit.value()) {
+        return false;
+    }
+    if let Some(lit) = children[2].downcast_ref::<Literal>() {
+        if is_minus_one(lit.value()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_zero(value: &ScalarValue) -> bool {
+    use arrow::datatypes::i256;
+
+    match value {
+        ScalarValue::Int8(Some(0))
+        | ScalarValue::Int16(Some(0))
+        | ScalarValue::Int32(Some(0))
+        | ScalarValue::Int64(Some(0))
+        | ScalarValue::UInt8(Some(0))
+        | ScalarValue::UInt16(Some(0))
+        | ScalarValue::UInt32(Some(0))
+        | ScalarValue::UInt64(Some(0)) => true,
+        ScalarValue::Float32(Some(v)) => *v == 0.0,
+        ScalarValue::Float64(Some(v)) => *v == 0.0,
+        ScalarValue::Decimal128(Some(0), _, _) => true,
+        ScalarValue::Decimal256(Some(v), _, _) => *v == i256::from(0),
+        _ => false,
+    }
+}
+
+fn is_minus_one(value: &ScalarValue) -> bool {
+    matches!(
+        value,
+        ScalarValue::Int8(Some(-1))
+            | ScalarValue::Int16(Some(-1))
+            | ScalarValue::Int32(Some(-1))
+            | ScalarValue::Int64(Some(-1))
+    )
+}
+
 fn is_safe_integer_divisor(value: &ScalarValue) -> bool {
     let divisor = match value {
         ScalarValue::Int8(Some(value)) => i64::from(*value),
         ScalarValue::Int16(Some(value)) => i64::from(*value),
         ScalarValue::Int32(Some(value)) => i64::from(*value),
         ScalarValue::Int64(Some(value)) => *value,
+        ScalarValue::UInt8(Some(value)) => i64::from(*value),
+        ScalarValue::UInt16(Some(value)) => i64::from(*value),
+        ScalarValue::UInt32(Some(value)) => i64::from(*value),
+        ScalarValue::UInt64(Some(value)) => return *value != 0,
         _ => return false,
     };
     divisor != 0 && divisor != -1
@@ -140,6 +241,7 @@ fn is_comparable_type(data_type: &arrow::datatypes::DataType) -> bool {
 mod tests {
     use super::*;
     use datafusion::physical_expr::expressions::lit;
+
     #[test]
     fn reader_attachment_passes_row_local_infallible_filters() {
         use arrow::datatypes::{DataType, Field, Schema};
@@ -244,5 +346,95 @@ mod tests {
                 assert!(!is_safe_to_prune_before(&expression, &schema));
             }
         }
+    }
+
+    #[test]
+    fn spark_modulo_safety_gates_on_ansi_and_divisor() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::execution::context::SessionContext;
+        use datafusion_comet_spark_expr::{create_modulo_expr, RandExpr};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int32, false),
+            Field::new("divisor", DataType::Int32, false),
+        ]));
+        let value: Arc<dyn PhysicalExpr> = Arc::new(Column::new("value", 0));
+        let divisor: Arc<dyn PhysicalExpr> = Arc::new(Column::new("divisor", 1));
+        let session = SessionContext::new();
+
+        // 1. spark_modulo with nonzero constant divisor is safe in both ANSI and non-ANSI
+        for fail_on_error in [true, false] {
+            let expr = create_modulo_expr(
+                Arc::clone(&value),
+                lit(3_i32),
+                DataType::Int32,
+                Arc::clone(&schema),
+                fail_on_error,
+                &session.state(),
+            )
+            .unwrap();
+            assert!(
+                is_safe_to_prune_before(&expr, schema.as_ref()),
+                "spark_modulo by non-zero literal should be safe (fail_on_error={fail_on_error})"
+            );
+        }
+
+        // 2. Non-ANSI modulo by column is safe because divisor zero is wrapped to NULL
+        let non_ansi_col = create_modulo_expr(
+            Arc::clone(&value),
+            Arc::clone(&divisor),
+            DataType::Int32,
+            Arc::clone(&schema),
+            false,
+            &session.state(),
+        )
+        .unwrap();
+        assert!(
+            is_safe_to_prune_before(&non_ansi_col, schema.as_ref()),
+            "non-ANSI spark_modulo by column should be safe (guarded by null_if_zero)"
+        );
+
+        // 3. ANSI modulo by column is fallible (can raise DivideByZero) and must NOT be safe
+        let ansi_col = create_modulo_expr(
+            Arc::clone(&value),
+            Arc::clone(&divisor),
+            DataType::Int32,
+            Arc::clone(&schema),
+            true,
+            &session.state(),
+        )
+        .unwrap();
+        assert!(
+            !is_safe_to_prune_before(&ansi_col, schema.as_ref()),
+            "ANSI spark_modulo by column can error and must not be safe to prune before"
+        );
+
+        // 4. Modulo by zero or -1 in ANSI mode must not be safe
+        for bad_divisor in [lit(0_i32), lit(-1_i32)] {
+            let ansi_bad = create_modulo_expr(
+                Arc::clone(&value),
+                bad_divisor,
+                DataType::Int32,
+                Arc::clone(&schema),
+                true,
+                &session.state(),
+            )
+            .unwrap();
+            assert!(
+                !is_safe_to_prune_before(&ansi_bad, schema.as_ref()),
+                "ANSI spark_modulo by 0 or -1 must not be safe"
+            );
+        }
+
+        // 5. Non-deterministic expressions (rand) remain boundaries
+        let random_pred: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(RandExpr::new(42)),
+            Operator::Lt,
+            lit(0.5_f64),
+        ));
+        assert!(
+            !is_safe_to_prune_before(&random_pred, schema.as_ref()),
+            "random predicate must not be safe"
+        );
     }
 }
