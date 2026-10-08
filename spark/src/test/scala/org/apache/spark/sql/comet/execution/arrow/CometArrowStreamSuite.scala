@@ -1225,12 +1225,10 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
     val outputType = StructType(Seq(StructField("id", IntegerType)))
     val sourceField = Utils.toArrowField("partition", sourceType, nullable = true, "UTC")
     val sourceVector = sourceField.createVector(allocator).asInstanceOf[StructVector]
-    sourceVector.allocateNew()
-    val inputVector = new CometStructVector(sourceVector, new MapDictionaryProvider())
-    val input = new ColumnarBatch(Array[ColumnVector](inputVector), 2)
     val arrowSchema =
       Utils.toArrowSchema(StructType(Seq(StructField("partition", outputType))), "UTC")
     try {
+      sourceVector.allocateNew()
       sourceVector.setIndexDefined(0)
       sourceVector.getChildByOrdinal(0).asInstanceOf[IntVector].setSafe(0, 7)
       sourceVector.getChildByOrdinal(1).asInstanceOf[IntVector].setSafe(0, 99)
@@ -1239,13 +1237,19 @@ class CometArrowStreamSuite extends AnyFunSuite with Matchers {
       sourceVector.getChildByOrdinal(0).setValueCount(2)
       sourceVector.getChildByOrdinal(1).setValueCount(2)
 
-      val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+      // CometDecodedVector snapshots the Arrow null count at construction.
+      val inputVector = new CometStructVector(sourceVector, new MapDictionaryProvider())
+      val input = new ColumnarBatch(Array[ColumnVector](inputVector), 2)
       try {
-        batch.column(0).getStruct(0).getInt(0) shouldBe 7
-        batch.column(0).isNullAt(1) shouldBe true
-      } finally batch.close()
+        inputVector.hasNull shouldBe true
+        val batch = CometArrowConverters.columnarBatchToArrowBatch(input, arrowSchema, allocator)
+        try {
+          batch.column(0).getStruct(0).getInt(0) shouldBe 7
+          batch.column(0).isNullAt(1) shouldBe true
+        } finally batch.close()
+      } finally input.close()
     } finally {
-      input.close()
+      sourceVector.close()
       allocator.close()
     }
   }
