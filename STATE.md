@@ -84,3 +84,8 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 Genuine bug on upstream main + not tracked upstream (read-only dedupe search) + 200% certain (GHA repro on unmodified main + root cause) → open issue on matching unikdahal fork. Never upstream. Unsure → skip.
 Candidate: Apache Comet main string-join wrong results seen in bench baseline (fuzz *_fz_str, strjoin broadcast_distinct) — needs confirmation.
 - ~13:05 UTC: F4 follow-up landed iceberg 157cf6475 (CI 37778485388 green); lead reviewed waiter loop. Comet 8cd4d9a98 pins it; CI running. Bench shard task should pin newest GREEN comet (may become 8cd4d9a98).
+
+## 2026-10-08 13:55 UTC heartbeat
+- Bench 37758359536 DONE: candidate 0 validation failures; baseline (main f80042f78) 160 string-join mismatches again → main has wrong-results bug that fork avoids. RCA task rp-strjoin-rca-r1 (gemini) — fork-issue candidate if 200% proven + untracked upstream.
+- Perf analysis task rp-bench-analysis-r1 (gemini). Note candidate 92bba61b6 still had 9cccd0676.
+- Comet CI 37780938158 @8cd4d9a98 running. Bench shard task (codex) can now push (bench done).

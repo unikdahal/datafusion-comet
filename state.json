@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T13:05Z",
+ "updated": "2026-10-08T13:55Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
@@ -8,8 +8,9 @@
  },
  "ci": {
   "comet_validation": {
+   "run": 37780938158,
    "sha": "8cd4d9a98",
-   "status": "running (pin iceberg 157cf6475); supersedes 8d59a5855 run"
+   "status": "in_progress"
   },
   "iceberg_validation": {
    "run": 37778485388,
@@ -37,11 +38,15 @@
     "comet": "92bba61b6",
     "iceberg": "949cc88"
    },
-   "status": "running"
+   "status": "completed",
+   "result": "strjoin+fuzz+report jobs failed; ALL 160 validation failures baseline-only (Apache main f80042f78); 0 candidate failures",
+   "baseline_resolved": "f80042f78 @ 2026-10-08T09:42Z, apache iceberg af1da4c"
   }
  ],
  "tasks": [
-  "rp-bench-shard-r1"
+  "rp-bench-shard-r1",
+  "rp-strjoin-rca-r1",
+  "rp-bench-analysis-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
