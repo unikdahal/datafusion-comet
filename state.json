@@ -2,7 +2,7 @@
  "updated": "2026-10-09 (W1 done)",
  "heads": {
   "iceberg": "0c3d9eedec271c8b29b434cc1692c3caa5f5bd62 (R2/R3 rebased on f3a157f81; CI pending). Comet still pins f3a157f81.",
-  "comet": "6e7d582b555c9bff90350ce060047028d0cd9be8 (pins iceberg f3a157f81; full CI running)",
+  "comet": "681bdcbff68fe4ebb4a41bb682e2329266478c58 (fast lane merged on top of 6e7d582b5; full CI running)",
   "bench": "c43593010 (targeted decimal)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
@@ -279,7 +279,7 @@
    "item": "Comet fast CI lane for ws-* + full only on integration",
    "agent": "gemini rp-w3-fast-ci-r1",
    "branch": "adaptive-ci/ws-fast-ci",
-   "status": "ws-fast-ci 3fb61aecb: jvm-targeted failed, rust uses stable (must match full toolchain), no cargo test; sonnet subagent fixing"
+   "status": "MERGED 681bdcbff: fast lane ~30 min (rust 18m, jvm-targeted 30m), full validation skips ws-*; Maven retry + IPv4"
   },
   "W4": {
    "item": "B6 safe float all-match (iceberg)",
@@ -323,6 +323,7 @@
  },
  "providers_note": "gemini quota hit ~00:40 user-time (resets ~37min); claude sonnet subagents (Agent tool) used as fallback",
  "pending": [
-  "after decimal bench 37829425897: push B4 targeted bench with candidate comet 6e7d582b5 / iceberg f3a157f81 (dim_10pct, f_sorted dim_128, pos_deletes dim_10k, semi dim_128, topk10__f_unsorted, f_nan dim_128_spread)"
+  "after decimal bench 37829425897: push B4 targeted bench with candidate comet 6e7d582b5 / iceberg f3a157f81 (dim_10pct, f_sorted dim_128, pos_deletes dim_10k, semi dim_128, topk10__f_unsorted, f_nan dim_128_spread)",
+  "when iceberg 0c3d9eede green: bump Comet pin"
  ]
 }
