@@ -5,33 +5,19 @@
     "ref": "refs/heads/main"
   },
   "candidate": {
-    "comet": "c739c322ea591cd40f23fc44c164f18ab6d38499",
+    "comet": "bef150221ce10a332d7257b4d885288aa0d49016",
     "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4"
   },
   "suites": [
-    "strjoin",
-    "join",
-    "topk_minmax"
+    "join"
   ],
   "queries": {
-    "strjoin": [
-      "strjoin_int_shuffled_hash_plain_3000000",
-      "strjoin_long_shuffled_hash_plain_3000000",
-      "strjoin_int_shuffled_hash_distinct_3000000",
-      "strjoin_long_shuffled_hash_distinct_3000000",
-      "strjoin_int_shuffled_hash_distinct_100000",
-      "strjoin_long_shuffled_hash_distinct_100000"
-    ],
     "join": [
-      "join_shuffled_hash__f_sorted__dim_128",
-      "join_semi__f_sorted__dim_128",
-      "join_inner__f_unsorted__dim_128",
+      "join_inner__f_dec__dim_128",
+      "join_inner__f_dec__dim_10k",
+      "join_inner__f_dec__dim_128_spread",
+      "join_inner__f_sorted__dim_128",
       "join_inner__f_unsorted__dim_10pct"
-    ],
-    "topk_minmax": [
-      "topk10__f_sorted",
-      "topk10__f_unsorted",
-      "topk1000_desc__f_sorted"
     ]
   }
 }
