@@ -32,7 +32,7 @@ jobs:
         working-directory: native
         run: |
           set -o pipefail
-          cargo bench -p datafusion-comet --bench mergerows_cardinality_scaling --no-default-features 2>&1 | tee mergerows-scaling.txt
+          CARDINALITY_CANDIDATES_ONLY=1 cargo bench -p datafusion-comet --bench mergerows_cardinality_scaling --no-default-features 2>&1 | tee mergerows-scaling.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
