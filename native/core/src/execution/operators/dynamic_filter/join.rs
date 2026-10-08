@@ -343,66 +343,100 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
     let build_type = build_key.data_type(join.left().schema().as_ref())?;
     let probe_type = probe_key.data_type(join.right().schema().as_ref())?;
     if build_type != probe_type
-        || !matches!(
-            build_type,
-            DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::Date32
-                | DataType::Timestamp(TimeUnit::Microsecond, _)
-                | DataType::Decimal128(_, _)
-        )
+        || !(is_string_key_type(&build_type)
+            || matches!(
+                build_type,
+                DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::Date32
+                    | DataType::Timestamp(TimeUnit::Microsecond, _)
+                    | DataType::Decimal128(_, _)
+            ))
     {
         return Ok(Some(
-            "requires matching integer, date, timestamp or decimal keys",
+            "requires matching integer, date, timestamp, decimal or string keys",
         ));
     }
-    if matches!(build_type, DataType::Decimal128(_, _))
-        && (!is_direct_decimal_key(join.left(), build_key)
-            || !is_direct_decimal_key(join.right(), probe_key))
+    if (matches!(build_type, DataType::Decimal128(_, _)) || is_string_key_type(&build_type))
+        && (!is_direct_pruning_key(join.left(), build_key)
+            || !is_direct_pruning_key(join.right(), probe_key))
     {
-        return Ok(Some("computed decimal join keys are not supported"));
+        return Ok(Some(
+            "computed or annotated decimal/string join keys are not supported",
+        ));
     }
     // Decimal batches support exact bounds and membership on every probe backend.
-    // Date and timestamp keys are supported for native Iceberg probes only.
+    // Date, timestamp and string keys require native Iceberg probes.
     if !is_parquet_reader_key(probe_key, &join.right().schema())
         && !matches!(probe_type, DataType::Decimal128(_, _))
         && !reaches_iceberg_reader(join.right())
     {
         return Ok(Some(
-            "date and timestamp keys require a native Iceberg probe",
+            "date, timestamp and string keys require a native Iceberg probe",
         ));
     }
     Ok(None)
 }
 
-/// A cast materialized by an input projection is still a computed decimal key,
+/// String dictionary values compare by their bytes, never by dictionary indices.
+/// Keep the exact Arrow type match above, including the dictionary key/value types;
+/// Utf8/Utf8View coercions must be materialized before the join, not inferred here.
+fn is_string_key_type(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => true,
+        DataType::Dictionary(_, value) => {
+            matches!(
+                value.as_ref(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            )
+        }
+        _ => false,
+    }
+}
+
+/// A cast or padding expression in a projection is still a computed pruning key,
 /// even when the join itself sees only the projection's output column.
 /// Spark exchange/JVM inputs are already materialized columns in the join's domain.
 /// Reader attachment stops at those boundaries; it cannot reach a pre-cast scan.
 /// In particular, a lossless build upcast below a broadcast exchange cannot change
 /// the probe reader's scale, so Spark-side lineage tracking adds no safety here.
-fn is_direct_decimal_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalExpr>) -> bool {
+fn is_direct_pruning_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalExpr>) -> bool {
     use datafusion::physical_plan::filter::FilterExec;
 
     let Some(column) = key.downcast_ref::<Column>() else {
         return false;
     };
+    // Spark rejects collations/CHAR before serde; Arrow has no collation ID.
+    // If an external/native schema supplies semantic annotations, fail closed.
+    let schema = input.schema();
+    let field = schema.field(column.index());
+    if is_string_key_type(field.data_type())
+        && [
+            "__COLLATIONS",
+            "__CHAR_VARCHAR_TYPE_STRING",
+            "ARROW:extension:name",
+        ]
+        .iter()
+        .any(|name| field.metadata().contains_key(*name))
+    {
+        return false;
+    }
     if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
         return projection
             .expr()
             .get(column.index())
             .is_some_and(|projected| {
                 projected.expr.is::<Column>()
-                    && is_direct_decimal_key(projection.input(), &projected.expr)
+                    && is_direct_pruning_key(projection.input(), &projected.expr)
             });
     }
     if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
-        return !filter.has_projection() && is_direct_decimal_key(filter.input(), key);
+        return !filter.has_projection() && is_direct_pruning_key(filter.input(), key);
     }
     if let Some(filter) = input.downcast_ref::<FilterExec>() {
-        return filter.projection().is_none() && is_direct_decimal_key(filter.input(), key);
+        return filter.projection().is_none() && is_direct_pruning_key(filter.input(), key);
     }
     true
 }

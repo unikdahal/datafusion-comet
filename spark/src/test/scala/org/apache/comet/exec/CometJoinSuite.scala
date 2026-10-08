@@ -617,6 +617,41 @@ class CometJoinSuite extends CometTestBase {
     }
   }
 
+  test("join dynamic filter excludes CHAR padding domains") {
+    withTempDir { dir =>
+      val factPath = new java.io.File(dir, "char_fact").getAbsolutePath
+      val dimPath = new java.io.File(dir, "char_dim").getAbsolutePath
+      withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+        spark.sql(s"CREATE TABLE runtime_char_fact (id CHAR(4)) USING parquet LOCATION '$factPath'")
+        spark.sql(s"CREATE TABLE runtime_char_dim (id CHAR(6)) USING parquet LOCATION '$dimPath'")
+        spark.sql("INSERT INTO runtime_char_fact VALUES ('a'), ('ab'), (NULL)")
+        spark.sql("INSERT INTO runtime_char_dim VALUES ('a'), ('ab'), ('z'), (NULL)")
+      }
+      try {
+        withSQLConf(
+          SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+          CometConf.COMET_ENABLED.key -> "true",
+          CometConf.COMET_EXEC_ENABLED.key -> "true",
+          CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true") {
+          val (_, plan) = checkSparkAnswer(
+            "SELECT /*+ BROADCAST(d) */ f.id FROM runtime_char_fact f " +
+              "JOIN runtime_char_dim d ON f.id = d.id")
+          val joins = collect(plan) { case join: CometBroadcastHashJoinExec => join }
+          assert(joins.size == 1, s"Expected native CHAR comparison after padding: $plan")
+          joins.foreach { join =>
+            assert(!join.nativeOp.getHashJoin.getDynamicFilterEnabled)
+            assert(join.metrics("output_rows").value == 2L)
+            assert(join.metrics("dynamic_filter_join_filters_attached").value == 0L)
+            assert(join.metrics("dynamic_filter_join_rows_pruned").value == 0L)
+          }
+        }
+      } finally {
+        spark.sql("DROP TABLE IF EXISTS runtime_char_fact")
+        spark.sql("DROP TABLE IF EXISTS runtime_char_dim")
+      }
+    }
+  }
+
   test("join dynamic filter preserves Parquet schema conversion errors") {
     withTempPath { probePath =>
       withSQLConf(

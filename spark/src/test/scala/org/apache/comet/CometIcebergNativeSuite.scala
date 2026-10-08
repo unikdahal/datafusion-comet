@@ -1380,6 +1380,138 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("binary string join prunes Iceberg with truncated bounds and dictionary encoding") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+        SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+        for (dictionary <- Seq(false, true)) {
+          val table = s"test_cat.db.runtime_string_join_$dictionary"
+          val dimPath = new File(warehouseDir, s"string_dim_$dictionary").getAbsolutePath
+          spark.sql(s"""CREATE TABLE $table (id STRING, payload STRING) USING iceberg
+            TBLPROPERTIES ('format-version'='2', 'write.distribution-mode'='none',
+              'read.split.adaptive-size.enabled'='false',
+              'write.metadata.metrics.column.id'='truncate(16)',
+              'parquet.enable.dictionary'='$dictionary',
+              'write.parquet.row-group-size-bytes'='131072',
+              'write.parquet.compression-codec'='uncompressed')""")
+          try {
+            withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+              spark.range(120000L).coalesce(1).sortWithinPartitions("id")
+                .selectExpr(
+                  "concat('abcdefghijklmnop', lpad(CAST(id AS STRING), 6, '0')) AS id",
+                  "sha2(CAST(id AS STRING), 256) AS payload")
+                .write.format("iceberg").mode("append").saveAsTable(table)
+              spark.sql(s"""INSERT INTO $table VALUES
+                ('', 'empty'), ('é東京🙂', 'unicode'), (NULL, 'null')""")
+              spark.range(64L).filter("id % 2 = 0").coalesce(1)
+                .selectExpr("concat('abcdefghijklmnop', lpad(CAST(id AS STRING), 6, '0')) AS id")
+                .union(spark.sql("SELECT id FROM VALUES ('') , ('é東京🙂'), ('é東京🙂'), (NULL) AS d(id)"))
+                .write.parquet(dimPath)
+              // Verify that the adversarial fixture really has truncated manifest bounds.
+              val bounds = spark.read.format("iceberg").load(s"$table.files")
+                .select("lower_bounds", "upper_bounds", "file_path").collect()
+              assert(bounds.exists { row =>
+                val lower = row.getMap[Int, Array[Byte]](0).get(1)
+                val upper = row.getMap[Int, Array[Byte]](1).get(1)
+                lower.exists(bytes => new String(bytes, UTF_8) == "abcdefghijklmnop") &&
+                  upper.exists(bytes => new String(bytes, UTF_8) == "abcdefghijklmnoq")
+              }, "Expected truncated lower and rounded-up upper string bounds")
+              bounds.foreach { row =>
+                val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
+                  org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
+                    new org.apache.hadoop.fs.Path(row.getString(2)),
+                    spark.sessionState.newHadoopConf()))
+                try {
+                  val encodings = reader.getRowGroups.asScala.flatMap { group =>
+                    group.getColumns.asScala.filter(_.getPath.toDotString == "id")
+                      .flatMap(_.getEncodings.asScala)
+                  }
+                  val usesDictionary = encodings.exists(encoding =>
+                    encoding == org.apache.parquet.column.Encoding.RLE_DICTIONARY ||
+                      encoding == org.apache.parquet.column.Encoding.PLAIN_DICTIONARY)
+                  assert(usesDictionary == dictionary, s"Unexpected string encodings: $encodings")
+                } finally {
+                  reader.close()
+                }
+              }
+            }
+            spark.read.format("iceberg").option("split-size", "134217728").load(table)
+              .createOrReplaceTempView("string_fact")
+            spark.read.parquet(dimPath).createOrReplaceTempView("string_dim")
+            for (enabled <- Seq(false, true)) {
+              withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+                val query = "SELECT /*+ BROADCAST(d) */ f.id, f.payload " +
+                  "FROM string_fact f JOIN string_dim d ON f.id = d.id"
+                val (_, plan) = checkSparkAnswer(query)
+                val scans = collectIcebergNativeScans(plan)
+                val joins = collect(plan) { case join: CometBroadcastHashJoinExec => join }
+                assert(scans.size == 1 && joins.size == 1, s"Expected native string join:\n$plan")
+                assert(joins.head.metrics("output_rows").value == 35L)
+                val tasks = scans.head.metrics("iceberg_runtime_predicate_tasks").value
+                val pruned = scans.head.metrics("iceberg_runtime_row_groups_pruned").value +
+                  scans.head.metrics("iceberg_runtime_file_tasks_pruned").value
+                if (enabled) {
+                  assert(tasks > 0L && pruned > 0L, s"String Iceberg pruning missing: $plan")
+                } else {
+                  assert(tasks == 0L && pruned == 0L, s"Unexpected string pruning: $plan")
+                }
+              }
+            }
+            val charTable = s"runtime_string_char_dim_$dictionary"
+            val charPath = new File(warehouseDir, charTable).getAbsolutePath
+            withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+              spark.sql(s"CREATE TABLE $charTable (id CHAR(24)) USING parquet LOCATION '$charPath'")
+              spark.sql(s"INSERT INTO $charTable VALUES ('abcdefghijklmnop000000')")
+            }
+            try {
+              withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true") {
+                val (_, plan) = checkSparkAnswer(
+                  "SELECT /*+ BROADCAST(d) */ f.id FROM string_fact f " +
+                    s"JOIN $charTable d ON f.id = d.id")
+                val scans = collectIcebergNativeScans(plan)
+                assert(scans.size == 1, s"Expected native Iceberg scan for CHAR control: $plan")
+                assert(scans.head.metrics("iceberg_runtime_predicate_tasks").value == 0L)
+                assert(scans.head.metrics("iceberg_runtime_row_groups_pruned").value == 0L)
+                assert(scans.head.metrics("iceberg_runtime_file_tasks_pruned").value == 0L)
+                collect(plan) { case join: CometBroadcastHashJoinExec => join }.foreach { join =>
+                  assert(!join.nativeOp.getHashJoin.getDynamicFilterEnabled)
+                }
+              }
+            } finally {
+              spark.sql(s"DROP TABLE IF EXISTS $charTable")
+            }
+            if (isSpark40Plus) {
+              withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true") {
+                val query = "SELECT /*+ BROADCAST(d) */ f.id, f.payload " +
+                  "FROM string_fact f JOIN string_dim d " +
+                  "ON (f.id COLLATE UTF8_LCASE) = (d.id COLLATE UTF8_LCASE)"
+                val (_, plan) = checkSparkAnswer(query)
+                assert(collect(plan) { case join: CometBroadcastHashJoinExec => join }.isEmpty)
+                collectIcebergNativeScans(plan).foreach { scan =>
+                  assert(scan.metrics("iceberg_runtime_predicate_tasks").value == 0L)
+                  assert(scan.metrics("iceberg_runtime_row_groups_pruned").value == 0L)
+                  assert(scan.metrics("iceberg_runtime_file_tasks_pruned").value == 0L)
+                }
+              }
+            }
+          } finally {
+            spark.catalog.dropTempView("string_fact")
+            spark.catalog.dropTempView("string_dim")
+            spark.sql(s"DROP TABLE IF EXISTS $table")
+          }
+        }
+      }
+    }
+  }
+
   test("join runtime filter prunes native Iceberg row groups and bytes") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 

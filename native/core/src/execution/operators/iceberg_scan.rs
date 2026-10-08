@@ -25,11 +25,11 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::{ArrayRef, RecordBatch, RecordBatchOptions};
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::expressions::{CastExpr, Column};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{
@@ -164,7 +164,13 @@ impl IcebergScanExec {
                 }
                 _ => false,
             };
+            let string_matches = is_arrow_string_type(output.data_type())
+                && matches!(
+                    field.field_type.as_ref(),
+                    Type::Primitive(PrimitiveType::String)
+                );
             if !decimal_matches
+                && !string_matches
                 && !matches!(
                     (output.data_type(), field.field_type.as_ref()),
                     (DataType::Int32, Type::Primitive(PrimitiveType::Int))
@@ -574,8 +580,9 @@ where
                             let adapter = self
                                 .adapter_factory
                                 .create(Arc::clone(&self.schema), Arc::clone(&file_schema))?;
-                            let exprs = build_projection_expressions(&self.schema, &adapter)
-                                .map_err(|e| {
+                            let exprs =
+                                build_projection_expressions(&self.schema, &file_schema, &adapter)
+                                    .map_err(|e| {
                                     DataFusionError::Execution(format!(
                                         "Failed to build projection expressions: {}",
                                         e
@@ -670,13 +677,37 @@ impl fmt::Debug for RedactedProperties<'_> {
 /// that share the same file schema, avoiding repeated expression construction.
 fn build_projection_expressions(
     target_schema: &SchemaRef,
+    file_schema: &SchemaRef,
     adapter: &Arc<dyn PhysicalExprAdapter>,
 ) -> DFResult<Vec<Arc<dyn PhysicalExpr>>> {
     target_schema
         .fields()
         .iter()
         .enumerate()
-        .map(|(i, _field)| {
+        .map(|(i, field)| {
+            // These layouts all store the same UTF-8 bytes. Iceberg decodes String to
+            // Utf8; a native consumer may request a view, large offsets or a dictionary.
+            // Use Arrow's representation cast without applying Spark SQL type coercions.
+            // Only an unambiguous exact field name can bypass the general schema adapter.
+            let matches = file_schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, source)| source.name() == field.name())
+                .collect::<Vec<_>>();
+            if let [(index, source)] = matches.as_slice() {
+                if source.data_type() != field.data_type()
+                    && is_arrow_string_type(source.data_type())
+                    && is_arrow_string_type(field.data_type())
+                {
+                    let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new(field.name(), *index));
+                    return Ok(Arc::new(CastExpr::new(
+                        column,
+                        field.data_type().clone(),
+                        None,
+                    )) as Arc<dyn PhysicalExpr>);
+                }
+            }
             let col_expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new_with_schema(
                 target_schema.field(i).name(),
                 target_schema.as_ref(),
@@ -684,6 +715,17 @@ fn build_projection_expressions(
             adapter.rewrite(col_expr)
         })
         .collect::<DFResult<Vec<_>>>()
+}
+
+fn is_arrow_string_type(data_type: &DataType) -> bool {
+    let value_type = match data_type {
+        DataType::Dictionary(_, value) => value.as_ref(),
+        data_type => data_type,
+    };
+    matches!(
+        value_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
 }
 
 /// Adapt a batch to match the target schema using pre-built projection expressions.
@@ -1362,7 +1404,7 @@ mod tests {
             let adapter = factory
                 .create(Arc::clone(&target), Arc::clone(&physical))
                 .unwrap();
-            let result = super::build_projection_expressions(&target, &adapter);
+            let result = super::build_projection_expressions(&target, &physical, &adapter);
             if name == "a" {
                 let error = result
                     .expect_err("selected root must be ambiguous")

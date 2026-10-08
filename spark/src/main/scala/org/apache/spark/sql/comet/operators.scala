@@ -2778,6 +2778,33 @@ trait CometHashJoin {
     case _ => false
   }
 
+  // Catalyst represents CHAR as StringType plus metadata and may insert padding projections.
+  // Trace aliases to that metadata, including below exchanges. Stored Iceberg strings do not
+  // promise CHAR padding, so reader pruning must not compare them to padded join literals.
+  private def hasCharJoinKey(input: SparkPlan, keys: Seq[Expression]): Boolean = {
+    val references = keys.flatMap(_.references).map(_.exprId).toSet
+    def isChar(attribute: Attribute): Boolean =
+      attribute.metadata.contains("__CHAR_VARCHAR_TYPE_STRING") &&
+        attribute.metadata.getString("__CHAR_VARCHAR_TYPE_STRING")
+          .toLowerCase(Locale.ROOT).startsWith("char(")
+    if (keys.flatMap(_.references).exists(isChar) ||
+      input.output.exists(a => references.contains(a.exprId) && isChar(a))) {
+      true
+    } else {
+      val projects = input match {
+        case project: ProjectExec => project.projectList
+        case project: CometProjectExec => project.projectList
+        case _ => Seq.empty
+      }
+      val sourceKeys = if (projects.nonEmpty) {
+        projects.filter(p => references.contains(p.exprId))
+      } else {
+        keys
+      }
+      input.children.exists(child => hasCharJoinKey(child, sourceKeys))
+    }
+  }
+
   def doConvert(
       join: HashJoin,
       builder: Operator.Builder,
@@ -2877,7 +2904,10 @@ trait CometHashJoin {
         .setBuildSide(if (join.buildSide == BuildLeft) OperatorOuterClass.BuildSide.BuildLeft
         else OperatorOuterClass.BuildSide.BuildRight)
         .setNullAwareAntiJoin(isNullAwareAntiJoin)
-        .setDynamicFilterEnabled(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get(join.conf))
+        .setDynamicFilterEnabled(
+          CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get(join.conf) &&
+            !hasCharJoinKey(join.left, join.leftKeys) &&
+            !hasCharJoinKey(join.right, join.rightKeys))
       condition.foreach(joinBuilder.setCondition)
       Some(builder.setHashJoin(joinBuilder).build())
     } else {

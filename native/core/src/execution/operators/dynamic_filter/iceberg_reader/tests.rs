@@ -686,3 +686,48 @@ fn decimal_bounds_and_membership_translate_exactly() {
         )
     );
 }
+
+#[test]
+fn string_bounds_and_membership_translate_without_truncation() {
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::physical_expr::expressions::in_list;
+
+    for data_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
+        let schema = Schema::new(vec![Field::new("key", data_type.clone(), true)]);
+        let scalar = |value: &str| match data_type {
+            DataType::Utf8 => ScalarValue::Utf8(Some(value.into())),
+            DataType::LargeUtf8 => ScalarValue::LargeUtf8(Some(value.into())),
+            _ => ScalarValue::Utf8View(Some(value.into())),
+        };
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let values = ["", "abcdefghijklmnop-long-prefix", "é東京🙂"];
+        let list = in_list(
+            Arc::clone(&key),
+            values.iter().map(|value| lit(scalar(value))).collect(),
+            &false,
+            &schema,
+        )
+        .unwrap();
+        let lower: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::clone(&key),
+            Operator::GtEq,
+            lit(scalar("")),
+        ));
+        let upper: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            key,
+            Operator::LtEq,
+            lit(scalar("é東京🙂")),
+        ));
+        let range: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(lower, Operator::And, upper));
+        let both: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(range, Operator::And, list));
+        assert_eq!(
+            extract_iceberg_predicate(&both, 0, "id"),
+            Some(
+                Reference::new("id")
+                    .greater_than_or_equal_to(Datum::string(""))
+                    .and(Reference::new("id").less_than_or_equal_to(Datum::string("é東京🙂")))
+                    .and(Reference::new("id").is_in(values.map(Datum::string)))
+            )
+        );
+    }
+}

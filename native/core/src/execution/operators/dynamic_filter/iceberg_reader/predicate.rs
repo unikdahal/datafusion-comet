@@ -224,6 +224,17 @@ fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
         ScalarValue::Int32(Some(value)) => Some(Datum::int(*value)),
         ScalarValue::Int64(Some(value)) => Some(Datum::long(*value)),
         ScalarValue::Date32(Some(days)) => Some(Datum::date(*days)),
+        ScalarValue::Utf8(Some(value))
+        | ScalarValue::LargeUtf8(Some(value))
+        | ScalarValue::Utf8View(Some(value)) => Some(Datum::string(value.as_str())),
+        ScalarValue::Dictionary(_, value)
+            if matches!(
+                value.as_ref(),
+                ScalarValue::Utf8(_) | ScalarValue::LargeUtf8(_) | ScalarValue::Utf8View(_)
+            ) =>
+        {
+            scalar_to_datum(value)
+        }
         ScalarValue::Decimal128(Some(value), precision, scale) => {
             let scale = u32::try_from(*scale).ok()?;
             if scale > u32::from(*precision) {
@@ -260,6 +271,41 @@ fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
 mod tests {
     use super::*;
     use iceberg::spec::PrimitiveLiteral;
+
+    #[test]
+    fn string_scalars_preserve_utf8_bytes_and_exclude_nulls() {
+        for value in [
+            "".to_owned(),
+            "ascii".to_owned(),
+            "é東京🙂".to_owned(),
+            "prefix".repeat(4096),
+        ] {
+            for scalar in [
+                ScalarValue::Utf8(Some(value.clone())),
+                ScalarValue::LargeUtf8(Some(value.clone())),
+                ScalarValue::Utf8View(Some(value.clone())),
+            ] {
+                assert_eq!(scalar_to_datum(&scalar), Some(Datum::string(&value)));
+                let dictionary = ScalarValue::Dictionary(
+                    Box::new(arrow::datatypes::DataType::Int32),
+                    Box::new(scalar),
+                );
+                assert_eq!(scalar_to_datum(&dictionary), Some(Datum::string(&value)));
+            }
+        }
+        for scalar in [
+            ScalarValue::Utf8(None),
+            ScalarValue::LargeUtf8(None),
+            ScalarValue::Utf8View(None),
+        ] {
+            assert!(scalar_to_datum(&scalar).is_none());
+            let dictionary = ScalarValue::Dictionary(
+                Box::new(arrow::datatypes::DataType::Int32),
+                Box::new(scalar),
+            );
+            assert!(scalar_to_datum(&dictionary).is_none());
+        }
+    }
 
     #[test]
     fn decimal_scalars_preserve_unscaled_value_precision_and_scale() {

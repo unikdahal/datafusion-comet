@@ -1908,3 +1908,261 @@ async fn decimal_batch_filter_prunes_bounds_and_membership_without_losing_nulls_
         }
     }
 }
+
+fn string_key_types() -> Vec<DataType> {
+    let mut types = vec![DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View];
+    for value_type in types.clone() {
+        types.push(DataType::Dictionary(
+            Box::new(DataType::Int32),
+            Box::new(value_type),
+        ));
+    }
+    types
+}
+
+fn string_input(values: Vec<Option<&str>>, key_type: &DataType) -> Arc<dyn ExecutionPlan> {
+    let key = cast(&arrow::array::StringArray::from(values), key_type).unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("key", key_type.clone(), true)]));
+    memory_exec(vec![RecordBatch::try_new(schema, vec![key]).unwrap()])
+}
+
+fn string_iceberg_probe(key_type: &DataType) -> (tempfile::NamedTempFile, Arc<dyn ExecutionPlan>) {
+    use std::collections::HashMap;
+
+    use iceberg::scan::FileScanTask;
+    use iceberg::spec::{
+        DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
+    };
+
+    let schema = Arc::new(
+        IcebergSchema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "key", Type::Primitive(PrimitiveType::String)).into(),
+            ])
+            .build()
+            .unwrap(),
+    );
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let physical_schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, true).with_metadata(HashMap::from([(
+            parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+            "1".to_string(),
+        )])),
+    ]));
+    let values = vec![
+        Some(""),
+        Some("abcdefghijklmnop-first"),
+        Some("abcdefghijklmnop-last"),
+        Some("é東京🙂"),
+        Some("é東京🙂"),
+        Some("z-outside"),
+        None,
+    ];
+    let batch = RecordBatch::try_new(
+        Arc::clone(&physical_schema),
+        vec![Arc::new(arrow::array::StringArray::from(values))],
+    )
+    .unwrap();
+    let properties = WriterProperties::builder()
+        .set_max_row_group_size(2)
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(file.reopen().unwrap(), physical_schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let task = FileScanTask::builder()
+        .with_file_size_in_bytes(file.as_file().metadata().unwrap().len())
+        .with_start(0)
+        .with_length(0)
+        .with_data_file_path(file.path().to_string_lossy().into_owned())
+        .with_data_file_format(DataFileFormat::Parquet)
+        .with_schema(schema)
+        .with_project_field_ids(vec![1])
+        .with_case_sensitive(false)
+        .build()
+        .unwrap();
+    let probe: Arc<dyn ExecutionPlan> = Arc::new(
+        crate::execution::operators::IcebergScanExec::new(
+            file.path().to_string_lossy().into_owned(),
+            Arc::new(Schema::new(vec![Field::new(
+                "key",
+                key_type.clone(),
+                true,
+            )])),
+            Default::default(),
+            String::new(),
+            vec![task],
+            1,
+        )
+        .unwrap(),
+    );
+    (file, probe)
+}
+
+#[test]
+fn string_eligibility_requires_matching_types_and_native_iceberg() {
+    for build_type in string_key_types() {
+        for probe_type in string_key_types() {
+            let (_file, probe) = string_iceberg_probe(&probe_type);
+            let scan = probe
+                .downcast_ref::<crate::execution::operators::IcebergScanExec>()
+                .unwrap();
+            assert_eq!(scan.runtime_predicate_field_name(0), Some("key".into()));
+            let candidate = single_key_join_plans(
+                string_input(vec![Some("x")], &build_type),
+                probe,
+                PartitionMode::CollectLeft,
+            );
+            assert_eq!(
+                ineligible_reason(&candidate, &ConfigOptions::default())
+                    .unwrap()
+                    .is_none(),
+                build_type == probe_type,
+                "{build_type:?} / {probe_type:?}"
+            );
+        }
+        assert_skipped(
+            single_key_join_plans(
+                string_input(vec![Some("x")], &build_type),
+                string_input(vec![Some("x")], &build_type),
+                PartitionMode::CollectLeft,
+            ),
+            &ConfigOptions::default(),
+        );
+    }
+}
+
+#[test]
+fn string_annotations_and_visible_casts_disable_pruning() {
+    use std::collections::HashMap;
+
+    use datafusion::physical_expr::expressions::CastExpr;
+
+    for annotation in [
+        "__COLLATIONS",
+        "__CHAR_VARCHAR_TYPE_STRING",
+        "ARROW:extension:name",
+    ] {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, true)
+                .with_metadata(HashMap::from([(annotation.into(), "non-binary".into())])),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::StringArray::from(vec!["x"]))],
+        )
+        .unwrap();
+        let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
+        assert_skipped(
+            single_key_join_plans(memory_exec(vec![batch]), probe, PartitionMode::CollectLeft),
+            &ConfigOptions::default(),
+        );
+    }
+    for cast_build in [false, true] {
+        let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
+        let build = string_input(vec![Some("x")], &DataType::Utf8);
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let cast: Arc<dyn PhysicalExpr> = Arc::new(CastExpr::new(key, DataType::Utf8, None));
+        let (build, probe) = if cast_build {
+            (
+                Arc::new(ProjectionExec::try_new(vec![(cast, "key".into())], build).unwrap())
+                    as Arc<dyn ExecutionPlan>,
+                probe,
+            )
+        } else {
+            (
+                build,
+                Arc::new(ProjectionExec::try_new(vec![(cast, "key".into())], probe).unwrap())
+                    as Arc<dyn ExecutionPlan>,
+            )
+        };
+        assert_skipped(
+            single_key_join_plans(build, probe, PartitionMode::CollectLeft),
+            &ConfigOptions::default(),
+        );
+    }
+}
+
+#[tokio::test]
+async fn string_reader_join_preserves_nulls_duplicates_and_binary_values() {
+    for key_type in string_key_types() {
+        let (_file, probe) = string_iceberg_probe(&key_type);
+        let build = string_input(
+            vec![
+                Some(""),
+                Some("abcdefghijklmnop-last"),
+                Some("é東京🙂"),
+                Some("é東京🙂"),
+                None,
+            ],
+            &key_type,
+        );
+        let plain = single_key_join_plans(
+            Arc::clone(&build),
+            Arc::clone(&probe),
+            PartitionMode::CollectLeft,
+        );
+        let candidate = single_key_join_plans(build, probe, PartitionMode::CollectLeft);
+        let wrapper = DynamicFilterJoinExec::try_new(&candidate, &ConfigOptions::default())
+            .unwrap()
+            .unwrap();
+        let runtime = wrapper.build_runtime_join().unwrap();
+        assert!(runtime.reader_filter_attached, "{key_type:?}");
+        let session = SessionContext::new();
+        let expected = collect(Arc::new(plain), session.task_ctx()).await.unwrap();
+        let filtered: Arc<dyn ExecutionPlan> = Arc::new(wrapper);
+        let actual = collect(Arc::clone(&filtered), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(row_count(&actual), 6, "{key_type:?}");
+        assert_eq!(
+            batches_to_sort_string(&actual),
+            batches_to_sort_string(&expected)
+        );
+        assert_eq!(metric(&filtered, "dynamic_filter_join_filters_attached"), 1);
+    }
+}
+
+#[tokio::test]
+async fn string_pruning_keeps_join_type_rules_and_empty_domains() {
+    let session = SessionContext::new();
+    for join_type in [
+        JoinType::Inner,
+        JoinType::LeftSemi,
+        JoinType::RightSemi,
+        JoinType::Left,
+        JoinType::Right,
+        JoinType::Full,
+        JoinType::LeftAnti,
+        JoinType::RightAnti,
+    ] {
+        for values in [vec![Some("é東京🙂"), None], vec![None], vec![]] {
+            let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
+            let build = string_input(values, &DataType::Utf8);
+            let candidate = single_key_join_plans(build, probe, PartitionMode::CollectLeft)
+                .builder()
+                .with_type(join_type)
+                .build()
+                .unwrap();
+            let eligible = matches!(
+                join_type,
+                JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi
+            );
+            let wrapper =
+                DynamicFilterJoinExec::try_new(&candidate, &ConfigOptions::default()).unwrap();
+            assert_eq!(wrapper.is_some(), eligible, "{join_type}");
+            if let Some(wrapper) = wrapper {
+                let expected = collect(Arc::new(candidate), session.task_ctx())
+                    .await
+                    .unwrap();
+                let actual = collect(Arc::new(wrapper), session.task_ctx())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    batches_to_sort_string(&actual),
+                    batches_to_sort_string(&expected)
+                );
+            }
+        }
+    }
+}
