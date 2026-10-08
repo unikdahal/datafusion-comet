@@ -1,16 +1,16 @@
 {
- "updated": "2026-10-08T16:20Z",
+ "updated": "2026-10-08T16:45Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
-  "comet": "8cd4d9a98",
-  "bench": "51478edbc",
+  "comet": "c739c322ea591cd40f23fc44c164f18ab6d38499",
+  "bench": "21f15844d",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
  "ci": {
   "comet_validation": {
-   "run": 37780938158,
-   "sha": "8cd4d9a98",
-   "result": "success"
+   "run": 37798876685,
+   "sha": "c739c322e",
+   "result": "success all jobs"
   },
   "iceberg_validation": {
    "run": 37778485388,
@@ -78,10 +78,19 @@
    "wall": "1h46m (was ~4h)",
    "result": "candidate 0 validation failures; baseline 120 (string-join bug #42); report exit 1 by design on any validation failure",
    "delta": "baseline main 5db0efe69. shuffle-probe pruning restored (16M->128 rows); q17/q03 18M rows skipped at scan; count_all_evolved 1.03 (was 0.88 = noise); extra_predicate 1.01; strjoin 1.00; persistent: dim_empty 0.94 (fixed overhead), f_nan 0.97 (float guard cost, accepted), dec_dim_10k 0.96 (unconfirmed)."
+  },
+  {
+   "run": "pending (21f15844d)",
+   "type": "targeted",
+   "pins": {
+    "comet": "c739c322e",
+    "iceberg": "157cf6475"
+   },
+   "queries": "13 (strjoin shuffled_hash 3M non-selective + 100k selective, join shuffled_hash/semi/unsorted, topk)"
   }
  ],
  "tasks": [
-  "rp-adaptive-bypass-r1"
+  "rp-b1-decimal-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -192,12 +201,12 @@
   {
    "id": "P1",
    "item": "adaptive bypass + zero-copy batch filter",
-   "status": "impl rp-adaptive-bypass-r1"
+   "status": "landed 8e7073b1d+c739c322e (65,536-row window, <10% pruned -> bypass, sample every 16th batch, generation reset, bypass_switches metric); CI green; targeted bench 21f15844d running"
   },
   {
    "id": "B1",
    "item": "string/decimal join-key pruning eligibility",
-   "status": "design accepted (reports/b1-string-decimal-design.md). Phase1 decimal (strict build==probe type, no rescale) queued after P1 (join.rs overlap). Phase2 string: inclusive pruning only, keep file_always_matches off for strings (lead: spec-incremented truncated upper bounds are sound, but conservative choice kept), reject non-UTF8_BINARY collation natively too."
+   "status": "phase1 decimal impl rp-b1-decimal-r1 (codex)"
   },
   {
    "id": "B2",
