@@ -104,3 +104,9 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Tasks: join+topk (codex), layouts+tpch (gemini), strjoin+fuzz (gemini). Outputs rp-work/reports/rca/.
 - Then: fixes (codex) → targeted bench → re-verify on next full campaign. TODO: emit ledger automatically in bench report job (after shard task lands).
 - 14:55 UTC heartbeat: Comet 8cd4d9a98 GREEN. First sharded campaign 37788815352 running (pins 434d18333/1e3f2a868). Repro runs + 3 RCA tasks + shard task in flight.
+
+## 2026-10-08 15:20 UTC
+- M1 CONFIRMED via GHA A/B (main+tests: 6 fail incl E2E SQL; +fix: 18 pass). Filed fork issue unikdahal/datafusion-comet#42 (per standing instruction; untracked upstream).
+- RCA layouts/tpch + strjoin/fuzz done (reports/rca/). fuzz: candidate 4000/4000 exact.
+- P1: adaptive bypass + zero-copy for join dynamic filter (codex rp-adaptive-bypass-r1).
+- Deferred: tpch clustered under-delivery (layout-inherent), Range native, cross-shuffle pruning. count_all__f_evolved recheck in sharded campaign 37788815352.
