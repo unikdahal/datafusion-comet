@@ -95,7 +95,7 @@
   "rp-b1-decimal-r2",
   "rp-w2-b4-impl-r1",
   "rp-w3-fast-ci-r1",
-  "rp-w4-b6-impl-r2",
+  "rp-w4-b6-impl-r3",
   "rp-w5-upstream-audit-r2",
   "rp-w6-b3-impl-r1",
   "rp-w7-b2-impl-r1"
@@ -265,7 +265,7 @@
   },
   "W4": {
    "item": "B6 safe float all-match (iceberg)",
-   "agent": "glm-5.3-free rp-w4-b6-impl-r2",
+   "agent": "gemini rp-w4-b6-impl-r3",
    "branch": "adaptive-ci/ws-b6-float-allmatch"
   },
   "W5": {

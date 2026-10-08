@@ -126,3 +126,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Providers: codex, gemini-3.8-flash-high ×4, glm-5.3-free ×2 (grok disabled).
 - Next after merges: combined targeted bench (decimal, B4, B3, B2, B6 queries) → full sharded campaign.
 - W5 re-dispatched to opencode/big-pickle (glm-5.3-free channel unavailable).
+- W4 re-dispatched to gemini (glm-5.3-free unavailable; avoid tokenrouter free channel).
