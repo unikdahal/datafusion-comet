@@ -3120,6 +3120,34 @@ impl PhysicalPlanner {
         ))
     }
 
+    /// Builds the child expression of a Min or Max aggregate. When `direct_minmax` is set
+    /// and the child is a plain column whose type already matches one of the
+    /// runtime-predicate key types (Int32, Int64, Date32, Timestamp(Microsecond)), the
+    /// column is passed through so the aggregate can use it directly; every other child
+    /// is cast to the aggregate's return type first.
+    fn direct_minmax_expr(
+        direct_minmax: bool,
+        child: Arc<dyn PhysicalExpr>,
+        datatype: DataType,
+        schema: &SchemaRef,
+    ) -> Result<Arc<dyn PhysicalExpr>, ExecutionError> {
+        if direct_minmax
+            && child.is::<Column>()
+            && matches!(
+                datatype,
+                DataType::Int32
+                    | DataType::Int64
+                    | DataType::Date32
+                    | DataType::Timestamp(TimeUnit::Microsecond, _)
+            )
+            && child.data_type(schema.as_ref())? == datatype
+        {
+            Ok(child)
+        } else {
+            Ok(Arc::new(CastExpr::new(child, datatype, None)))
+        }
+    }
+
     /// Create a DataFusion physical aggregate expression from Spark physical aggregate expression
     fn create_agg_expr(
         &self,
@@ -3150,21 +3178,7 @@ impl PhysicalPlanner {
                 let child = self.create_expr(expr.child.as_ref().unwrap(), Arc::clone(&schema))?;
                 let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
                 let func = min_max_udaf(&datatype, false);
-                let child: Arc<dyn PhysicalExpr> = if direct_minmax
-                    && child.is::<Column>()
-                    && matches!(
-                        datatype,
-                        DataType::Int32
-                            | DataType::Int64
-                            | DataType::Date32
-                            | DataType::Timestamp(TimeUnit::Microsecond, _)
-                    )
-                    && child.data_type(schema.as_ref())? == datatype
-                {
-                    child
-                } else {
-                    Arc::new(CastExpr::new(child, datatype, None))
-                };
+                let child = Self::direct_minmax_expr(direct_minmax, child, datatype, &schema)?;
 
                 AggregateExprBuilder::new(func, vec![child])
                     .schema(schema)
@@ -3178,21 +3192,7 @@ impl PhysicalPlanner {
                 let child = self.create_expr(expr.child.as_ref().unwrap(), Arc::clone(&schema))?;
                 let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
                 let func = min_max_udaf(&datatype, true);
-                let child: Arc<dyn PhysicalExpr> = if direct_minmax
-                    && child.is::<Column>()
-                    && matches!(
-                        datatype,
-                        DataType::Int32
-                            | DataType::Int64
-                            | DataType::Date32
-                            | DataType::Timestamp(TimeUnit::Microsecond, _)
-                    )
-                    && child.data_type(schema.as_ref())? == datatype
-                {
-                    child
-                } else {
-                    Arc::new(CastExpr::new(child, datatype, None))
-                };
+                let child = Self::direct_minmax_expr(direct_minmax, child, datatype, &schema)?;
 
                 AggregateExprBuilder::new(func, vec![child])
                     .schema(schema)
