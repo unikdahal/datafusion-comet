@@ -34,6 +34,57 @@ import resolve_revisions
 
 
 class HarnessChecks(unittest.TestCase):
+    def test_native_scan_coverage_distinguishes_partial_fallback_and_repeated_tables(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "plans/layouts/candidate_on/digest.txt"
+            path.parent.mkdir(parents=True)
+            dimension = "CometIcebergNativeScan [id#5], /warehouse/dim/metadata/v1.metadata.json, dim, 4\n"
+            fact = "CometIcebergNativeScan [id#1], /warehouse/fact/metadata/v1.metadata.json, fact, 256\n"
+            self.assertIsNone(
+                summarize.native_scan_coverage(
+                    root, "layouts", "candidate_on", "digest"
+                )
+            )
+            path.write_text("BatchScan fact\n" + dimension)
+            partial = summarize.native_scan_coverage(
+                root, "layouts", "candidate_on", "digest"
+            )
+            path.write_text(fact + dimension)
+            full = summarize.native_scan_coverage(
+                root, "layouts", "candidate_on", "digest"
+            )
+            self.assertNotEqual(partial, full)
+            path.write_text(dimension + fact)
+            self.assertEqual(
+                summarize.native_scan_coverage(
+                    root, "layouts", "candidate_on", "digest"
+                ),
+                full,
+            )
+            path.write_text(fact + fact + dimension)
+            self.assertNotEqual(
+                summarize.native_scan_coverage(
+                    root, "layouts", "candidate_on", "digest"
+                ),
+                full,
+            )
+            path.write_text("BatchScan fact\n")
+            self.assertEqual(
+                summarize.native_scan_coverage(
+                    root, "layouts", "candidate_on", "digest"
+                ),
+                (),
+            )
+            path.write_text("CometIcebergNativeScan [id#1], unfamiliar format\n")
+            self.assertIsNone(
+                summarize.native_scan_coverage(
+                    root, "layouts", "candidate_on", "digest"
+                )
+            )
+
     def test_warmup_gate_rejects_failures_missing_duplicates_and_different_sql(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -111,7 +111,12 @@ Reader bytes, file tasks, rows, file pruning, row-group pruning, live pruning, p
 refreshes and decoder rebuilds are reported per variant. Missing counters are `n/a`, never
 zero. All exposed SQL metrics are captured by physical stage and physical plans are saved.
 Reader byte totals quantify requested ranged I/O; scheduling-dependent pruning is shown
-with a range. Queries with a physical fallback are listed so timing changes can be assessed
+with a range. Byte and output-row counters cover native Iceberg scans only. Main can fall
+back to Spark for a fact scan while retaining a counted native dimension scan; its smaller
+native byte total then measures a different scope. The report compares metadata locations
+and repeated-table counts in saved plans, labels different or unknown native scan coverage,
+and lists partial-coverage changes. Such byte totals cannot establish an I/O gain or increase;
+correct timings still compare the complete query. Queries with a physical fallback are listed so timing changes can be assessed
 against the plan that actually ran.
 
 The `matched-report` artifact contains the full report; `matched-<suite>` artifacts contain

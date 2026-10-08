@@ -19,11 +19,12 @@
 """Validate complete matched results and report paired JVM-round timing intervals."""
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 import json
 import math
 from pathlib import Path
 import random
+import re
 import statistics
 
 from lib import VARIANTS
@@ -127,6 +128,34 @@ def load_results(directory):
         with path.open(encoding="utf-8") as source:
             records.extend(json.loads(line) for line in source if line.strip())
     return records
+
+
+def native_scan_coverage(directory, suite, variant, sql_digest):
+    """Identify counted native scans, including repeats of one table in a join.
+
+    A dimension can remain native while its fact scan falls back to Spark. Counting
+    native scans alone therefore cannot establish comparable reader-byte coverage.
+    Metadata locations identify the shared immutable tables in captured plans.
+    An unavailable or unfamiliar plan remains unknown, never an empty scan set.
+    """
+    if sql_digest is None:
+        return None
+    path = directory / "plans" / suite / variant / f"{sql_digest}.txt"
+    try:
+        plan = path.read_text()
+    except OSError:
+        return None
+    if not plan.strip():
+        return None
+    locations = []
+    for line in plan.splitlines():
+        if "CometIcebergNativeScan" not in line:
+            continue
+        match = re.search(r", ([^,\n]+\.metadata\.json),", line)
+        if match is None:
+            return None
+        locations.append(match.group(1))
+    return tuple(sorted(Counter(locations).items()))
 
 
 def validate(records, directory, suites, rounds, invalid_queries=None):
@@ -468,6 +497,7 @@ def main(argv=None):
             )
             print(f"| {variant} | {correct} | {pruned} | {fallbacks} |")
     fallback = []
+    coverage_changes = []
     regression = []
     for suite in suites:
         if suite == "fuzz":
@@ -503,14 +533,50 @@ def main(argv=None):
         print(
             "depends on task scheduling and is summarized as a distribution. Every SQL stage metric"
         )
-        print("and each physical plan is included in the artifact.\n")
+        print("and each physical plan is included in the artifact.")
         print(
-            "| query | variant | SQL ms | plan ms | exec ms, IQR | MiB read | rows out | splits | predicate tasks | files pruned | RG pruned | live RG, min/max | refreshes | decoder rebuilds |"
+            "Bytes and output rows cover native Iceberg scans only, including dimension scans."
         )
-        print("|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---|---:|---:|")
+        print(
+            "A Spark fact-scan fallback can leave a small native dimension counter. Compare bytes"
+        )
+        print(
+            "only after checking the counted native tables; different or unknown coverage is not an I/O gain or increase.\n"
+        )
+        print(
+            "| query | variant | SQL ms | plan ms | exec ms, IQR | native MiB read | native rows out | native scan coverage vs main-on | splits | predicate tasks | files pruned | RG pruned | live RG, min/max | refreshes | decoder rebuilds |"
+        )
+        print("|---|---|---:|---:|---|---:|---:|---|---:|---:|---:|---:|---|---:|---:|")
         for _, query in [key for key in queries if key[0] == suite]:
+            query_runs = [
+                r for variant in VARIANTS for r in grouped[(suite, query, variant)]
+            ]
+            digests = {r.get("sql_sha256") for r in query_runs}
+            digest = next(iter(digests)) if len(digests) == 1 else None
+            main_coverage = native_scan_coverage(
+                args.directory, suite, "baseline_on", digest
+            )
+            candidate_coverage = native_scan_coverage(
+                args.directory, suite, "candidate_on", digest
+            )
+            if (
+                main_coverage is not None
+                and candidate_coverage is not None
+                and main_coverage != candidate_coverage
+            ):
+                coverage_changes.append(f"{suite}/{query}")
             for variant in VARIANTS:
                 runs = grouped[(suite, query, variant)]
+                coverage = native_scan_coverage(args.directory, suite, variant, digest)
+                scope = (
+                    "unknown"
+                    if main_coverage is None or coverage is None
+                    else (
+                        "same native tables"
+                        if coverage == main_coverage
+                        else "different native tables"
+                    )
+                )
                 values = [r["exec_ms"] for r in runs if "exec_ms" in r]
                 iqr = (
                     "n/a"
@@ -529,12 +595,17 @@ def main(argv=None):
                     else f"{fmt(statistics.median(live))} [{min(live)}, {max(live)}]"
                 )
                 print(
-                    f"| {query} | {variant} | {fmt(med('sql_ms'))} | {fmt(med('plan_ms'))} | {iqr} | {mib(med('bytes_scanned'))} | {fmt(med('output_rows'))} | {fmt(med('num_splits'))} | {fmt(med('iceberg_runtime_predicate_tasks'))} | {fmt(med('iceberg_runtime_file_tasks_pruned'))} | {fmt(med('iceberg_runtime_row_groups_pruned'))} | {live_range} | {fmt(med('iceberg_runtime_predicate_refreshes'))} | {fmt(med('iceberg_runtime_decoder_rebuilds'))} |"
+                    f"| {query} | {variant} | {fmt(med('sql_ms'))} | {fmt(med('plan_ms'))} | {iqr} | {mib(med('bytes_scanned'))} | {fmt(med('output_rows'))} | {scope} | {fmt(med('num_splits'))} | {fmt(med('iceberg_runtime_predicate_tasks'))} | {fmt(med('iceberg_runtime_file_tasks_pruned'))} | {fmt(med('iceberg_runtime_row_groups_pruned'))} | {live_range} | {fmt(med('iceberg_runtime_predicate_refreshes'))} | {fmt(med('iceberg_runtime_decoder_rebuilds'))} |"
                 )
     print("\n## Queries with at least one physical fallback\n")
     print("Inspect the captured plans before attributing timing changes to pruning.\n")
     for query in fallback:
         print(f"- {query}")
+    print("\n## Queries with different counted native scan coverage\n")
+    print(
+        "Correct timing comparisons remain valid, but native-only byte totals cannot measure the cross-implementation I/O difference. Inspect both plans, including partial Spark fallbacks.\n"
+    )
+    print("\n".join(f"- {query}" for query in coverage_changes) or "None observed.")
     print("\n## Possible regressions (entire interval below 0.9x)\n")
     print("\n".join(f"- {r}" for r in regression) or "None observed.")
     if failures:
