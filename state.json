@@ -1,0 +1,8 @@
+{"updated":"2026-10-08T09:45Z",
+ "heads":{"iceberg":"949cc88acb6d5e5d47e4a4362075c8bc5afb8314","comet":"92bba61b68ec44f305e0519f507cd02ae4546ee0","bench":"163b5c235e914f8a22af834e26e85b0a6a8ea6b0","apache_main":"f80042f78715e5a009352f1582f6c246a5f96131"},
+ "ci":{"comet_validation":{"run":37755479696,"sha":"92bba61b6","status":"in_progress"},"iceberg_validation":null},
+ "bench":[{"run":37703972798,"result":"baseline-only failures (280)","candidate_failures":0},
+          {"run":37746953413,"pins":{"comet":"4226d7e3","iceberg":"288a0ee"},"result":"cancelled-superseded"},
+          {"run":37758359536,"pins":{"comet":"92bba61b6","iceberg":"949cc88"},"status":"running"}],
+ "tasks":["rp-iceberg-ci-wf-r1","rp-iceberg-review-r1","rp-comet-review-r1"],
+ "missing_evidence":["runtime-pruning-close-inspection-20261008.md (codex cloud)"]}
