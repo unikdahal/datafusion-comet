@@ -1,16 +1,16 @@
 {
- "updated": "2026-10-08T15:35Z",
+ "updated": "2026-10-08T14:55Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
-  "bench": "163b5c235e914f8a22af834e26e85b0a6a8ea6b0",
+  "bench": "51478edbc",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
  "ci": {
   "comet_validation": {
    "run": 37780938158,
    "sha": "8cd4d9a98",
-   "status": "in_progress"
+   "result": "success"
   },
   "iceberg_validation": {
    "run": 37778485388,
@@ -65,6 +65,16 @@
      "join_inner__f_unsorted__dim_empty 0.88x"
     ]
    }
+  },
+  {
+   "run": 37788815352,
+   "harness": "51478edbc (sharded: 18 shard jobs + data jobs, build cache)",
+   "pins": {
+    "comet": "434d18333",
+    "iceberg": "1e3f2a868"
+   },
+   "status": "running",
+   "note": "lacks F4 157cf6475 (cancellation-only)"
   }
  ],
  "tasks": [

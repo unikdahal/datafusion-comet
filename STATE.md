@@ -103,3 +103,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Every query: ledger sorted slowest→fastest, RCA line + classification, deep dives on CI<1, pruning-costs-time, under-delivers, >10x suspicious.
 - Tasks: join+topk (codex), layouts+tpch (gemini), strjoin+fuzz (gemini). Outputs rp-work/reports/rca/.
 - Then: fixes (codex) → targeted bench → re-verify on next full campaign. TODO: emit ledger automatically in bench report job (after shard task lands).
+- 14:55 UTC heartbeat: Comet 8cd4d9a98 GREEN. First sharded campaign 37788815352 running (pins 434d18333/1e3f2a868). Repro runs + 3 RCA tasks + shard task in flight.
