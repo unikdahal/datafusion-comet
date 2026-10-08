@@ -1,0 +1,40 @@
+name: MergeRows candidate scaling benchmark
+
+on:
+  push:
+    branches:
+      - bench/mergerows-cardinality-designs
+    paths:
+      - native/core/benches/mergerows_cardinality_scaling.rs
+      - native/core/Cargo.toml
+      - .github/workflows/mergerows-cardinality-fast-scaling.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scaling:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: mergerows-design-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Measure 5M-row CPU and allocator bytes
+        working-directory: native
+        run: |
+          set -o pipefail
+          cargo bench -p datafusion-comet --bench mergerows_cardinality_scaling --no-default-features 2>&1 | tee mergerows-scaling.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mergerows-candidate-scaling-results
+          path: native/mergerows-scaling.txt
