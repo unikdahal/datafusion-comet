@@ -92,7 +92,6 @@
   }
  ],
  "tasks": [
-  "rp-b4-design-r1",
   "rp-b1-decimal-r2"
  ],
  "missing_evidence": [
@@ -221,7 +220,7 @@
   {
    "id": "B4",
    "item": "reader-level cost gate when filtering saves no bytes (dim_10pct)",
-   "status": "CONFIRMED regression (3 runs). Reader row filter on random 10% match: 0 bytes saved, +40ms. Design rp-b4-design-r1 (gemini)."
+   "status": "design accepted (Candidate C: advisory runtime predicate gets parquet row_filter only if it pruned RGs/pages in that file; planned + delete predicates unchanged). Root cause: Auto->Mask policy decodes all payload anyway. Impl queued for codex after decimal. Validate: dim_10pct, sorted dim_128, pos_deletes dim_10k, semi, topk10__f_unsorted (risk)."
   },
   {
    "id": "B5",

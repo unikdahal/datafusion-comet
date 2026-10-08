@@ -119,3 +119,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 16:40 UTC: B1 decimal pushed 901348bea/1bfd6239b; uncommitted Spark lineage-guard WIP in comet-decimal; codex limited until 17:07 UTC -> resume.
 - 16:55 UTC: targeted bench 37807233835: P1 accepted (eval cost 4-6x lower, selective pruning intact). dim_10pct regression confirmed -> B4 design (gemini). Decimal continuation waits for codex reset 17:07.
 - 17:10 UTC: Comet branch head 1bfd6239b RED (decimal). rp-b1-decimal-r2 fixing. Last green Comet: c739c322e.
+- B4 design accepted (gate advisory row_filter on actual RG/page pruning). Queued after decimal.
