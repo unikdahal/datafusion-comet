@@ -17,6 +17,7 @@
 
 //! Native Iceberg table scan operator using iceberg-rust
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
@@ -113,12 +114,6 @@ impl IcebergScanExec {
             runtime_task_order: None,
             metrics,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn runtime_predicate_field_name(&self, output_index: usize) -> Option<String> {
-        self.runtime_predicate_field(output_index)
-            .map(|(_, name)| name)
     }
 
     /// The Iceberg field id and name behind output column `output_index`, when every task maps
@@ -571,9 +566,9 @@ where
                     let file_schema = batch.schema();
 
                     // Batches from the same file share their schema Arc.
-                    let projection_exprs = match &self.cached {
+                    let projection_exprs: Cow<'_, [Arc<dyn PhysicalExpr>]> = match &self.cached {
                         Some(cached) if Arc::ptr_eq(&cached.file_schema, &file_schema) => {
-                            &cached.projection_exprs
+                            Cow::Borrowed(&cached.projection_exprs)
                         }
                         _ => {
                             let adapter = self
@@ -588,13 +583,13 @@ where
                                 })?;
                             self.cached = Some(CachedProjection {
                                 file_schema,
-                                projection_exprs: exprs,
+                                projection_exprs: exprs.clone(),
                             });
-                            &self.cached.as_ref().unwrap().projection_exprs
+                            Cow::Owned(exprs)
                         }
                     };
 
-                    adapt_batch_with_expressions(batch, &self.schema, projection_exprs).map_err(
+                    adapt_batch_with_expressions(batch, &self.schema, &projection_exprs).map_err(
                         |e| DataFusionError::Execution(format!("Batch adaptation failed: {}", e)),
                     )
                 })();
@@ -846,6 +841,13 @@ mod tests {
     use iceberg::spec::{DataFileFormat, Schema};
 
     use super::IcebergScanExec;
+
+    /// The runtime predicate field name behind output column `output_index`, resolved the
+    /// way the aggregate dynamic-filter planner resolves it.
+    fn runtime_predicate_field_name(scan: &IcebergScanExec, output_index: usize) -> Option<String> {
+        scan.runtime_predicate_field(output_index)
+            .map(|(_, name)| name)
+    }
 
     #[test]
     fn resetting_scan_detaches_previous_execution_runtime_predicate() {
@@ -1156,8 +1158,8 @@ mod tests {
         .unwrap();
         // A projected metadata column keeps its output position, so the data
         // column after it still maps to its own field id.
-        assert_eq!(scan.runtime_predicate_field_name(0), None);
-        assert_eq!(scan.runtime_predicate_field_name(1), Some("value".into()));
+        assert_eq!(runtime_predicate_field_name(&scan, 0), None);
+        assert_eq!(runtime_predicate_field_name(&scan, 1), Some("value".into()));
     }
 
     #[test]
@@ -1201,7 +1203,7 @@ mod tests {
                 1,
             )
             .unwrap();
-            assert_eq!(scan.runtime_predicate_field_name(0).is_some(), expected);
+            assert_eq!(runtime_predicate_field_name(&scan, 0).is_some(), expected);
         }
     }
 
@@ -1244,28 +1246,30 @@ mod tests {
             .unwrap()
         };
         assert_eq!(
-            scan(DataType::Int64, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            runtime_predicate_field_name(&scan(DataType::Int64, vec![task(vec![2])]), 0),
             Some("value".into())
         );
         assert_eq!(
-            scan(DataType::Int32, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            runtime_predicate_field_name(&scan(DataType::Int32, vec![task(vec![2])]), 0),
             None
         );
         assert_eq!(
-            scan(DataType::UInt64, vec![task(vec![2])]).runtime_predicate_field_name(0),
+            runtime_predicate_field_name(&scan(DataType::UInt64, vec![task(vec![2])]), 0),
             None
         );
         assert_eq!(
-            scan(DataType::Int64, vec![task(vec![2]), task(vec![1])])
-                .runtime_predicate_field_name(0),
+            runtime_predicate_field_name(
+                &scan(DataType::Int64, vec![task(vec![2]), task(vec![1])]),
+                0,
+            ),
             None
         );
         assert_eq!(
-            scan(DataType::Int64, vec![task(vec![2])]).runtime_predicate_field_name(1),
+            runtime_predicate_field_name(&scan(DataType::Int64, vec![task(vec![2])]), 1),
             None
         );
         assert_eq!(
-            scan(DataType::Int64, vec![]).runtime_predicate_field_name(0),
+            runtime_predicate_field_name(&scan(DataType::Int64, vec![]), 0),
             None
         );
 
@@ -1300,7 +1304,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            scan(DataType::Int64, vec![nested_task]).runtime_predicate_field_name(0),
+            runtime_predicate_field_name(&scan(DataType::Int64, vec![nested_task]), 0),
             None
         );
 
@@ -1330,7 +1334,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            scan(DataType::Int32, vec![case_task]).runtime_predicate_field_name(0),
+            runtime_predicate_field_name(&scan(DataType::Int32, vec![case_task]), 0),
             None
         );
     }
