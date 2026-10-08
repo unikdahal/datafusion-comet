@@ -156,7 +156,20 @@ impl IcebergScanExec {
             if bound_field.id != current_id {
                 return None;
             }
-            if !matches!(
+            let decimal_matches = match (output.data_type(), field.field_type.as_ref()) {
+                (
+                    DataType::Decimal128(precision, scale),
+                    Type::Primitive(PrimitiveType::Decimal {
+                        precision: field_precision,
+                        scale: field_scale,
+                    }),
+                ) => {
+                    u32::from(*precision) == *field_precision
+                        && u32::try_from(*scale).ok() == Some(*field_scale)
+                }
+                _ => false,
+            };
+            if !decimal_matches && !matches!(
                 (output.data_type(), field.field_type.as_ref()),
                 (DataType::Int32, Type::Primitive(PrimitiveType::Int))
                     | (DataType::Int64, Type::Primitive(PrimitiveType::Long))
@@ -1143,6 +1156,50 @@ mod tests {
         // column after it still maps to its own field id.
         assert_eq!(scan.runtime_predicate_field_name(0), None);
         assert_eq!(scan.runtime_predicate_field_name(1), Some("value".into()));
+    }
+
+    #[test]
+    fn runtime_decimal_field_mapping_requires_declared_precision_and_scale() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use iceberg::spec::{NestedField, Type};
+
+        for (precision, scale, expected) in [(18, 2, true), (10, 2, false), (18, 3, false)] {
+            let schema = Arc::new(
+                Schema::builder()
+                    .with_fields(vec![NestedField::optional(
+                        1,
+                        "key",
+                        Type::decimal(18, 2).unwrap(),
+                    ).into()])
+                    .build()
+                    .unwrap(),
+            );
+            let task = FileScanTask::builder()
+                .with_file_size_in_bytes(1024)
+                .with_start(0)
+                .with_length(0)
+                .with_data_file_path("/tmp/decimal-schema-only.parquet".into())
+                .with_data_file_format(DataFileFormat::Parquet)
+                .with_schema(schema)
+                .with_project_field_ids(vec![1])
+                .with_case_sensitive(false)
+                .build()
+                .unwrap();
+            let scan = IcebergScanExec::new(
+                "/tmp/metadata.json".into(),
+                Arc::new(ArrowSchema::new(vec![Field::new(
+                    "key",
+                    DataType::Decimal128(precision, scale),
+                    true,
+                )])),
+                Default::default(),
+                String::new(),
+                vec![task],
+                1,
+            )
+            .unwrap();
+            assert_eq!(scan.runtime_predicate_field_name(0).is_some(), expected);
+        }
     }
 
     #[test]

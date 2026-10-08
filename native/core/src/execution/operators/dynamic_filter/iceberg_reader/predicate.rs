@@ -25,7 +25,7 @@ use datafusion::physical_expr::expressions::{
 };
 use datafusion::physical_expr::PhysicalExpr;
 use iceberg::expr::{Predicate, Reference};
-use iceberg::spec::Datum;
+use iceberg::spec::{Datum, Type};
 use std::sync::Arc;
 
 pub(super) fn extract_iceberg_predicate(
@@ -224,6 +224,23 @@ fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
         ScalarValue::Int32(Some(value)) => Some(Datum::int(*value)),
         ScalarValue::Int64(Some(value)) => Some(Datum::long(*value)),
         ScalarValue::Date32(Some(days)) => Some(Datum::date(*days)),
+        ScalarValue::Decimal128(Some(value), precision, scale) => {
+            let scale = u32::try_from(*scale).ok()?;
+            if scale > u32::from(*precision) {
+                return None;
+            }
+            let decimal_type = Type::decimal(u32::from(*precision), scale).ok()?;
+            if value.unsigned_abs() >= 10_u128.pow(u32::from(*precision)) {
+                return None;
+            }
+            // Iceberg decimals serialize the unscaled i128 in signed big-endian form.
+            // Validate precision above before using the existing public byte constructor.
+            // The mantissa and scale are unchanged: no parsing, rounding or rescaling.
+            Datum::try_from_bytes(&value.to_be_bytes(), decimal_type.as_primitive_type()?.clone())
+                .ok()?
+                .to(&decimal_type)
+                .ok()
+        }
         // Spark TIMESTAMP carries a zone and maps to Iceberg timestamptz; TIMESTAMP_NTZ has
         // none and maps to timestamp. Both store microseconds since the epoch.
         ScalarValue::TimestampMicrosecond(Some(micros), Some(_)) => {
@@ -233,5 +250,63 @@ fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
             Some(Datum::timestamp_micros(*micros))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iceberg::spec::PrimitiveLiteral;
+
+    #[test]
+    fn decimal_scalars_preserve_unscaled_value_precision_and_scale() {
+        let maximum = 10_i128.pow(38) - 1;
+        for (value, precision, scale) in [
+            (12345, 18, 2),
+            (-12345, 18, 2),
+            (0, 18, 2),
+            (maximum, 38, 0),
+            (-maximum, 38, 38),
+            (1, 38, 38),
+        ] {
+            let datum = scalar_to_datum(&ScalarValue::Decimal128(Some(value), precision, scale))
+                .unwrap();
+            assert_eq!(datum.literal(), &PrimitiveLiteral::Int128(value));
+            assert_eq!(
+                datum.data_type(),
+                Type::decimal(u32::from(precision), scale as u32)
+                    .unwrap()
+                    .as_primitive_type()
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_scalars_reject_null_invalid_types_and_precision_overflow() {
+        for value in [
+            ScalarValue::Decimal128(None, 18, 2),
+            ScalarValue::Decimal128(Some(1), 18, -1),
+            ScalarValue::Decimal128(Some(1), 18, 19),
+            ScalarValue::Decimal128(Some(1), 0, 0),
+            ScalarValue::Decimal128(Some(1), 39, 2),
+            ScalarValue::Decimal128(Some(1000), 3, 2),
+            ScalarValue::Decimal128(Some(-1000), 3, 2),
+            ScalarValue::Decimal128(Some(i128::MIN), 38, 2),
+            ScalarValue::Decimal128(Some(i128::MAX), 38, 2),
+        ] {
+            assert!(scalar_to_datum(&value).is_none(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn decimal_datum_rejects_scale_mismatch_and_narrow_precision() {
+        let datum = scalar_to_datum(&ScalarValue::Decimal128(Some(12345), 18, 2)).unwrap();
+        assert!(datum.clone().to(&Type::decimal(18, 3).unwrap()).is_err());
+        assert!(datum.clone().to(&Type::decimal(4, 2).unwrap()).is_err());
+        assert_eq!(
+            datum.to(&Type::decimal(10, 2).unwrap()).unwrap().literal(),
+            &PrimitiveLiteral::Int128(12345)
+        );
     }
 }

@@ -639,3 +639,50 @@ async fn extracts_first_key_bound_from_real_multi_key_topk_filter() {
         Some(Reference::new("id").less_than_or_equal_to(Datum::int(1)))
     );
 }
+
+#[test]
+fn decimal_bounds_and_membership_translate_exactly() {
+    use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::physical_expr::expressions::in_list;
+
+    let schema = Schema::new(vec![Field::new("key", DataType::Decimal128(38, 2), true)]);
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+    let minimum = Datum::decimal_from_str("-1.25").unwrap();
+    let maximum = Datum::decimal_from_str("999999999999999999999999999999999999.99").unwrap();
+    let list = in_list(
+        Arc::clone(&key),
+        vec![
+            lit(ScalarValue::Decimal128(Some(-125), 38, 2)),
+            lit(ScalarValue::Decimal128(Some(0), 38, 2)),
+            lit(ScalarValue::Decimal128(Some(10_i128.pow(38) - 1), 38, 2)),
+        ],
+        &false,
+        &schema,
+    )
+    .unwrap();
+    let lower: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::clone(&key),
+        Operator::GtEq,
+        lit(ScalarValue::Decimal128(Some(-125), 38, 2)),
+    ));
+    let upper: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        key,
+        Operator::LtEq,
+        lit(ScalarValue::Decimal128(Some(10_i128.pow(38) - 1), 38, 2)),
+    ));
+    let range: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(lower, Operator::And, upper));
+    let both: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(range, Operator::And, list));
+    assert_eq!(
+        extract_iceberg_predicate(&both, 0, "id"),
+        Some(
+            Reference::new("id")
+                .greater_than_or_equal_to(minimum.clone())
+                .and(Reference::new("id").less_than_or_equal_to(maximum.clone()))
+                .and(Reference::new("id").is_in([
+                    minimum,
+                    Datum::decimal_from_str("0.00").unwrap(),
+                    maximum,
+                ]))
+        )
+    );
+}

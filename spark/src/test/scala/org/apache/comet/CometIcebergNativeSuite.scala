@@ -1293,6 +1293,75 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("decimal join runtime filter prunes Iceberg and rejects mismatched decimal types") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+        SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+        val table = "test_cat.db.runtime_decimal_join"
+        spark.sql(s"""CREATE TABLE $table (id DECIMAL(18,2), payload STRING) USING iceberg
+          TBLPROPERTIES ('format-version'='2', 'write.distribution-mode'='none',
+            'read.split.adaptive-size.enabled'='false',
+            'write.parquet.row-group-size-bytes'='131072',
+            'write.parquet.compression-codec'='uncompressed')""")
+        try {
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            spark.range(-60000L, 60000L).coalesce(1).sortWithinPartitions("id")
+              .selectExpr(
+                "CAST(id / 100.0 AS DECIMAL(18,2)) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .write.format("iceberg").mode("append").saveAsTable(table)
+            for (precision <- Seq(18, 10)) {
+              spark.range(-32L, 32L).filter("id % 2 = 0").coalesce(1)
+                .selectExpr(s"CAST(id / 100.0 AS DECIMAL($precision,2)) AS id")
+                .write.parquet(new File(warehouseDir, s"decimal_dim_$precision").getAbsolutePath)
+            }
+          }
+          spark.read.format("iceberg").option("split-size", "134217728").load(table)
+            .createOrReplaceTempView("decimal_fact")
+          for (precision <- Seq(18, 10)) {
+            spark.read.parquet(new File(warehouseDir, s"decimal_dim_$precision").getAbsolutePath)
+              .createOrReplaceTempView("decimal_dim")
+            for (enabled <- Seq(false, true)) {
+              withSQLConf(
+                CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+                val query = "SELECT /*+ BROADCAST(d) */ f.id, f.payload " +
+                  "FROM decimal_fact f JOIN decimal_dim d ON f.id = d.id"
+                val (_, plan) = checkSparkAnswer(query)
+                val scans = collectIcebergNativeScans(plan)
+                assert(scans.size == 1, s"Expected one native decimal Iceberg scan:\n$plan")
+                val joins = collect(plan) { case join: CometBroadcastHashJoinExec => join }
+                assert(joins.size == 1, s"Expected one native decimal broadcast join:\n$plan")
+                val scan = scans.head
+                val tasks = scan.metrics("iceberg_runtime_predicate_tasks").value
+                val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value +
+                  scan.metrics("iceberg_runtime_file_tasks_pruned").value
+                if (enabled && precision == 18) {
+                  assert(tasks > 0L && pruned > 0L, s"Decimal Iceberg pruning missing: $plan")
+                } else {
+                  assert(tasks == 0L && pruned == 0L, s"Unexpected decimal pruning: $plan")
+                  assert(joins.head.metrics.get("dynamic_filter_join_rows_pruned")
+                    .forall(_.value == 0L))
+                }
+              }
+            }
+          }
+        } finally {
+          spark.catalog.dropTempView("decimal_fact")
+          spark.catalog.dropTempView("decimal_dim")
+          spark.sql(s"DROP TABLE IF EXISTS $table")
+        }
+      }
+    }
+  }
+
   test("join runtime filter prunes native Iceberg row groups and bytes") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 

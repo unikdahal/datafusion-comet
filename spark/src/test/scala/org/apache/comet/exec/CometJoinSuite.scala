@@ -431,6 +431,49 @@ class CometJoinSuite extends CometTestBase {
     }
   }
 
+  test("join dynamic filter prunes matching decimal batches and rejects decimal casts") {
+    withSQLConf(
+      CometConf.COMET_BATCH_SIZE.key -> "16",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.LEAF_NODE_DEFAULT_PARALLELISM.key -> "1") {
+      withTable("decimal_probe", "decimal_build", "decimal_narrow_build") {
+        sql("CREATE TABLE decimal_probe (key DECIMAL(18,2), payload BIGINT) USING PARQUET")
+        sql("CREATE TABLE decimal_build (key DECIMAL(18,2), payload BIGINT) USING PARQUET")
+        sql("CREATE TABLE decimal_narrow_build (key DECIMAL(10,2), payload BIGINT) USING PARQUET")
+        sql("INSERT INTO decimal_probe SELECT CAST(id / 100.0 AS DECIMAL(18,2)), id " +
+          "FROM range(-500, 500)")
+        sql("INSERT INTO decimal_probe VALUES (NULL, 1000)")
+        for (table <- Seq("decimal_build", "decimal_narrow_build")) {
+          sql(s"INSERT INTO $table VALUES (-1.25, 1), (0.00, 2), (1.25, 3), (1.25, 4), " +
+            "(NULL, 5)")
+        }
+        for (enabled <- Seq(false, true)) {
+          withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+            for ((buildKey, table, eligible) <- Seq(
+                ("b.key", "decimal_build", true),
+                ("b.key", "decimal_narrow_build", false),
+                ("CAST(b.key AS DECIMAL(18,3))", "decimal_build", false))) {
+              val query = s"SELECT /*+ BROADCAST(b) */ p.payload, b.payload " +
+                s"FROM decimal_probe p JOIN $table b ON p.key = $buildKey"
+              val (_, plan) = checkSparkAnswerAndOperator(sql(query))
+              val joins = nativeHashJoins(plan)
+              assert(joins.size == 1, s"Expected one native decimal join:\n$plan")
+              val join = joins.head
+              assert(join.metrics("output_rows").value == 4L)
+              val pruned = join.metrics.get("dynamic_filter_join_rows_pruned").map(_.value)
+              if (enabled && eligible) {
+                assert(pruned.exists(_ > 0L), s"Decimal batch pruning missing: $plan")
+              } else {
+                assert(pruned.forall(_ == 0L), s"Unexpected decimal pruning: $plan")
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   test("join dynamic filter prunes a projected Parquet reader through null-check conjunctions") {
     withTempPath { probePath =>
       withSQLConf(

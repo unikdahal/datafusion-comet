@@ -37,12 +37,14 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::distribution_requirements::InputDistributionRequirements;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::statistics::{ChildStats, StatisticsArgs};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties,
     PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream,
 };
+use datafusion_comet_operators::CometFilterExec;
 use futures::StreamExt;
 
 use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_join_filter};
@@ -349,13 +351,23 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
                 | DataType::Int64
                 | DataType::Date32
                 | DataType::Timestamp(TimeUnit::Microsecond, _)
+                | DataType::Decimal128(_, _)
         )
     {
-        return Ok(Some("requires matching integer, date or timestamp keys"));
+        return Ok(Some(
+            "requires matching integer, date, timestamp or decimal keys",
+        ));
     }
-    // Date and timestamp keys are supported for native Iceberg probes only; other probes keep
-    // the existing integer-key behavior.
+    if matches!(build_type, DataType::Decimal128(_, _))
+        && (!is_direct_decimal_key(join.left(), build_key)
+            || !is_direct_decimal_key(join.right(), probe_key))
+    {
+        return Ok(Some("computed decimal join keys are not supported"));
+    }
+    // Decimal batches support exact bounds and membership on every probe backend.
+    // Date and timestamp keys are supported for native Iceberg probes only.
     if !is_parquet_reader_key(probe_key, &join.right().schema())
+        && !matches!(probe_type, DataType::Decimal128(_, _))
         && !reaches_iceberg_reader(join.right())
     {
         return Ok(Some(
@@ -363,6 +375,29 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
         ));
     }
     Ok(None)
+}
+
+/// A cast materialized by an input projection is still a computed decimal key,
+/// even when the join itself sees only the projection's output column.
+fn is_direct_decimal_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalExpr>) -> bool {
+    use datafusion::physical_plan::filter::FilterExec;
+
+    let Some(column) = key.downcast_ref::<Column>() else {
+        return false;
+    };
+    if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
+        return projection.expr().get(column.index()).is_some_and(|projected| {
+            projected.expr.is::<Column>()
+                && is_direct_decimal_key(projection.input(), &projected.expr)
+        });
+    }
+    if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
+        return !filter.has_projection() && is_direct_decimal_key(filter.input(), key);
+    }
+    if let Some(filter) = input.downcast_ref::<FilterExec>() {
+        return filter.projection().is_none() && is_direct_decimal_key(filter.input(), key);
+    }
+    true
 }
 
 #[cfg(test)]
