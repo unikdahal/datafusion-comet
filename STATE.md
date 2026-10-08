@@ -52,3 +52,4 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 ## 2026-10-08 ~10:05 UTC
 - F1 fix pushed iceberg 5f326d103 (reader guard: float/double Binary+Set preds keep row filter; unit + e2e NaN equality-delete tests). CI 37760274980: fmt FAILED (line width) → local fix b3b63ba76 in rp-work/iceberg-nanfix, PUSH AFTER clippy/tests of 37760274980 finish.
 - Codex hit usage limit (resets 12:04 UTC). Reassigned: integration diagnosis → gemini (rp-comet-integ-fail-r1g); float-guard upstream review → gemini (rp-float-guard-review-r1).
+- Float guard review (gemini, rp-float-guard-review-r1): correctness APPROVED (only skip site; unary NaN preds agree; nested ok). Applied: is_floating_type simplification → local 0703d53f5 (amended fmt commit). Declined: test import change (inline path is file convention). Deferred F7: evaluator NaN-literal arm.

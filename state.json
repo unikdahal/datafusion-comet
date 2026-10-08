@@ -43,8 +43,7 @@
   }
  ],
  "tasks": [
-  "rp-comet-integ-fail-r1g",
-  "rp-float-guard-review-r1"
+  "rp-comet-integ-fail-r1g"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -79,12 +78,17 @@
    "id": "F6",
    "status": "open-P3",
    "summary": "shuffle eligibility rejection bypasses skipped-filter counter (comet join.rs:326). Bundle with Comet pin bump."
+  },
+  {
+   "id": "F7",
+   "status": "deferred-low",
+   "summary": "StrictMetricsEvaluator not_eq contains_nans_only arm returns MUST_MATCH even for NaN literal (evaluator-level; reader now guarded). Candidate upstream-quality follow-up."
   }
  ],
  "pending_push": {
   "repo": "iceberg",
   "worktree": "rp-work/iceberg-nanfix",
-  "local_commit": "b3b63ba76 (rustfmt fix)",
+  "local_commit": "0703d53f5 (rustfmt + is_floating_type simplification per review)",
   "when": "after run 37760274980 clippy+tests finish (push cancels it)"
  },
  "agent_limits": {
