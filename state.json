@@ -1,7 +1,7 @@
 {
- "updated": "2026-10-08T10:30Z",
+ "updated": "2026-10-08T10:50Z",
  "heads": {
-  "iceberg": "949cc88acb6d5e5d47e4a4362075c8bc5afb8314",
+  "iceberg": "5faa5bdba9c33ca719ea548c2091002754182e9f",
   "comet": "92bba61b68ec44f305e0519f507cd02ae4546ee0",
   "bench": "163b5c235e914f8a22af834e26e85b0a6a8ea6b0",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
@@ -39,8 +39,7 @@
  ],
  "tasks": [
   "rp-iceberg-ci-wf-r1",
-  "rp-comet-review-r1",
-  "rp-iceberg-nan-literal-fix-r1"
+  "rp-iceberg-float-guard-r2"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -48,8 +47,8 @@
  "findings": [
   {
    "id": "F1",
-   "status": "verified-latent",
-   "summary": "StrictMetricsEvaluator not_eq/not_in with NaN literal -> MUST_MATCH despite NaN rows; 288a0ee row-filter skip leaks NaN rows. Unreachable from Comet (Java residuals reject NaN; NOT IN never emitted). Fix in progress."
+   "status": "verified-fix-in-progress",
+   "summary": "all-match shortcut (pipeline.rs file_always_matches) disagrees with Arrow kernels on floats: NaN literal, NaN-only col (equality-deleted NaNs returned), signed zero. Decision: guard in reader excluding float/double binary+set preds; evaluator untouched. Task rp-iceberg-float-guard-r2. Comet unreachable today (no float stats serialized)."
   },
   {
    "id": "F2",
@@ -60,6 +59,21 @@
    "id": "F3",
    "status": "dependent-on-F1",
    "summary": "late runtime filter drops planned predicate after false all-match - only if F1."
+  },
+  {
+   "id": "F4",
+   "status": "open-P2",
+   "summary": "delete loader spawned task detached on scan cancel; continues I/O, reads escape Spark metrics (caching_delete_file_loader.rs:209, iceberg_scan.rs:491)."
+  },
+  {
+   "id": "F5",
+   "status": "open-perf",
+   "summary": "9cccd0676 removes shuffle-probe dynamic filter: no source I/O saved, but join CPU may rise; needs selective-shuffle-probe benchmark."
+  },
+  {
+   "id": "F6",
+   "status": "open-P3",
+   "summary": "shuffle eligibility rejection bypasses skipped-filter counter (comet join.rs:326). Bundle with Comet pin bump."
   }
  ]
 }

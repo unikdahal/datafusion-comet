@@ -37,3 +37,10 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - F2 rejected (file bounds cover splits). F3 only consequence of F1.
 - Judged SAFE by reviewer (not yet independently re-verified): empty projection w/ deletes, range reuse, truncated bounds, 3VL.
 - After fix lands + Comet review returns: bump Comet iceberg pin in one commit.
+
+## 2026-10-08 10:50 — Comet review r1 (codex 6.1 sol)
+- Fork CI workflow landed on iceberg: 5faa5bdba.
+- F1 widened: float semantics mismatch strict-evaluator vs Arrow (NaN literal, NaN-only column w/ equality delete of NaN, signed zero). Fix = reader guard excluding float binary/set predicates from all-match shortcut (task rp-iceberg-float-guard-r2). Evaluator untouched (upstream code).
+- F4 (P2): detached delete-loading after cancel → leaked I/O + unreported metrics. Next after F1.
+- F5: shuffle-probe filter removal = cost policy, unproven; need selective shuffle probe bench.
+- F6 (P3): skipped-filter counter misses shuffle rejection; bundle into Comet pin bump.
