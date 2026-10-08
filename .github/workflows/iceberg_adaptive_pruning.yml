@@ -15,6 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
+# Note: The fast lane (.github/workflows/fork_adaptive_fast.yml) is for workstream iteration (adaptive-ci/ws-*),
+# while this full validation still gates the integration branch (adaptive-ci/runtime-pruning-rewrite-20261006).
 
 # Fork-only validation of adaptive native Iceberg pruning: Rust lint and tests,
 # a release library, and the native Iceberg, join and broadcast transport suites on two Spark versions.
@@ -23,7 +25,8 @@ name: Fork Adaptive Iceberg Pruning Validation
 
 on:
   push:
-    branches: [feat/iceberg-adaptive-pruning, 'adaptive-ci/**']
+    branches: [feat/iceberg-adaptive-pruning, 'adaptive-ci/**', '!adaptive-ci/ws-*']
+  workflow_dispatch:
 
 permissions:
   contents: read
