@@ -728,3 +728,424 @@ fn string_bounds_and_membership_translate_without_truncation() {
         );
     }
 }
+
+#[test]
+fn nulls_first_single_key_asc_and_desc() {
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+    let nulls: Arc<dyn PhysicalExpr> = Arc::new(IsNullExpr::new(Arc::clone(&key)));
+    let lt: Arc<dyn PhysicalExpr> =
+        Arc::new(BinaryExpr::new(Arc::clone(&key), Operator::Lt, lit(10_i32)));
+    let gt: Arc<dyn PhysicalExpr> =
+        Arc::new(BinaryExpr::new(Arc::clone(&key), Operator::Gt, lit(10_i32)));
+
+    // Single key ASC: key IS NULL OR key < 10
+    let asc_filter: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::clone(&nulls),
+        Operator::Or,
+        Arc::clone(&lt),
+    ));
+    assert_eq!(
+        extract_iceberg_predicate(&asc_filter, 0, "id"),
+        Some(
+            Reference::new("id")
+                .is_null()
+                .or(Reference::new("id").less_than(Datum::int(10)))
+        )
+    );
+
+    // Single key ASC with inverted arms: key < 10 OR key IS NULL
+    let asc_inverted: Arc<dyn PhysicalExpr> =
+        Arc::new(BinaryExpr::new(lt, Operator::Or, Arc::clone(&nulls)));
+    assert_eq!(
+        extract_iceberg_predicate(&asc_inverted, 0, "id"),
+        Some(
+            Reference::new("id")
+                .is_null()
+                .or(Reference::new("id").less_than(Datum::int(10)))
+        )
+    );
+
+    // Single key DESC: key IS NULL OR key > 10
+    let desc_filter: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::clone(&nulls),
+        Operator::Or,
+        Arc::clone(&gt),
+    ));
+    assert_eq!(
+        extract_iceberg_predicate(&desc_filter, 0, "id"),
+        Some(
+            Reference::new("id")
+                .is_null()
+                .or(Reference::new("id").greater_than(Datum::int(10)))
+        )
+    );
+
+    // Single key DESC with inverted arms: key > 10 OR key IS NULL
+    let desc_inverted: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(gt, Operator::Or, nulls));
+    assert_eq!(
+        extract_iceberg_predicate(&desc_inverted, 0, "id"),
+        Some(
+            Reference::new("id")
+                .is_null()
+                .or(Reference::new("id").greater_than(Datum::int(10)))
+        )
+    );
+}
+
+#[test]
+fn nulls_first_multi_key_keeps_safe_leading_bound() {
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+    let second: Arc<dyn PhysicalExpr> = Arc::new(Column::new("second", 1));
+    let third: Arc<dyn PhysicalExpr> = Arc::new(Column::new("third", 2));
+    let nulls: Arc<dyn PhysicalExpr> = Arc::new(IsNullExpr::new(Arc::clone(&key)));
+
+    let binary = |left: &Arc<dyn PhysicalExpr>, op, right: i32| -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(Arc::clone(left), op, lit(right)))
+    };
+    let and = |left, right| -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(left, Operator::And, right))
+    };
+    let or = |left, right| -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(left, Operator::Or, right))
+    };
+
+    // ASC multi-key non-null: (key IS NULL OR key < 10) OR (key = 10 AND second < 5)
+    let tie = binary(&key, Operator::Eq, 10);
+    let asc_multi = or(
+        or(Arc::clone(&nulls), binary(&key, Operator::Lt, 10)),
+        and(Arc::clone(&tie), binary(&second, Operator::Lt, 5)),
+    );
+    assert_eq!(
+        extract_iceberg_predicate(&asc_multi, 0, "id"),
+        Some(
+            Reference::new("id")
+                .is_null()
+                .or(Reference::new("id").less_than_or_equal_to(Datum::int(10)))
+        )
+    );
+
+    // DESC multi-key non-null: (key IS NULL OR key > 10) OR (key = 10 AND second > 5)
+    let desc_multi = or(
+        or(Arc::clone(&nulls), binary(&key, Operator::Gt, 10)),
+        and(tie, binary(&second, Operator::Gt, 5)),
+    );
+    assert_eq!(
+        extract_iceberg_predicate(&desc_multi, 0, "id"),
+        Some(
+            Reference::new("id")
+                .is_null()
+                .or(Reference::new("id").greater_than_or_equal_to(Datum::int(10)))
+        )
+    );
+
+    // Multi-key when leading threshold is null:
+    // DataFusion produces lit(false) OR ((is_null(key) OR key = NULL) AND second < 5)
+    let null_eq: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::clone(&key),
+        Operator::Eq,
+        lit(ScalarValue::Int32(None)),
+    ));
+    let null_or_null_eq = or(Arc::clone(&nulls), null_eq);
+    let null_leading_multi = or(
+        lit(false),
+        and(
+            Arc::clone(&null_or_null_eq),
+            binary(&second, Operator::Lt, 5),
+        ),
+    );
+    assert_eq!(
+        extract_iceberg_predicate(&null_leading_multi, 0, "id"),
+        Some(Reference::new("id").is_null())
+    );
+
+    // Three-key sort when leading threshold is null:
+    // lit(false) OR ((null_or_null_eq) AND second < 5)
+    //           OR ((null_or_null_eq) AND second = 5 AND third < 2)
+    let tie_sec = binary(&second, Operator::Eq, 5);
+    let null_leading_three = or(
+        null_leading_multi,
+        and(
+            and(null_or_null_eq, tie_sec),
+            binary(&third, Operator::Lt, 2),
+        ),
+    );
+    assert_eq!(
+        extract_iceberg_predicate(&null_leading_three, 0, "id"),
+        Some(Reference::new("id").is_null())
+    );
+}
+
+#[test]
+fn nulls_first_unsupported_shapes_still_rejected() {
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+    let second: Arc<dyn PhysicalExpr> = Arc::new(Column::new("second", 1));
+    let nulls: Arc<dyn PhysicalExpr> = Arc::new(IsNullExpr::new(Arc::clone(&key)));
+    let binary = |left: &Arc<dyn PhysicalExpr>, op, right: i32| -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(Arc::clone(left), op, lit(right)))
+    };
+    let and = |left, right| -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(left, Operator::And, right))
+    };
+    let or = |left, right| -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(left, Operator::Or, right))
+    };
+
+    // Leading column null or other column comparison (no bound on leading column)
+    let wrong_comparison = or(Arc::clone(&nulls), binary(&second, Operator::Lt, 10));
+    assert!(extract_iceberg_predicate(&wrong_comparison, 0, "id").is_none());
+
+    // Leading column null or boolean literal
+    let null_or_true = or(Arc::clone(&nulls), lit(true));
+    assert!(extract_iceberg_predicate(&null_or_true, 0, "id").is_none());
+
+    // Multi-key with mismatched equality threshold
+    let mismatched_threshold = or(
+        or(Arc::clone(&nulls), binary(&key, Operator::Lt, 10)),
+        and(
+            binary(&key, Operator::Eq, 11),
+            binary(&second, Operator::Lt, 5),
+        ),
+    );
+    assert!(extract_iceberg_predicate(&mismatched_threshold, 0, "id").is_none());
+
+    // Multi-key with equality on wrong column
+    let wrong_equality_col = or(
+        or(Arc::clone(&nulls), binary(&key, Operator::Lt, 10)),
+        and(
+            binary(&second, Operator::Eq, 10),
+            binary(&second, Operator::Lt, 5),
+        ),
+    );
+    assert!(extract_iceberg_predicate(&wrong_equality_col, 0, "id").is_none());
+
+    // Multi-key with secondary arm missing equality conjunct
+    let missing_equality = or(
+        or(nulls, binary(&key, Operator::Lt, 10)),
+        binary(&second, Operator::Lt, 5),
+    );
+    assert!(extract_iceberg_predicate(&missing_equality, 0, "id").is_none());
+}
+
+#[tokio::test]
+async fn runtime_pruning_nulls_first_preserves_nulls_and_prunes_out_of_range() {
+    use crate::execution::operators::iceberg_scan::IcebergScanExec;
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::prelude::SessionContext;
+    use iceberg::scan::{FileScanTask, FileScanTaskMetrics};
+    use iceberg::spec::{
+        DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
+    };
+    use parquet::arrow::ArrowWriter;
+    use std::collections::HashMap;
+
+    let physical_schema = Arc::new(Schema::new(
+        ["key", "payload"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Field::new(name, DataType::Int32, true).with_metadata(HashMap::from([(
+                    parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+                    (index + 1).to_string(),
+                )]))
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let table_schema = Arc::new(
+        IcebergSchema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(2, "payload", Type::Primitive(PrimitiveType::Int)).into(),
+            ])
+            .build()
+            .unwrap(),
+    );
+
+    // File 1 contains nulls and values >= 50. All non-null values are > 10, but it holds nulls.
+    let file1 = tempfile::NamedTempFile::new().unwrap();
+    let batch1 = RecordBatch::try_new(
+        Arc::clone(&physical_schema),
+        vec![
+            Arc::new(Int32Array::from(vec![None, Some(50)])),
+            Arc::new(Int32Array::from(vec![Some(1), Some(2)])),
+        ],
+    )
+    .unwrap();
+    let mut writer1 =
+        ArrowWriter::try_new(file1.reopen().unwrap(), Arc::clone(&physical_schema), None).unwrap();
+    writer1.write(&batch1).unwrap();
+    writer1.close().unwrap();
+
+    let task1 = FileScanTask::builder()
+        .with_data_file_path(file1.path().to_string_lossy().into_owned())
+        .with_data_file_format(DataFileFormat::Parquet)
+        .with_file_size_in_bytes(file1.as_file().metadata().unwrap().len())
+        .with_start(0)
+        .with_length(0)
+        .with_schema(Arc::clone(&table_schema))
+        .with_project_field_ids(vec![1, 2])
+        .with_case_sensitive(false)
+        .with_file_metrics(Some(Arc::new(FileScanTaskMetrics::new(
+            Some(2),
+            HashMap::from([(1, 2), (2, 2)]),
+            HashMap::from([(1, 1), (2, 0)]),
+            HashMap::new(),
+            HashMap::from([(1, Datum::int(50)), (2, Datum::int(1))]),
+            HashMap::from([(1, Datum::int(50)), (2, Datum::int(2))]),
+        ))))
+        .build()
+        .unwrap();
+
+    // File 2 contains no nulls, with all values >= 50 (strictly beyond threshold 10).
+    let file2 = tempfile::NamedTempFile::new().unwrap();
+    let batch2 = RecordBatch::try_new(
+        Arc::clone(&physical_schema),
+        vec![
+            Arc::new(Int32Array::from(vec![Some(50), Some(60)])),
+            Arc::new(Int32Array::from(vec![Some(3), Some(4)])),
+        ],
+    )
+    .unwrap();
+    let mut writer2 =
+        ArrowWriter::try_new(file2.reopen().unwrap(), Arc::clone(&physical_schema), None).unwrap();
+    writer2.write(&batch2).unwrap();
+    writer2.close().unwrap();
+
+    let task2 = FileScanTask::builder()
+        .with_data_file_path(file2.path().to_string_lossy().into_owned())
+        .with_data_file_format(DataFileFormat::Parquet)
+        .with_file_size_in_bytes(file2.as_file().metadata().unwrap().len())
+        .with_start(0)
+        .with_length(0)
+        .with_schema(Arc::clone(&table_schema))
+        .with_project_field_ids(vec![1, 2])
+        .with_case_sensitive(false)
+        .with_file_metrics(Some(Arc::new(FileScanTaskMetrics::new(
+            Some(2),
+            HashMap::from([(1, 2), (2, 2)]),
+            HashMap::from([(1, 0), (2, 0)]),
+            HashMap::new(),
+            HashMap::from([(1, Datum::int(50)), (2, Datum::int(3))]),
+            HashMap::from([(1, Datum::int(60)), (2, Datum::int(4))]),
+        ))))
+        .build()
+        .unwrap();
+
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+    let second: Arc<dyn PhysicalExpr> = Arc::new(Column::new("payload", 1));
+
+    // Case A: Dynamic filter is NULLS FIRST with threshold 10:
+    // (key IS NULL OR key < 10) OR (key = 10 AND payload < 5)
+    // Translates to: is_null(key) OR key <= 10.
+    // File 1 has null_value_counts = 1 -> NOT pruned!
+    // File 2 has null_value_counts = 0, min = 50 > 10 -> PRUNED!
+    let dynamic_a = Arc::new(DynamicFilterPhysicalExpr::new(
+        vec![Arc::clone(&key), Arc::clone(&second)],
+        lit(true),
+    ));
+    let nulls: Arc<dyn PhysicalExpr> = Arc::new(IsNullExpr::new(Arc::clone(&key)));
+    let filter_expr_a: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::new(BinaryExpr::new(
+            nulls,
+            Operator::Or,
+            Arc::new(BinaryExpr::new(Arc::clone(&key), Operator::Lt, lit(10_i32))),
+        )),
+        Operator::Or,
+        Arc::new(BinaryExpr::new(
+            Arc::new(BinaryExpr::new(Arc::clone(&key), Operator::Eq, lit(10_i32))),
+            Operator::And,
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&second),
+                Operator::Lt,
+                lit(5_i32),
+            )),
+        )),
+    ));
+    dynamic_a.update(filter_expr_a).unwrap();
+
+    let provider_a = IcebergRuntimePredicateProvider::new(dynamic_a, 0, "key".into());
+    let scan_a: Arc<dyn ExecutionPlan> = Arc::new(
+        IcebergScanExec::new(
+            file1.path().to_string_lossy().into_owned(),
+            Arc::clone(&physical_schema),
+            Default::default(),
+            String::new(),
+            vec![task1.clone(), task2.clone()],
+            1,
+        )
+        .unwrap()
+        .with_runtime_predicate_provider(Arc::new(provider_a), None),
+    );
+
+    let session = SessionContext::new();
+    let result_a = collect(Arc::clone(&scan_a), session.task_ctx())
+        .await
+        .unwrap();
+    let total_rows_a: usize = result_a.iter().map(RecordBatch::num_rows).sum();
+    assert_eq!(total_rows_a, 2, "Only File 1 with nulls should be read");
+    let metrics_a = scan_a.metrics().unwrap();
+    let pruned_a = metrics_a
+        .sum_by_name("iceberg_runtime_file_tasks_pruned")
+        .unwrap()
+        .as_usize();
+    assert_eq!(pruned_a, 1, "File 2 beyond threshold must be pruned");
+
+    // Case B: Dynamic filter where leading key threshold is NULL:
+    // lit(false) OR ((is_null(key) OR key = NULL) AND payload < 5)
+    // Translates to: is_null(key).
+    // File 1 has nulls -> NOT pruned.
+    // File 2 has zero nulls -> PRUNED.
+    let dynamic_b = Arc::new(DynamicFilterPhysicalExpr::new(
+        vec![Arc::clone(&key), Arc::clone(&second)],
+        lit(true),
+    ));
+    let null_eq: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::clone(&key),
+        Operator::Eq,
+        lit(ScalarValue::Int32(None)),
+    ));
+    let null_or_null_eq: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::new(IsNullExpr::new(Arc::clone(&key))),
+        Operator::Or,
+        null_eq,
+    ));
+    let filter_expr_b: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        lit(false),
+        Operator::Or,
+        Arc::new(BinaryExpr::new(
+            null_or_null_eq,
+            Operator::And,
+            Arc::new(BinaryExpr::new(second, Operator::Lt, lit(5_i32))),
+        )),
+    ));
+    dynamic_b.update(filter_expr_b).unwrap();
+
+    let provider_b = IcebergRuntimePredicateProvider::new(dynamic_b, 0, "key".into());
+    let scan_b: Arc<dyn ExecutionPlan> = Arc::new(
+        IcebergScanExec::new(
+            file1.path().to_string_lossy().into_owned(),
+            Arc::clone(&physical_schema),
+            Default::default(),
+            String::new(),
+            vec![task1, task2],
+            1,
+        )
+        .unwrap()
+        .with_runtime_predicate_provider(Arc::new(provider_b), None),
+    );
+
+    let result_b = collect(Arc::clone(&scan_b), session.task_ctx())
+        .await
+        .unwrap();
+    let total_rows_b: usize = result_b.iter().map(RecordBatch::num_rows).sum();
+    assert_eq!(total_rows_b, 2, "Only File 1 with nulls should be read");
+    let metrics_b = scan_b.metrics().unwrap();
+    let pruned_b = metrics_b
+        .sum_by_name("iceberg_runtime_file_tasks_pruned")
+        .unwrap()
+        .as_usize();
+    assert_eq!(pruned_b, 1, "File 2 with 0 nulls must be pruned by is_null");
+}
