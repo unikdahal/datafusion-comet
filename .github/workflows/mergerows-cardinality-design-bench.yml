@@ -26,9 +26,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Run design benchmark
         working-directory: native
-        run: cargo bench -p datafusion-comet --bench mergerows_cardinality_designs --no-default-features 2>&1 | tee mergerows-design.txt
+        run: |
+          set -o pipefail
+          cargo bench -p datafusion-comet --bench mergerows_cardinality_designs --no-default-features 2>&1 | tee mergerows-design.txt
+          cargo bench -p datafusion-comet --bench mergerows_cardinality_adaptive --no-default-features 2>&1 | tee mergerows-adaptive.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mergerows-cardinality-design-results
-          path: native/mergerows-design.txt
+          path: |
+              native/mergerows-design.txt
+              native/mergerows-adaptive.txt
