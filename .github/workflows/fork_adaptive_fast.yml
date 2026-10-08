@@ -124,6 +124,7 @@ jobs:
     env:
       SPARK_LOCAL_HOSTNAME: localhost
       SPARK_LOCAL_IP: 127.0.0.1
+      MAVEN_OPTS: -Djava.net.preferIPv4Stack=true
     steps:
       - uses: actions/checkout@v7
 
@@ -167,6 +168,21 @@ jobs:
 
       - name: Build release library
         run: cd native && cargo build --release --locked
+
+      # Without a warm Maven cache the parent POM download can fail transiently;
+      # retry the resolution only, never the test run.
+      - name: Resolve Maven parent POM and plugins
+        run: |
+          for attempt in 1 2 3 4; do
+            if ./mvnw -B -Prelease -Pspark-3.5 validate; then
+              break
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "::error::Maven dependency resolution failed after $attempt attempts."
+              exit 1
+            fi
+            sleep $((10 * attempt))
+          done
 
       - name: Run targeted Spark 3.5 Scala suites
         run: |
