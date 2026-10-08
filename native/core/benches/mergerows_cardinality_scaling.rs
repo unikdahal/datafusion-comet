@@ -358,12 +358,32 @@ fn segmented_auto_fallback(input: &[u64]) -> (usize, usize) {
     (count, retained)
 }
 
+// Explore whether a small prefix can avoid the high cost of sparse, shuffled
+// IDs without migrating an already populated representation.
+fn sampled_global(input: &[u64]) -> (usize, usize) {
+    let sample = &input[..input.len().min(4096)];
+    if sample.len() > 1 {
+        let first_high = sample[0] >> 32;
+        let same_high = sample.iter().all(|&id| id >> 32 == first_high);
+        let shuffled = sample.windows(2).any(|pair| pair[1] < pair[0]);
+        let min = *sample.iter().min().unwrap();
+        let max = *sample.iter().max().unwrap();
+        // This is only a hypothesis-generating microbenchmark heuristic.
+        // It deliberately avoids migration but is not production policy.
+        if same_high && shuffled && max - min > (sample.len() as u64) * 128 {
+            return insert("hash", input);
+        }
+    }
+    insert("segmented-anchored-hash", input)
+}
+
 fn insert(design: &str, input: &[u64]) -> (usize, usize) {
     match design {
         "segmented-adaptive" => segmented_adaptive(input),
         "segmented-anchored" => segmented_anchored(input),
         "segmented-anchored-hash" => segmented_anchored_hash(input),
         "segmented-auto-fallback" => segmented_auto_fallback(input),
+        "sampled-global" => sampled_global(input),
         "hash" => {
             let mut set = HashSet::new();
             for &id in input { assert!(set.insert(id)); }
@@ -443,11 +463,11 @@ fn main() {
     const N: usize = 5_000_000;
     let layouts = ["dense", "sparse-8", "sparse-200", "sparse-200-shuffled", "spark-8", "spark-200", "spark-2k", "spark-16k", "spark-200-shuffled", "spark-16k-shuffled", "spark-200-high-offset"];
     let designs: &[&str] = if std::env::var_os("CARDINALITY_CANDIDATES_ONLY").is_some() {
-        &["hash", "segmented-adaptive", "segmented-anchored", "segmented-anchored-hash", "segmented-auto-fallback"]
+        &["hash", "segmented-adaptive", "segmented-anchored", "segmented-anchored-hash", "segmented-auto-fallback", "sampled-global"]
     } else {
         &["hash", "treemap", "partitioned-direct", "partitioned-append",
           "partitioned-sorted", "segmented-adaptive", "segmented-anchored",
-          "segmented-anchored-hash", "segmented-auto-fallback"]
+          "segmented-anchored-hash", "segmented-auto-fallback", "sampled-global"]
     };
     println!("SCALING_BENCH,n,layout,design,median_ms,retained_bytes,peak_allocated_bytes");
     for layout in layouts {
