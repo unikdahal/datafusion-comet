@@ -90,3 +90,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Perf analysis task rp-bench-analysis-r1 (gemini). Note candidate 92bba61b6 still had 9cccd0676.
 - Comet CI 37780938158 @8cd4d9a98 running. Bench shard task (codex) can now push (bench done).
 - 14:20 UTC: M1 (main bug) RCA: broadcast coalescing of sliced string vectors (offset[0]>0) in Utils.scala; fork fix 422cb76f1. Untracked upstream/fork. GHA proof task rp-strjoin-repro-r1 (test-only on main must fail; with fix pass). File fork issue only if confirmed.
+- 14:40 UTC: bench analysis r1 PRELIMINARY — headline geomeans mix unequal coverage (main Spark fallbacks); fallback reasons appeared guessed; shuffle-probe claim suspicious. Round 2 (rp-bench-analysis-r2) for coverage-equal numbers, on/off isolation, real fallback reasons, regression list. Do not cite r1 numbers as results.

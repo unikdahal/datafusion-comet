@@ -1,5 +1,5 @@
 {
- "updated": "2026-10-08T14:20Z",
+ "updated": "2026-10-08T14:40Z",
  "heads": {
   "iceberg": "157cf6475ef46f272366d881580715e7edacf4c4",
   "comet": "8cd4d9a98",
@@ -40,13 +40,14 @@
    },
    "status": "completed",
    "result": "strjoin+fuzz+report jobs failed; ALL 160 validation failures baseline-only (Apache main f80042f78); 0 candidate failures",
-   "baseline_resolved": "f80042f78 @ 2026-10-08T09:42Z, apache iceberg af1da4c"
+   "baseline_resolved": "f80042f78 @ 2026-10-08T09:42Z, apache iceberg af1da4c",
+   "analysis_r1": "PRELIMINARY (gemini): topk 4.11x, join 3.49x, layouts 2.75x, tpch 0.98x, strjoin 0.98x geomean; candidate 0 failures. NOT coverage-equal (main fell back to Spark on reversed_files/many_files/snapshots + fuzz). Round 2 requested."
   }
  ],
  "tasks": [
   "rp-bench-shard-r1",
-  "rp-bench-analysis-r1",
-  "rp-strjoin-repro-r1"
+  "rp-strjoin-repro-r1",
+  "rp-bench-analysis-r2"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
