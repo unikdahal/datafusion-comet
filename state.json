@@ -4,5 +4,5 @@
  "bench":[{"run":37703972798,"result":"baseline-only failures (280)","candidate_failures":0},
           {"run":37746953413,"pins":{"comet":"4226d7e3","iceberg":"288a0ee"},"result":"cancelled-superseded"},
           {"run":37758359536,"pins":{"comet":"92bba61b6","iceberg":"949cc88"},"status":"running"}],
- "tasks":["rp-iceberg-ci-wf-r1","rp-iceberg-review-r1","rp-comet-review-r1"],
+ "tasks":["rp-iceberg-ci-wf-r1","rp-iceberg-review-r1b","rp-comet-review-r1"],
  "missing_evidence":["runtime-pruning-close-inspection-20261008.md (codex cloud)"]}

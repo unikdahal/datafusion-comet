@@ -24,7 +24,7 @@ Machine-readable twin: `state.json`. Update both after every milestone.
 - Previous report `/workspace/reports/runtime-pruning-close-inspection-20261008.md` + JSON: Codex cloud only, NOT accessible. Reconstruct from bench artifacts.
 
 ## Open reviews
-- rp-iceberg-review-r1 (Gemini): bad79ba, 288a0ee, 949cc88 adversarial.
+- rp-iceberg-review-r1b (gemini-3.8-flash-high; r1 on gemini-pro-agent cancelled): bad79ba, 288a0ee, 949cc88 adversarial.
 - rp-comet-review-r1 (Codex): 9cccd0676, 92bba61b6, 4226d7e3c, 058991ede.
 
 ## Next
