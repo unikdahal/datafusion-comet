@@ -1331,7 +1331,8 @@ class CometIcebergNativeSuite
                 .coalesce(1)
                 .selectExpr(s"CAST(id / 100.0 AS DECIMAL($precision,$scale)) AS id")
                 .write
-                .parquet(new File(warehouseDir, s"decimal_dim_${precision}_$scale").getAbsolutePath)
+                .parquet(
+                  new File(warehouseDir, s"decimal_dim_${precision}_$scale").getAbsolutePath)
             }
           }
           spark.read
