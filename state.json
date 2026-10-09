@@ -115,8 +115,7 @@
   }
  ],
  "tasks": [
-  "rp-b3b2-ci-fix-r1",
-  "rp-b7b8-review-r1"
+  "rp-b7b8-review-r2"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -320,13 +319,13 @@
    "item": "B3 NULLS FIRST Top-K translation (Comet)",
    "agent": "gemini rp-w6-b3-impl-r1",
    "branch": "adaptive-ci/ws-b3-nulls-first",
-   "status": "fast-lane rust failing; big-pickle rp-b3b2-ci-fix-r1"
+   "status": "ws-b3 41efdf44d: pin restored to 1f154f5f3 + test expectation fix (rust failure was inherited B4 pin). Unvalidated (Actions blocked)."
   },
   "W7": {
    "item": "B2 Top-K/join filters through safe Filter + spark_modulo (ANSI-gated)",
    "agent": "gemini rp-w7-b2-impl-r1",
    "branch": "adaptive-ci/ws-b2-topk-filters",
-   "status": "fast-lane rust failing; big-pickle rp-b3b2-ci-fix-r1"
+   "status": "ws-b2 9360d387e: pin restored. Unvalidated."
   },
   "W1b": {
    "item": "B1 phase 2 string keys",
@@ -385,14 +384,15 @@
   "batch Comet integration merge: ws-manifest-stats-cache (0635e00d8) + ws-r1-key-types (when green) [+ ws-b3/ws-b2 if fixed]",
   "targeted bench: manifest plan_ms on f_snapshots/f_many_files (cache off/cold/warm)"
  ],
- "blocker": "02:20 UTC: Actions on unikdahal/datafusion-comet: runs created as queued with ZERO jobs; push to integration (fcd020283) created no run; rerun 403 'already running'; agents saw 'Actions has been disabled for this repository'/'repository invocation blocked'. API permissions enabled; githubstatus operational; cache 8.3/10GB. ESCALATED to user (needs account/billing/abuse check).",
+ "blocker": "02:20 UTC: Actions on unikdahal/datafusion-comet: runs created as queued with ZERO jobs; push to integration (fcd020283) created no run; rerun 403 'already running'; agents saw 'Actions has been disabled for this repository'/'repository invocation blocked'. API permissions enabled; githubstatus operational; cache 8.3/10GB. ESCALATED to user (needs account/billing/abuse check). | 04:10: workflow_dispatch -> HTTP 422 'Actions has been disabled for this repository' despite repo setting enabled => ACCOUNT-LEVEL disable on unikdahal. User action required.",
  "unvalidated_queue": [
   "comet integration fcd020283 (manifest cache)",
   "ws-r1-key-types 1ca825a4d",
   "ws-b7-string-topk 5608eab25",
   "ws-b8-file-stats-dec-str bba05c754 (on r1)",
-  "ws-b3-nulls-first",
-  "ws-b2-topk-filters"
+  "ws-b3-nulls-first 41efdf44d",
+  "ws-b2-topk-filters 9360d387e",
+  "NOTE: dropped push events \u2014 after re-enable, use workflow_dispatch per branch"
  ],
  "ops_note": "03:05 UTC: /tmp quota filled by downloaded artifacts; cleaned /tmp/rp-* (regenerable). Download future artifacts to a dir and delete after analysis."
 }
