@@ -382,7 +382,7 @@
   "batch Comet integration merge: ws-manifest-stats-cache (0635e00d8) + ws-r1-key-types (when green) [+ ws-b3/ws-b2 if fixed]",
   "targeted bench: manifest plan_ms on f_snapshots/f_many_files (cache off/cold/warm)"
  ],
- "blocker": "02:20 UTC: Actions on unikdahal/datafusion-comet: runs created as queued with ZERO jobs; push to integration (fcd020283) created no run; rerun 403 'already running'; agents saw 'Actions has been disabled for this repository'/'repository invocation blocked'. API permissions enabled; githubstatus operational; cache 8.3/10GB. ESCALATED to user (needs account/billing/abuse check). | 04:10: workflow_dispatch -> HTTP 422 'Actions has been disabled for this repository' despite repo setting enabled => ACCOUNT-LEVEL disable on unikdahal. User action required.",
+ "blocker": "RESOLVED ~09:18 UTC 2026-10-09: Actions working again (dispatch accepted).",
  "unvalidated_queue": [
   "comet integration fcd020283 (manifest cache)",
   "ws-r1-key-types 1ca825a4d",
@@ -392,5 +392,13 @@
   "ws-b2-topk-filters 9360d387e",
   "NOTE: dropped push events \u2014 after re-enable, use workflow_dispatch per branch"
  ],
- "ops_note": "03:05 UTC: /tmp quota filled by downloaded artifacts; cleaned /tmp/rp-* (regenerable). Download future artifacts to a dir and delete after analysis."
+ "ops_note": "03:05 UTC: /tmp quota filled by downloaded artifacts; cleaned /tmp/rp-* (regenerable). Download future artifacts to a dir and delete after analysis.",
+ "validation_runs": {
+  "integration fcd020283": 37910515173,
+  "ws-r1 1ca825a4d": 37910457026,
+  "ws-b7 5608eab25": 37910518125,
+  "ws-b8 bba05c754": 37910520951,
+  "ws-b3 41efdf44d": 37910523774,
+  "ws-b2 9360d387e": 37910527030
+ }
 }
