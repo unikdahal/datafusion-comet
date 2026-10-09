@@ -34,8 +34,8 @@ import org.apache.comet.shims.CometTypeShim
  *      DateType, TimestampType, TimestampNTZType, exact DecimalType, and uncollated StringType
  *      (excluding fixed CHAR), and corresponding Iceberg schema types
  *      ([[isFileStatsIcebergType]]). Used by CometScanRule (join/TopK/MinMax file pruning),
- *      CometIcebergNativeScan (file statistics collection), and CometLocalTopKExec (Iceberg TopK).
- *   2. Native Parquet reader filter keys ([[isParquetReaderKey]]): ByteType, ShortType,
+ *      CometIcebergNativeScan (file statistics collection), and CometLocalTopKExec (Iceberg
+ *      TopK). 2. Native Parquet reader filter keys ([[isParquetReaderKey]]): ByteType, ShortType,
  *      IntegerType, LongType Used by CometLocalTopKExec (Parquet TopK pushdown).
  *
  * Native join eligibility (including Decimal128 and string variants) and native TopK pushdown

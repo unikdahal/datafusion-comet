@@ -4520,11 +4520,7 @@ fn parse_iceberg_file_metrics(
                 let field = schema.field_by_id(*id)?;
                 let data_type = field.field_type.as_primitive_type()?;
                 // Defensive validation for decimal: scale must not exceed precision.
-                if let iceberg::spec::PrimitiveType::Decimal {
-                    precision,
-                    scale,
-                } = data_type
-                {
+                if let iceberg::spec::PrimitiveType::Decimal { precision, scale } = data_type {
                     if *scale > *precision {
                         return None;
                     }
@@ -5405,23 +5401,29 @@ mod tests {
         // Lower bounds: 1 (negative) and 2 (min p38) survive; 3 (bad scale) and 4 (len 17) dropped
         assert_eq!(
             metrics.lower_bounds().get(&1),
-            Some(&Datum::try_from_bytes(
-                &(-12345_i128).to_be_bytes(),
-                PrimitiveType::Decimal {
-                    precision: 18,
-                    scale: 2,
-                }
-            ).unwrap())
+            Some(
+                &Datum::try_from_bytes(
+                    &(-12345_i128).to_be_bytes(),
+                    PrimitiveType::Decimal {
+                        precision: 18,
+                        scale: 2,
+                    }
+                )
+                .unwrap()
+            )
         );
         assert_eq!(
             metrics.lower_bounds().get(&2),
-            Some(&Datum::try_from_bytes(
-                &(-max_p38).to_be_bytes(),
-                PrimitiveType::Decimal {
-                    precision: 38,
-                    scale: 0,
-                }
-            ).unwrap())
+            Some(
+                &Datum::try_from_bytes(
+                    &(-max_p38).to_be_bytes(),
+                    PrimitiveType::Decimal {
+                        precision: 38,
+                        scale: 0,
+                    }
+                )
+                .unwrap()
+            )
         );
         assert_eq!(metrics.lower_bounds().get(&3), None);
         assert_eq!(metrics.lower_bounds().get(&4), None);
@@ -5429,23 +5431,29 @@ mod tests {
         // Upper bounds: 1 (zero) and 2 (max p38) survive; 5 (overflow) dropped
         assert_eq!(
             metrics.upper_bounds().get(&1),
-            Some(&Datum::try_from_bytes(
-                &(0_i128).to_be_bytes(),
-                PrimitiveType::Decimal {
-                    precision: 18,
-                    scale: 2,
-                }
-            ).unwrap())
+            Some(
+                &Datum::try_from_bytes(
+                    &(0_i128).to_be_bytes(),
+                    PrimitiveType::Decimal {
+                        precision: 18,
+                        scale: 2,
+                    }
+                )
+                .unwrap()
+            )
         );
         assert_eq!(
             metrics.upper_bounds().get(&2),
-            Some(&Datum::try_from_bytes(
-                &max_p38.to_be_bytes(),
-                PrimitiveType::Decimal {
-                    precision: 38,
-                    scale: 0,
-                }
-            ).unwrap())
+            Some(
+                &Datum::try_from_bytes(
+                    &max_p38.to_be_bytes(),
+                    PrimitiveType::Decimal {
+                        precision: 38,
+                        scale: 0,
+                    }
+                )
+                .unwrap()
+            )
         );
         assert_eq!(metrics.upper_bounds().get(&5), None);
     }
@@ -5456,10 +5464,16 @@ mod tests {
 
         let schema = Schema::builder()
             .with_fields(vec![
-                NestedField::optional(1, "str_empty", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::optional(2, "str_unicode", Type::Primitive(PrimitiveType::String)).into(),
-                NestedField::optional(3, "str_invalid_utf8", Type::Primitive(PrimitiveType::String))
+                NestedField::optional(1, "str_empty", Type::Primitive(PrimitiveType::String))
                     .into(),
+                NestedField::optional(2, "str_unicode", Type::Primitive(PrimitiveType::String))
+                    .into(),
+                NestedField::optional(
+                    3,
+                    "str_invalid_utf8",
+                    Type::Primitive(PrimitiveType::String),
+                )
+                .into(),
                 NestedField::optional(4, "str_truncated", Type::Primitive(PrimitiveType::String))
                     .into(),
             ])
@@ -5493,7 +5507,10 @@ mod tests {
 
         // Lower bounds checks
         assert_eq!(metrics.lower_bounds().get(&1), Some(&Datum::string("")));
-        assert_eq!(metrics.lower_bounds().get(&2), Some(&Datum::string(unicode_str)));
+        assert_eq!(
+            metrics.lower_bounds().get(&2),
+            Some(&Datum::string(unicode_str))
+        );
         assert_eq!(metrics.lower_bounds().get(&3), None);
         assert_eq!(
             metrics.lower_bounds().get(&4),
@@ -5502,7 +5519,10 @@ mod tests {
 
         // Upper bounds checks
         assert_eq!(metrics.upper_bounds().get(&1), Some(&Datum::string("")));
-        assert_eq!(metrics.upper_bounds().get(&2), Some(&Datum::string(unicode_str)));
+        assert_eq!(
+            metrics.upper_bounds().get(&2),
+            Some(&Datum::string(unicode_str))
+        );
         assert_eq!(
             metrics.upper_bounds().get(&4),
             Some(&Datum::string("abcdefghijklmnoq"))

@@ -16,6 +16,7 @@
 // under the License.
 
 use super::*;
+use crate::execution::operators::dynamic_filter::is_runtime_pruning_string_key_type;
 use crate::execution::operators::IcebergScanExec;
 use ::iceberg::scan::FileScanTask;
 use ::iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
@@ -32,7 +33,7 @@ fn scan_field(field: Field) -> Arc<dyn ExecutionPlan> {
     let iceberg_type = match field.data_type().clone() {
         DataType::Int32 => PrimitiveType::Int,
         DataType::Int64 => PrimitiveType::Long,
-        data_type if is_string_key_type(&data_type) => PrimitiveType::String,
+        data_type if is_runtime_pruning_string_key_type(&data_type) => PrimitiveType::String,
         _ => unreachable!(),
     };
     let schema = Arc::new(

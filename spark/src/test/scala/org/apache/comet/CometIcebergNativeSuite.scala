@@ -8351,7 +8351,8 @@ class CometIcebergNativeSuite
     }
   }
 
-  test("adversarial string join with long shared prefix beyond truncation produces correct results") {
+  test(
+    "adversarial string join with long shared prefix beyond truncation produces correct results") {
     assume(icebergAvailable, "Iceberg not available in classpath")
     withTempIcebergDir { warehouseDir =>
       withSQLConf(
@@ -8413,7 +8414,8 @@ class CometIcebergNativeSuite
           val dimPath = new File(warehouseDir, "string_adv_dim").getAbsolutePath
           spark
             .range(50, 52)
-            .selectExpr(s"concat('$commonPrefix', '_mmm_', lpad(CAST(id AS STRING), 6, '0')) AS id")
+            .selectExpr(
+              s"concat('$commonPrefix', '_mmm_', lpad(CAST(id AS STRING), 6, '0')) AS id")
             .coalesce(1)
             .write
             .parquet(dimPath)

@@ -25,13 +25,13 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, NullsLast, SortOrde
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType, TimestampNTZType, TimestampType}
+import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType, StringType, TimestampNTZType, TimestampType}
 
 import com.google.common.base.Objects
 
 import org.apache.comet.CometConf
 import org.apache.comet.serde.OperatorOuterClass.{Operator, Sort}
-import org.apache.comet.serde.QueryPlanSerde.{exprToProto, hasCharPruningKey, isBinaryStringPruningType}
+import org.apache.comet.serde.QueryPlanSerde.{exprToProto, hasCharPruningKey}
 
 object CometLocalTopKExec {
 
@@ -51,7 +51,7 @@ object CometLocalTopKExec {
           RuntimePruningKeyTypes.isParquetReaderKey(order.dataType)
         case _: CometIcebergNativeScanExec =>
           RuntimePruningKeyTypes.isSupportedTopKKey(order.dataType) &&
-            (!order.dataType.isInstanceOf[StringType] || order.nullOrdering == NullsLast)
+          (!order.dataType.isInstanceOf[StringType] || order.nullOrdering == NullsLast)
         case _ => false
       })
     }

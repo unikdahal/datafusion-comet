@@ -80,7 +80,8 @@ impl DynamicFilterJoinExec {
     }
 
     fn new(join: &HashJoinExec, config: ConfigOptions) -> Result<Self> {
-        Ok(Self {\n            template: join.builder().reset_state().build()?,
+        Ok(Self {
+            template: join.builder().reset_state().build()?,
             config,
             metrics: ExecutionPlanMetricsSet::new(),
         })
