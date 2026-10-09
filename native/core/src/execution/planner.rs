@@ -1588,7 +1588,7 @@ impl PhysicalPlanner {
                 let has_partial_merge = proto_mode == ProtoAggregateMode::PartialMerge
                     || agg.expr_modes.contains(&partial_merge_value);
 
-                // Keep the direct integer column visible to DataFusion's MIN/MAX
+                // Keep the direct column visible to DataFusion's MIN/MAX
                 // producer only for the explicitly enabled Iceberg shape. All
                 // ordinary aggregates retain their existing cast behavior.
                 let direct_minmax = agg.dynamic_filter_enabled
@@ -3122,7 +3122,7 @@ impl PhysicalPlanner {
 
     /// Builds the child expression of a Min or Max aggregate. When `direct_minmax` is set
     /// and the child is a plain column whose type already matches one of the
-    /// runtime-predicate key types (Int32, Int64, Date32, Timestamp(Microsecond)), the
+    /// runtime-predicate key types (including binary strings), the
     /// column is passed through so the aggregate can use it directly; every other child
     /// is cast to the aggregate's return type first.
     fn direct_minmax_expr(
@@ -3133,13 +3133,7 @@ impl PhysicalPlanner {
     ) -> Result<Arc<dyn PhysicalExpr>, ExecutionError> {
         if direct_minmax
             && child.is::<Column>()
-            && matches!(
-                datatype,
-                DataType::Int32
-                    | DataType::Int64
-                    | DataType::Date32
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
-            )
+            && IcebergMinMaxFilterExec::supports_argument_type(&datatype)
             && child.data_type(schema.as_ref())? == datatype
         {
             Ok(child)

@@ -41,6 +41,8 @@ use futures::StreamExt;
 
 mod reader;
 
+use super::iceberg_reader::reaches_iceberg_reader;
+use super::join::{is_direct_pruning_key, is_string_key_type};
 use super::safety::is_safe_to_prune_before;
 use reader::try_attach_topk_reader_filter;
 
@@ -72,16 +74,28 @@ impl TopKReaderFilterExec {
             return Ok(None);
         }
         let key = &sort.expr()[0].expr;
+        let key_type = key.data_type(sort.input().schema().as_ref())?;
+        let string_key = is_string_key_type(&key_type);
+        // String bounds require the Iceberg binary domain and unannotated column lineage.
+        // NULLS FIRST string support is owned by the separate null-ordering workstream.
+        if string_key
+            && (sort.expr()[0].options.nulls_first
+                || !reaches_iceberg_reader(sort.input())
+                || !is_direct_pruning_key(sort.input(), key))
+        {
+            return Ok(None);
+        }
         if !key.is::<Column>()
-            || !matches!(
-                key.data_type(sort.input().schema().as_ref())?,
-                DataType::Int8
-                    | DataType::Int16
-                    | DataType::Int32
-                    | DataType::Int64
-                    | DataType::Date32
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
-            )
+            || !(string_key
+                || matches!(
+                    key_type,
+                    DataType::Int8
+                        | DataType::Int16
+                        | DataType::Int32
+                        | DataType::Int64
+                        | DataType::Date32
+                        | DataType::Timestamp(TimeUnit::Microsecond, _)
+                ))
         {
             return Ok(None);
         }
