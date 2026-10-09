@@ -166,8 +166,22 @@ jobs:
             Linux-java-maven-
             ${{ runner.os }}-java-maven-
 
-      - name: Check JVM formatting before the native build
-        run: ./mvnw -B -Prelease -Pspark-3.5 spotless:check
+      # Keep formatting reviewable without requiring a local formatter or waiting
+      # for the release library build. Formatting failure still fails this lane.
+      - name: Record Scala formatting differences
+        run: |
+          ./mvnw -B spotless:apply -Pspark-3.5
+          git diff -- spark common > scala-format.patch
+          git checkout -- spark common
+
+      - name: Upload Scala formatting patch
+        uses: actions/upload-artifact@v7
+        with:
+          name: fast-scala-format
+          path: scala-format.patch
+
+      - name: Require formatted Scala sources
+        run: test ! -s scala-format.patch
 
       - name: Build release library
         run: cd native && cargo build --release --locked
