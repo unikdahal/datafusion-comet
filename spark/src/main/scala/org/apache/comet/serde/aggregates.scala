@@ -31,7 +31,7 @@ import org.apache.spark.sql.types.{ArrayType, BinaryType, BooleanType, ByteType,
 import org.apache.comet.CometConf.COMET_EXEC_STRICT_FLOATING_POINT
 import org.apache.comet.CometSparkSessionExtensions.{isSpark41Plus, isSpark42Plus, withFallbackReason}
 import org.apache.comet.expressions.CometEvalMode
-import org.apache.comet.serde.QueryPlanSerde.{evalModeToProto, exprToProto, isStringCollationType, serializeDataType}
+import org.apache.comet.serde.QueryPlanSerde.{evalModeToProto, exprToProto, isBinaryStringPruningType, serializeDataType}
 import org.apache.comet.shims.{CometCollectShim, CometEvalModeUtil, CometTypeShim}
 
 object CometMin extends CometAggregateExpressionSerde[Min] {
@@ -1496,7 +1496,7 @@ object AggSerde {
    * ordering natively, so strict floating-point mode does not apply to them.
    */
   def minMaxSupportLevel(dt: DataType): SupportLevel = {
-    if (dt.isInstanceOf[StringType] && !isStringCollationType(dt)) {
+    if (isBinaryStringPruningType(dt)) {
       Compatible()
     } else if (!minMaxDataTypeSupported(dt)) {
       Unsupported(Some(s"Unsupported data type: $dt"))

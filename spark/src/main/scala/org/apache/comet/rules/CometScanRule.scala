@@ -50,6 +50,7 @@ import org.apache.comet.CometSparkSessionExtensions.{isCometLoaded, isSpark35Plu
 import org.apache.comet.iceberg.{CometIcebergNativeScanMetadata, IcebergReflection, IcebergStorageSchemes}
 import org.apache.comet.objectstore.NativeConfig
 import org.apache.comet.parquet.CometParquetUtils.{encryptionEnabled, isEncryptionConfigSupported, readFieldId}
+import org.apache.comet.serde.QueryPlanSerde.{hasCharPruningKey, isBinaryStringPruningType}
 import org.apache.comet.serde.operator.{CometIcebergNativeScan, CometNativeScan}
 import org.apache.comet.shims.{CometTypeShim, ShimCometStreaming, ShimFileFormat, ShimSubqueryBroadcast}
 
@@ -1243,7 +1244,7 @@ object CometScanRule extends Logging {
       case attr: Attribute
           if attr.dataType == IntegerType || attr.dataType == LongType ||
             attr.dataType == DateType || attr.dataType == TimestampType ||
-            attr.dataType == TimestampNTZType =>
+            attr.dataType == TimestampNTZType || isBinaryStringPruningType(attr.dataType) =>
         Some(attr)
       case _ => None
     }
@@ -1296,7 +1297,8 @@ object CometScanRule extends Logging {
 
         case limit: TakeOrderedAndProjectExec
             if topK && limit.limit > 0 && limit.sortOrder.nonEmpty &&
-              !SortOrder.orderingSatisfies(limit.child.outputOrdering, limit.sortOrder) =>
+              !SortOrder.orderingSatisfies(limit.child.outputOrdering, limit.sortOrder) &&
+              !hasCharPruningKey(limit.child, limit.sortOrder.map(_.child)) =>
           directKeyAttribute(limit.sortOrder.head.child)
             .foreach(key => readerInput(limit.child, key, allowFilters = false))
 
@@ -1306,7 +1308,8 @@ object CometScanRule extends Logging {
           val expression = aggregate.aggregateExpressions.head
           val function = expression.aggregateFunction
           if (expression.mode == Partial && !expression.isDistinct && expression.filter.isEmpty &&
-            (function.isInstanceOf[Min] || function.isInstanceOf[Max])) {
+            (function.isInstanceOf[Min] || function.isInstanceOf[Max]) &&
+            !hasCharPruningKey(aggregate.child, function.children)) {
             function.children.headOption
               .flatMap(directKeyAttribute)
               .foreach(key => readerInput(aggregate.child, key, allowFilters = true))

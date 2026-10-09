@@ -25,13 +25,13 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, NullsLast, SortOrde
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType, StringType, TimestampNTZType, TimestampType}
+import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType, TimestampNTZType, TimestampType}
 
 import com.google.common.base.Objects
 
 import org.apache.comet.CometConf
 import org.apache.comet.serde.OperatorOuterClass.{Operator, Sort}
-import org.apache.comet.serde.QueryPlanSerde.{exprToProto, hasCharPruningKey, isStringCollationType}
+import org.apache.comet.serde.QueryPlanSerde.{exprToProto, hasCharPruningKey, isBinaryStringPruningType}
 
 object CometLocalTopKExec {
 
@@ -42,7 +42,7 @@ object CometLocalTopKExec {
       return None
     }
 
-    // Support a direct integer, date, timestamp or binary string first key in a native Parquet or Iceberg scan.
+    // Support a direct integer, date, timestamp or binary string first key.
     // An Iceberg scan may also carry further direct-column keys: only the first key bounds the
     // reader. Other plans retain the existing TopKInput execution path.
     def firstKeyEligible(scan: CometLeafExec, order: SortOrder): Boolean = {
@@ -55,8 +55,8 @@ object CometLocalTopKExec {
         case _: CometIcebergNativeScanExec =>
           order.dataType == IntegerType || order.dataType == LongType ||
           order.dataType == DateType || order.dataType == TimestampType ||
-          order.dataType == TimestampNTZType || (order.dataType.isInstanceOf[StringType] &&
-            !isStringCollationType(order.dataType) && order.nullOrdering == NullsLast)
+          order.dataType == TimestampNTZType || (isBinaryStringPruningType(order.dataType) &&
+            order.nullOrdering == NullsLast)
         case _ => false
       })
     }

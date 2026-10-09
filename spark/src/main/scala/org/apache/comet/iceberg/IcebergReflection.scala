@@ -469,7 +469,7 @@ object IcebergReflection extends Logging {
     if (isStagedScan(scan)) tasksFromTaskGroups(scan) else tasksFromTasksAccessor(scan)
 
   /**
-   * Top-level INT, BIGINT, DATE and microsecond TIMESTAMP columns of `schema`: the only key types
+   * Top-level INT, BIGINT, DATE, microsecond TIMESTAMP and STRING columns of `schema`: the only key types
    * the runtime predicate producers support, and so the only columns whose statistics can prune a
    * file.
    */
@@ -483,7 +483,7 @@ object IcebergReflection extends Logging {
         .toSeq
         .flatMap { column =>
           val typeStr = getMethod(column.getClass, "type").invoke(column).toString
-          if (Set("int", "long", "date", "timestamp", "timestamptz").contains(typeStr)) {
+          if (Set("int", "long", "date", "timestamp", "timestamptz", "string").contains(typeStr)) {
             Some(getMethod(column.getClass, "name").invoke(column).asInstanceOf[String])
           } else {
             None
