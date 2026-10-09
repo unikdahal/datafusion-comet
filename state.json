@@ -3,7 +3,7 @@
  "heads": {
   "iceberg": "17d0a12326333bc401efd1624f0981854211413d (string/binary keep row filters; on 1f154f5f3; CI green)",
   "comet": "007080ae0 (string join keys on c408a06bd; fast lane green; integration full CI running)",
-  "bench": "7c2dd47e8 (B4/B6 targeted)",
+  "bench": "cbb461b77 (targeted string + revert controls)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
  "ci": {
@@ -107,7 +107,9 @@
  ],
  "tasks": [
   "rp-b3b2-ci-fix-r1",
-  "rp-manifest-impl-r1"
+  "rp-manifest-impl-r1",
+  "rp-r1-allowlist-r1",
+  "bench cbb461b77"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -256,11 +258,6 @@
    "id": "R6",
    "item": "separate 9 behavior changes into own units; 26-PR upstream split plan",
    "status": "later"
-  },
-  {
-   "id": "R1",
-   "item": "unify join-key type allowlist (6+ places) + agreement test",
-   "status": "UNBLOCKED (strings merged)"
   }
  ],
  "policy": {
@@ -351,6 +348,11 @@
    "item": "eliminate/cheapen second manifest scan for runtime stats (scales with manifests)",
    "agent": "gemini rp-manifest-rescan-design-r1 (design)",
    "status": "impl codex rp-manifest-impl-r1 -> adaptive-ci/ws-manifest-stats-cache"
+  },
+  "R1": {
+   "item": "unify join-key type allowlist + agreement tests",
+   "agent": "gemini rp-r1-allowlist-r1",
+   "branch": "adaptive-ci/ws-r1-key-types"
   }
  },
  "providers_note": "codex at capacity; sonnet session limit until 04:40 IST; gemini + big-pickle active",
