@@ -150,3 +150,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Targeted string bench cbb461b77 started; R1 allowlist unification started (gemini).
 - Manifest stats cache ready (0635e00d8, reviewed). Batch merge with R1 pending.
 - String bench: f_str joins 2.6-4.8x, unsorted dim_128 2.50x restored; topk10 unsorted ratio diff is runner noise (work identical). B7 string TopK queued.
+- Codex weekly limit until 2026-10-14 12:15 IST. B7 string TopK -> gemini.

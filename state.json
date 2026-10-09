@@ -117,7 +117,7 @@
  "tasks": [
   "rp-b3b2-ci-fix-r1",
   "rp-r1-allowlist-r2",
-  "bench cbb461b77"
+  "rp-b7-string-topk-r2"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -367,9 +367,14 @@
    "item": "unify join-key type allowlist + agreement tests",
    "agent": "gemini rp-r1-allowlist-r1",
    "branch": "adaptive-ci/ws-r1-key-types"
+  },
+  "B7": {
+   "item": "string Top-K / min-max pruning",
+   "agent": "gemini rp-b7-string-topk-r2",
+   "branch": "adaptive-ci/ws-b7-string-topk"
   }
  },
- "providers_note": "codex at capacity; sonnet session limit until 04:40 IST; gemini + big-pickle active",
+ "providers_note": "CODEX WEEKLY LIMIT: unavailable until 2026-10-14 12:15 IST. Use gemini-3.8-flash-high (shared quota with 3.7; resets ~hourly), opencode/big-pickle, sonnet subagents (session limits).",
  "pending": [
   "batch Comet integration merge: ws-manifest-stats-cache (0635e00d8) + ws-r1-key-types (when green) [+ ws-b3/ws-b2 if fixed]",
   "targeted bench: manifest plan_ms on f_snapshots/f_many_files (cache off/cold/warm)"
