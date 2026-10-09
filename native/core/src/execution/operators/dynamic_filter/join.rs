@@ -402,7 +402,10 @@ pub(super) fn is_string_key_type(data_type: &DataType) -> bool {
 /// Reader attachment stops at those boundaries; it cannot reach a pre-cast scan.
 /// In particular, a lossless build upcast below a broadcast exchange cannot change
 /// the probe reader's scale, so Spark-side lineage tracking adds no safety here.
-pub(super) fn is_direct_pruning_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalExpr>) -> bool {
+pub(super) fn is_direct_pruning_key(
+    input: &Arc<dyn ExecutionPlan>,
+    key: &Arc<dyn PhysicalExpr>,
+) -> bool {
     use datafusion::physical_plan::filter::FilterExec;
 
     let Some(column) = key.downcast_ref::<Column>() else {

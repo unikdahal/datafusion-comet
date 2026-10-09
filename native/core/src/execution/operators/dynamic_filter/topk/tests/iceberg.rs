@@ -248,12 +248,17 @@ fn binary_string_topk_attaches_only_for_nulls_last() {
                             nulls_first,
                         },
                     );
-                    let plan = TopKReaderFilterExec::try_new(&sort, &ConfigOptions::default())
-                        .unwrap();
+                    let plan =
+                        TopKReaderFilterExec::try_new(&sort, &ConfigOptions::default()).unwrap();
                     if nulls_first {
                         assert!(plan.is_none());
                     } else {
-                        assert!(plan.unwrap().build_runtime_sort().unwrap().reader_filter_attached);
+                        assert!(
+                            plan.unwrap()
+                                .build_runtime_sort()
+                                .unwrap()
+                                .reader_filter_attached
+                        );
                     }
                 }
             }
@@ -268,8 +273,9 @@ fn annotated_string_columns_fail_closed() {
         ("__CHAR_VARCHAR_TYPE_STRING", "char(24)"),
         ("ARROW:extension:name", "unknown"),
     ] {
-        let field = Field::new("key", DataType::Utf8, true)
-            .with_metadata(std::collections::HashMap::from([(name.into(), value.into())]));
+        let field = Field::new("key", DataType::Utf8, true).with_metadata(
+            std::collections::HashMap::from([(name.into(), value.into())]),
+        );
         for descending in [false, true] {
             let sort = sort(
                 scan_field(field.clone()),
@@ -279,9 +285,11 @@ fn annotated_string_columns_fail_closed() {
                     nulls_first: false,
                 },
             );
-            assert!(TopKReaderFilterExec::try_new(&sort, &ConfigOptions::default())
-                .unwrap()
-                .is_none());
+            assert!(
+                TopKReaderFilterExec::try_new(&sort, &ConfigOptions::default())
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 }
