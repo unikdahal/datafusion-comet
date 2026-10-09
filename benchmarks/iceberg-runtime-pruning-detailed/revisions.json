@@ -5,35 +5,7 @@
     "ref": "refs/heads/main"
   },
   "candidate": {
-    "comet": "007080ae028edddf3ca2e360c3d38cf17504edbd",
+    "comet": "2aec2d370fab5361a96b63682832ff41c8366128",
     "iceberg": "17d0a12326333bc401efd1624f0981854211413d"
-  },
-  "suites": [
-    "join",
-    "strjoin",
-    "topk_minmax"
-  ],
-  "queries": {
-    "join": [
-      "join_inner__f_str__dim_10k",
-      "join_inner__f_str__dim_128",
-      "join_inner__f_str__dim_128_spread",
-      "join_inner__f_eq_deletes_str__dim_128",
-      "join_inner__f_unsorted__dim_128",
-      "join_inner__f_dec__dim_128"
-    ],
-    "strjoin": [
-      "strjoin_str_broadcast_plain_1000",
-      "strjoin_str_broadcast_plain_100000",
-      "strjoin_str_shuffled_hash_distinct_100000",
-      "strjoin_str_shuffled_hash_plain_500000",
-      "strjoin_str_sort_merge_plain_500000",
-      "strjoin_str_broadcast_distinct_10000"
-    ],
-    "topk_minmax": [
-      "topk10__f_str",
-      "topk10__f_unsorted",
-      "topk10__f_eq_deletes_str"
-    ]
   }
 }
