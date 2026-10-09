@@ -2,7 +2,7 @@
  "updated": "2026-10-09 (W1 done)",
  "heads": {
   "iceberg": "17d0a12326333bc401efd1624f0981854211413d (string/binary keep row filters; on 1f154f5f3; CI green)",
-  "comet": "fcd020283 GREEN (37910515173: manifest cache validated)",
+  "comet": "93d2ddc0b (manifest cache + NULLS FIRST + topk-through-filters; staging fast lane green 37918699731; integration full CI will run)",
   "bench": "cbb461b77 (targeted string + revert controls)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
@@ -116,7 +116,7 @@
  ],
  "tasks": [
   "rp-r1b8-ci-fix-r1",
-  "staging run 37918699731"
+  "staging run 37922608746"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -320,13 +320,13 @@
    "item": "B3 NULLS FIRST Top-K translation (Comet)",
    "agent": "gemini rp-w6-b3-impl-r1",
    "branch": "adaptive-ci/ws-b3-nulls-first",
-   "status": "ws-b3 green; reviewed (all-null-heap -> is_null inclusive). Cherry-picked with b2 onto fcd020283 -> staging adaptive-ci/ws-merge-b3b2 93d2ddc0b (fast run 37918699731) -> then ff integration"
+   "status": "MERGED 93d2ddc0b"
   },
   "W7": {
    "item": "B2 Top-K/join filters through safe Filter + spark_modulo (ANSI-gated)",
    "agent": "gemini rp-w7-b2-impl-r1",
    "branch": "adaptive-ci/ws-b2-topk-filters",
-   "status": "ws-b2 green; reviewed (modulo safe only with non-ANSI zero guard or constant non-zero int divisor). In staging ws-merge-b3b2."
+   "status": "MERGED 93d2ddc0b"
   },
   "W1b": {
    "item": "B1 phase 2 string keys",
@@ -377,7 +377,7 @@
    "item": "string Top-K / min-max pruning",
    "agent": "gemini rp-b7-string-topk-r2",
    "branch": "adaptive-ci/ws-b7-string-topk",
-   "status": "GREEN 4e4ace6be (37919067134; 3.5 withSQLConf Unit fix); reviewed APPROVE. Merge after staging b3b2."
+   "status": "cherry-picked onto 93d2ddc0b (fast-lane workflow conflict resolved: kept B7 patch-artifact formatting check) -> staging ws-merge-b7 0c32f9d36 run 37922608746"
   }
  },
  "providers_note": "CODEX WEEKLY LIMIT: unavailable until 2026-10-14 12:15 IST. Use gemini-3.8-flash-high (shared quota with 3.7; resets ~hourly), opencode/big-pickle, sonnet subagents (session limits).",
