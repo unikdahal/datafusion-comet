@@ -31,10 +31,14 @@ use iceberg::scan::FileScanTask;
 use iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
 
 fn scan(data_type: DataType) -> Arc<dyn ExecutionPlan> {
-    let iceberg_type = match data_type {
+    scan_field(Field::new("key", data_type, true))
+}
+
+fn scan_field(field: Field) -> Arc<dyn ExecutionPlan> {
+    let iceberg_type = match field.data_type().clone() {
         DataType::Int32 => PrimitiveType::Int,
         DataType::Int64 => PrimitiveType::Long,
-        DataType::Utf8 => PrimitiveType::String,
+        data_type if super::super::join::is_string_key_type(&data_type) => PrimitiveType::String,
         _ => unreachable!(),
     };
     let schema = Arc::new(
@@ -63,7 +67,7 @@ fn scan(data_type: DataType) -> Arc<dyn ExecutionPlan> {
     Arc::new(
         IcebergScanExec::new(
             "/tmp/metadata.json".into(),
-            Arc::new(Schema::new(vec![Field::new("key", data_type, true)])),
+            Arc::new(Schema::new(vec![field])),
             Default::default(),
             String::new(),
             vec![task],
@@ -168,7 +172,6 @@ fn unsupported_shapes_and_disabled_config_retain_aggregate() {
     for aggregate in [
         aggregate(scan(DataType::Int32), true, true, false),
         aggregate(scan(DataType::Int32), true, false, true),
-        aggregate(scan(DataType::Utf8), true, false, false),
         aggregate(
             Arc::new(EmptyExec::new(Arc::new(Schema::new(vec![Field::new(
                 "key",
@@ -272,4 +275,42 @@ fn minmax_attaches_through_filter_and_projection() {
             .is_some(),
         "MIN must reach the Iceberg reader through the filter and the projection"
     );
+}
+
+#[test]
+fn binary_string_minmax_attaches_for_all_arrow_encodings() {
+    for value_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
+        for data_type in [
+            value_type.clone(),
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(value_type)),
+        ] {
+            for max in [false, true] {
+                let aggregate = aggregate(scan(data_type.clone()), max, false, false);
+                let wrapper = IcebergMinMaxFilterExec::try_new(&aggregate, &ConfigOptions::default())
+                    .unwrap()
+                    .expect("binary string MIN/MAX");
+                let runtime = wrapper.build_runtime_aggregate().unwrap();
+                assert!(runtime.input().is::<IcebergScanExec>());
+                assert_eq!(runtime.dynamic_expressions_produced().len(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn annotated_string_columns_fail_closed() {
+    for (name, value) in [
+        ("__COLLATIONS", "UTF8_LCASE"),
+        ("__CHAR_VARCHAR_TYPE_STRING", "char(24)"),
+        ("ARROW:extension:name", "unknown"),
+    ] {
+        let field = Field::new("key", DataType::Utf8, true)
+            .with_metadata(std::collections::HashMap::from([(name.into(), value.into())]));
+        for max in [false, true] {
+            let aggregate = aggregate(scan_field(field.clone()), max, false, false);
+            assert!(IcebergMinMaxFilterExec::try_new(&aggregate, &ConfigOptions::default())
+                .unwrap()
+                .is_none());
+        }
+    }
 }

@@ -62,7 +62,7 @@ import org.apache.comet.rules.CometExecRule
 import org.apache.comet.serde.{CometCollectBuffer, CometOperatorSerde, Compatible, OperatorOuterClass, QueryContextInterner, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.{AggregateMode => CometAggregateMode, Operator}
 import org.apache.comet.serde.QueryPlanSerde
-import org.apache.comet.serde.QueryPlanSerde.{aggExprToProto, exprToProto, isStringCollationType, supportedSortType}
+import org.apache.comet.serde.QueryPlanSerde.{aggExprToProto, exprToProto, hasCharPruningKey, isStringCollationType, supportedSortType}
 import org.apache.comet.serde.operator.CometSink
 import org.apache.comet.shims.MergeRowsMetricsShim
 
@@ -2360,7 +2360,8 @@ trait CometBaseAggregate[T <: BaseAggregateExec] extends CometOperatorSerde[T] {
         hashAggBuilder.addAllGroupingExprs(groupingExprs.map(_.get).asJava)
         hashAggBuilder.addAllAggExprs(aggExprs.map(_.get).asJava)
         hashAggBuilder.setDynamicFilterEnabled(
-          CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get(aggregate.conf))
+          CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get(aggregate.conf) &&
+            !hasCharPruningKey(child, aggregateExpressions.flatMap(_.aggregateFunction.children)))
         hashAggBuilder.setModeValue(mode.getNumber)
         hashAggBuilder.setOrderedByGroupingKeys(orderedByGroupingKeys)
 
@@ -2778,39 +2779,6 @@ trait CometHashJoin {
     case _ => false
   }
 
-  // Catalyst represents CHAR as StringType plus metadata and may insert padding projections.
-  // Trace aliases to that metadata, including below exchanges. Stored Iceberg strings do not
-  // promise CHAR padding, so reader pruning must not compare them to padded join literals.
-  private def hasCharJoinKey(input: SparkPlan, keys: Seq[Expression]): Boolean = {
-    val stringKeys = keys.filter(_.dataType.isInstanceOf[StringType])
-    if (stringKeys.isEmpty) {
-      return false
-    }
-    val references = stringKeys.flatMap(_.references).map(_.exprId).toSet
-    def isChar(attribute: Attribute): Boolean =
-      attribute.metadata.contains("__CHAR_VARCHAR_TYPE_STRING") &&
-        attribute.metadata
-          .getString("__CHAR_VARCHAR_TYPE_STRING")
-          .toLowerCase(Locale.ROOT)
-          .startsWith("char(")
-    if (stringKeys.flatMap(_.references).exists(isChar) ||
-      input.output.exists(a => references.contains(a.exprId) && isChar(a))) {
-      true
-    } else {
-      val projects = input match {
-        case project: ProjectExec => project.projectList
-        case project: CometProjectExec => project.projectList
-        case _ => Seq.empty
-      }
-      val sourceKeys = if (projects.nonEmpty) {
-        projects.filter(p => references.contains(p.exprId))
-      } else {
-        stringKeys
-      }
-      input.children.exists(child => hasCharJoinKey(child, sourceKeys))
-    }
-  }
-
   def doConvert(
       join: HashJoin,
       builder: Operator.Builder,
@@ -2912,8 +2880,8 @@ trait CometHashJoin {
         .setNullAwareAntiJoin(isNullAwareAntiJoin)
         .setDynamicFilterEnabled(
           CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get(join.conf) &&
-            !hasCharJoinKey(join.left, join.leftKeys) &&
-            !hasCharJoinKey(join.right, join.rightKeys))
+            !hasCharPruningKey(join.left, join.leftKeys) &&
+            !hasCharPruningKey(join.right, join.rightKeys))
       condition.foreach(joinBuilder.setCondition)
       Some(builder.setHashJoin(joinBuilder).build())
     } else {

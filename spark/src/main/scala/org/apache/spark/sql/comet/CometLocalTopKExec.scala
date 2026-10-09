@@ -21,17 +21,17 @@ package org.apache.spark.sql.comet
 
 import scala.jdk.CollectionConverters._
 
-import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, NullsLast, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType, TimestampNTZType, TimestampType}
+import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType, StringType, TimestampNTZType, TimestampType}
 
 import com.google.common.base.Objects
 
 import org.apache.comet.CometConf
 import org.apache.comet.serde.OperatorOuterClass.{Operator, Sort}
-import org.apache.comet.serde.QueryPlanSerde.exprToProto
+import org.apache.comet.serde.QueryPlanSerde.{exprToProto, hasCharPruningKey, isStringCollationType}
 
 object CometLocalTopKExec {
 
@@ -42,7 +42,7 @@ object CometLocalTopKExec {
       return None
     }
 
-    // Support a direct signed integer or date first key in a native Parquet or Iceberg scan.
+    // Support a direct integer, date, timestamp or binary string first key in a native Parquet or Iceberg scan.
     // An Iceberg scan may also carry further direct-column keys: only the first key bounds the
     // reader. Other plans retain the existing TopKInput execution path.
     def firstKeyEligible(scan: CometLeafExec, order: SortOrder): Boolean = {
@@ -55,7 +55,8 @@ object CometLocalTopKExec {
         case _: CometIcebergNativeScanExec =>
           order.dataType == IntegerType || order.dataType == LongType ||
           order.dataType == DateType || order.dataType == TimestampType ||
-          order.dataType == TimestampNTZType
+          order.dataType == TimestampNTZType || (order.dataType.isInstanceOf[StringType] &&
+            !isStringCollationType(order.dataType) && order.nullOrdering == NullsLast)
         case _ => false
       })
     }
@@ -68,7 +69,8 @@ object CometLocalTopKExec {
         Some(protos).filter(_.forall(_.isDefined)).map(_.flatten).map { sortOrders =>
           // Spark's physical limit already includes the offset. Each partition retains that
           // many candidates; only the final TopK applies the offset after the shuffle.
-          val dynamicFilterEnabled = CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get(op.conf)
+          val dynamicFilterEnabled = CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get(op.conf) &&
+            !hasCharPruningKey(scan, orders.map(_.child))
           val sort = Sort
             .newBuilder()
             .addAllSortOrders(sortOrders.asJava)

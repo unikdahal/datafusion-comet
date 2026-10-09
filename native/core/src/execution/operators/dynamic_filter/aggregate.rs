@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Attach one partial integer MIN/MAX producer to a native Iceberg scan.
+//! Attach one partial MIN/MAX producer to a native Iceberg scan.
 
 use std::fmt::Formatter;
 use std::sync::Arc;
@@ -38,6 +38,7 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 
 use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_reader_filter};
+use super::join::{is_direct_pruning_key, is_string_key_type};
 use crate::execution::operators::RuntimeScanOrder;
 
 /// AggregateExec's default state reset can retain producer bounds. Reconstruct
@@ -54,6 +55,18 @@ impl IcebergMinMaxFilterExec {
     /// The planner keeps the aggregate argument uncast only for such inputs.
     pub(crate) fn accepts_input(input: &Arc<dyn ExecutionPlan>) -> bool {
         reaches_iceberg_reader(input)
+    }
+
+    /// Keep the planner and producer eligibility in one place.
+    pub(crate) fn supports_argument_type(data_type: &DataType) -> bool {
+        is_string_key_type(data_type)
+            || matches!(
+                data_type,
+                DataType::Int32
+                    | DataType::Int64
+                    | DataType::Date32
+                    | DataType::Timestamp(TimeUnit::Microsecond, _)
+            )
     }
 
     pub(crate) fn try_new(
@@ -84,14 +97,11 @@ impl IcebergMinMaxFilterExec {
         let [argument] = arguments.as_slice() else {
             return Ok(None);
         };
+        let argument_type = argument.data_type(aggregate.input().schema().as_ref())?;
         if !argument.is::<Column>()
-            || !matches!(
-                argument.data_type(aggregate.input().schema().as_ref())?,
-                DataType::Int32
-                    | DataType::Int64
-                    | DataType::Date32
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
-            )
+            || !Self::supports_argument_type(&argument_type)
+            || (is_string_key_type(&argument_type)
+                && !is_direct_pruning_key(aggregate.input(), argument))
         {
             return Ok(None);
         }

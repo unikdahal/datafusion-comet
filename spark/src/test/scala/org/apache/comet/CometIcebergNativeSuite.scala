@@ -41,7 +41,7 @@ import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExchangeExec, ShuffleExchangeLike}
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{ArrayType, StringType, StructType, TimestampType}
+import org.apache.spark.sql.types.{ArrayType, MetadataBuilder, StringType, StructType, TimestampType}
 
 import org.apache.comet.CometSparkSessionExtensions.{isSpark35Plus, isSpark40Plus, isSpark41Plus, isSpark42Plus}
 import org.apache.comet.iceberg.{IcebergReflection, RESTCatalogHelper}
@@ -1935,6 +1935,157 @@ class CometIcebergNativeSuite
         } finally {
           spark.catalog.dropTempView("runtime_minmax_fact")
           spark.sql(s"DROP TABLE IF EXISTS $table PURGE")
+        }
+      }
+    }
+  }
+
+  test("binary string TopK and MIN/MAX prune Iceberg with truncated bounds") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+        SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+        "spark.sql.iceberg.aggregate-push-down.enabled" -> "false",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_TOPK_FUSION_ENABLED.key -> "true",
+        CometConf.COMET_BATCH_SIZE.key -> "1024",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
+        for (dictionary <- Seq(false, true)) {
+          val table = s"test_cat.db.runtime_string_extrema_$dictionary"
+          spark.sql(s"""CREATE TABLE $table (hi STRING, lo STRING, payload STRING) USING iceberg
+            TBLPROPERTIES ('format-version'='2', 'write.distribution-mode'='none',
+              'read.split.adaptive-size.enabled'='false', 'read.split.open-file-cost'='1',
+              'write.metadata.metrics.column.hi'='truncate(16)',
+              'write.metadata.metrics.column.lo'='truncate(16)',
+              'parquet.enable.dictionary'='$dictionary',
+              'write.parquet.row-group-size-bytes'='131072',
+              'write.parquet.compression-codec'='uncompressed')""")
+          try {
+            // Repeated keys exercise dictionary decoding. Both useful directions have
+            // their best values first; suffixes differ beyond the manifest truncation.
+            withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+              spark
+                .range(120000L)
+                .coalesce(1)
+                .sortWithinPartitions("id")
+                .selectExpr(
+                  "CASE WHEN id % 17 = 0 THEN NULL WHEN id < 32 THEN 'é東京🙂' ELSE " +
+                    "concat('abcdefghijklmnop', " +
+                    "lpad(CAST((120000 - id) DIV 32 AS STRING), 6, '0')) END AS hi",
+                  "CASE WHEN id % 17 = 0 THEN NULL WHEN id < 32 THEN '' ELSE " +
+                    "concat('abcdefghijklmnop', " +
+                    "lpad(CAST(id DIV 32 AS STRING), 6, '0')) END AS lo",
+                  "sha2(CAST(id AS STRING), 256) AS payload")
+                .write
+                .format("iceberg")
+                .mode("append")
+                .saveAsTable(table)
+              val files = spark.sql(s"SELECT lower_bounds, upper_bounds, file_path FROM $table.files")
+                .collect()
+              assert(files.length == 1)
+              assert(new String(files.head.getMap[Int, Array[Byte]](0)(1), UTF_8) ==
+                "abcdefghijklmnop")
+              assert(new String(files.head.getMap[Int, Array[Byte]](1)(2), UTF_8) ==
+                "abcdefghijklmnoq")
+              val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
+                org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
+                  new org.apache.hadoop.fs.Path(files.head.getString(2)),
+                  spark.sessionState.newHadoopConf()))
+              try {
+                assert(reader.getRowGroups.size >= 8)
+                val encodings = reader.getRowGroups.asScala.flatMap { group =>
+                  group.getColumns.asScala
+                    .filter(column => Set("hi", "lo").contains(column.getPath.toDotString))
+                    .flatMap(_.getEncodings.asScala)
+                }
+                val usesDictionary = encodings.exists(encoding =>
+                  encoding == org.apache.parquet.column.Encoding.RLE_DICTIONARY ||
+                    encoding == org.apache.parquet.column.Encoding.PLAIN_DICTIONARY)
+                assert(usesDictionary == dictionary, s"Unexpected string encodings: $encodings")
+              } finally {
+                reader.close()
+              }
+            }
+            spark.read
+              .format("iceberg")
+              .option("split-size", "134217728")
+              .load(table)
+              .createOrReplaceTempView("string_extrema_fact")
+            val queries = Seq(
+              "SELECT lo FROM string_extrema_fact ORDER BY lo ASC NULLS LAST LIMIT 10",
+              "SELECT hi FROM string_extrema_fact ORDER BY hi DESC NULLS LAST LIMIT 10",
+              "SELECT min(lo) FROM string_extrema_fact",
+              "SELECT max(hi) FROM string_extrema_fact")
+            for (query <- queries) {
+              def run(enabled: Boolean): Long = {
+                withSQLConf(
+                  CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key -> enabled.toString,
+                  CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+                  val (_, plan) = checkSparkAnswer(query)
+                  val scans = collectIcebergNativeScans(plan)
+                  assert(scans.size == 1, s"Expected native string scan: $plan")
+                  val scan = scans.head
+                  assert(scan.metrics("num_splits").value == 1L)
+                  val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value +
+                    scan.metrics("iceberg_runtime_file_tasks_pruned").value
+                  if (enabled) {
+                    assert(scan.metrics("iceberg_runtime_predicate_tasks").value > 0L)
+                    assert(scan.metrics("iceberg_runtime_predicate_refreshes").value > 0L)
+                    assert(pruned > 0L, s"String threshold did not prune: $query\n$plan")
+                  } else {
+                    assert(scan.metrics("iceberg_runtime_predicate_tasks").value == 0L)
+                    assert(pruned == 0L)
+                  }
+                  scan.metrics("bytes_scanned").value
+                }
+              }
+              val fullBytes = run(false)
+              val liveBytes = run(true)
+              assert(liveBytes > 0L && liveBytes < fullBytes,
+                s"$query: live=$liveBytes full=$fullBytes")
+            }
+            def checkNoPruning(query: String): Unit = {
+              withSQLConf(
+                CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key -> "true",
+                CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key -> "true") {
+                val (_, plan) = checkSparkAnswer(query)
+                val scans = collectIcebergNativeScans(plan)
+                assert(scans.size == 1, s"Expected native Iceberg control scan: $plan")
+                assert(scans.head.metrics("iceberg_runtime_predicate_tasks").value == 0L)
+                assert(scans.head.metrics("iceberg_runtime_row_groups_pruned").value == 0L)
+                assert(scans.head.metrics("iceberg_runtime_file_tasks_pruned").value == 0L)
+              }
+            }
+            // String NULLS FIRST translation belongs to the separate null-ordering branch.
+            checkNoPruning(
+              "SELECT lo FROM string_extrema_fact ORDER BY lo ASC NULLS FIRST LIMIT 10")
+            // Catalyst carries CHAR on StringType attributes, even after aliases.
+            val charMetadata = new MetadataBuilder()
+              .putString("__CHAR_VARCHAR_TYPE_STRING", "char(24)")
+              .build()
+            spark.table("string_extrema_fact")
+              .select(col("lo").as("id", charMetadata))
+              .createOrReplaceTempView("string_extrema_char")
+            checkNoPruning(
+              "SELECT id FROM string_extrema_char ORDER BY id ASC NULLS LAST LIMIT 10")
+            checkNoPruning("SELECT min(id) FROM string_extrema_char")
+            checkNoPruning("SELECT max(id) FROM string_extrema_char")
+            if (isSpark40Plus) {
+              checkNoPruning("SELECT lo FROM string_extrema_fact " +
+                "ORDER BY lo COLLATE UTF8_LCASE ASC NULLS LAST LIMIT 10")
+              checkNoPruning("SELECT min(lo COLLATE UTF8_LCASE) FROM string_extrema_fact")
+              checkNoPruning("SELECT max(lo COLLATE UTF8_LCASE) FROM string_extrema_fact")
+            }
+          } finally {
+            spark.catalog.dropTempView("string_extrema_fact")
+            spark.catalog.dropTempView("string_extrema_char")
+            spark.sql(s"DROP TABLE IF EXISTS $table PURGE")
+          }
         }
       }
     }

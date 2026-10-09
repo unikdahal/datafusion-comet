@@ -308,6 +308,96 @@ mod tests {
     }
 
     #[test]
+    fn string_thresholds_preserve_strictness_and_full_literal() {
+        use datafusion::physical_expr::expressions::lit;
+
+        for value in ["", "é東京🙂", "abcdefghijklmnop000000", "abcdefghijklmnop999999"] {
+            for scalar in [
+                ScalarValue::Utf8(Some(value.into())),
+                ScalarValue::LargeUtf8(Some(value.into())),
+                ScalarValue::Utf8View(Some(value.into())),
+            ] {
+                for literal in [
+                    scalar.clone(),
+                    ScalarValue::Dictionary(
+                        Box::new(arrow::datatypes::DataType::Int32),
+                        Box::new(scalar),
+                    ),
+                ] {
+                    for (op, expected) in [
+                        (Operator::Lt, Reference::new("id").less_than(Datum::string(value))),
+                        (Operator::Gt, Reference::new("id").greater_than(Datum::string(value))),
+                        (
+                            Operator::LtEq,
+                            Reference::new("id").less_than_or_equal_to(Datum::string(value)),
+                        ),
+                        (
+                            Operator::GtEq,
+                            Reference::new("id").greater_than_or_equal_to(Datum::string(value)),
+                        ),
+                    ] {
+                        let expression: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+                            Arc::new(Column::new("key", 0)),
+                            op,
+                            lit(literal.clone()),
+                        ));
+                        assert_eq!(extract_iceberg_predicate(&expression, 0, "id"), Some(expected));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_and_iceberg_strings_share_unsigned_byte_order() {
+        use arrow::array::StringArray;
+        use arrow::compute::cast;
+        use arrow::compute::kernels::ord::make_comparator;
+        use arrow::compute::SortOptions;
+        use arrow::datatypes::DataType;
+
+        let values = [
+            "", "A", "a", "abcdefghijklmnop000000", "abcdefghijklmnop999999",
+            "abcdefghijklmnoq", "é", "東京", "🙂",
+        ];
+        let strings = StringArray::from(values.to_vec());
+        for value_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
+            for data_type in [
+                value_type.clone(),
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(value_type)),
+            ] {
+                let array = cast(&strings, &data_type).unwrap();
+                for descending in [false, true] {
+                    let cmp = make_comparator(
+                        array.as_ref(),
+                        array.as_ref(),
+                        SortOptions {
+                            descending,
+                            nulls_first: false,
+                        },
+                    )
+                    .unwrap();
+                    for (i, left) in values.iter().enumerate() {
+                        for (j, right) in values.iter().enumerate() {
+                            let bytes = left.as_bytes().cmp(right.as_bytes());
+                            let datum = Datum::string(left).partial_cmp(&Datum::string(right)).unwrap();
+                            assert_eq!(datum, bytes);
+                            assert_eq!(cmp(i, j), if descending { bytes.reverse() } else { bytes });
+                        }
+                    }
+                }
+            }
+        }
+        // Iceberg truncate(16) conservatively encloses both long suffixes.
+        let lower = Datum::string("abcdefghijklmnop");
+        let upper = Datum::string("abcdefghijklmnoq");
+        for actual in ["abcdefghijklmnop000000", "abcdefghijklmnop999999"] {
+            let actual = Datum::string(actual);
+            assert!(lower <= actual && actual <= upper);
+        }
+    }
+
+    #[test]
     fn decimal_scalars_preserve_unscaled_value_precision_and_scale() {
         let maximum = 10_i128.pow(38) - 1;
         for (value, precision, scale) in [

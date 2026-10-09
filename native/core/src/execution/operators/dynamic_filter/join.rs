@@ -383,7 +383,7 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
 /// String dictionary values compare by their bytes, never by dictionary indices.
 /// Keep the exact Arrow type match above, including the dictionary key/value types;
 /// Utf8/Utf8View coercions must be materialized before the join, not inferred here.
-fn is_string_key_type(data_type: &DataType) -> bool {
+pub(super) fn is_string_key_type(data_type: &DataType) -> bool {
     match data_type {
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => true,
         DataType::Dictionary(_, value) => {
@@ -402,7 +402,7 @@ fn is_string_key_type(data_type: &DataType) -> bool {
 /// Reader attachment stops at those boundaries; it cannot reach a pre-cast scan.
 /// In particular, a lossless build upcast below a broadcast exchange cannot change
 /// the probe reader's scale, so Spark-side lineage tracking adds no safety here.
-fn is_direct_pruning_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalExpr>) -> bool {
+pub(super) fn is_direct_pruning_key(input: &Arc<dyn ExecutionPlan>, key: &Arc<dyn PhysicalExpr>) -> bool {
     use datafusion::physical_plan::filter::FilterExec;
 
     let Some(column) = key.downcast_ref::<Column>() else {

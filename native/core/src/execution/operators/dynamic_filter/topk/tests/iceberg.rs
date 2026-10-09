@@ -25,10 +25,14 @@ use datafusion::physical_expr::expressions::BinaryExpr;
 use datafusion::physical_expr::expressions::Literal;
 
 fn scan(data_type: DataType) -> Arc<dyn ExecutionPlan> {
-    let iceberg_type = match data_type {
+    scan_field(Field::new("key", data_type, true))
+}
+
+fn scan_field(field: Field) -> Arc<dyn ExecutionPlan> {
+    let iceberg_type = match field.data_type().clone() {
         DataType::Int32 => PrimitiveType::Int,
         DataType::Int64 => PrimitiveType::Long,
-        DataType::Utf8 => PrimitiveType::String,
+        data_type if is_string_key_type(&data_type) => PrimitiveType::String,
         _ => unreachable!(),
     };
     let schema = Arc::new(
@@ -57,7 +61,7 @@ fn scan(data_type: DataType) -> Arc<dyn ExecutionPlan> {
     Arc::new(
         IcebergScanExec::new(
             "/tmp/metadata.json".into(),
-            Arc::new(Schema::new(vec![Field::new("key", data_type, true)])),
+            Arc::new(Schema::new(vec![field])),
             Default::default(),
             String::new(),
             vec![task],
@@ -224,5 +228,60 @@ async fn iceberg_topk_preserves_errors_in_late_secondary_sort_keys() {
             error.to_string().to_lowercase().contains("divide by zero"),
             "enabled={enabled}: {error}"
         );
+    }
+}
+
+#[test]
+fn binary_string_topk_attaches_only_for_nulls_last() {
+    for value_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
+        for data_type in [
+            value_type.clone(),
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(value_type)),
+        ] {
+            for descending in [false, true] {
+                for nulls_first in [false, true] {
+                    let sort = sort(
+                        scan(data_type.clone()),
+                        10,
+                        SortOptions {
+                            descending,
+                            nulls_first,
+                        },
+                    );
+                    let plan = TopKReaderFilterExec::try_new(&sort, &ConfigOptions::default())
+                        .unwrap();
+                    if nulls_first {
+                        assert!(plan.is_none());
+                    } else {
+                        assert!(plan.unwrap().build_runtime_sort().unwrap().reader_filter_attached);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn annotated_string_columns_fail_closed() {
+    for (name, value) in [
+        ("__COLLATIONS", "UTF8_LCASE"),
+        ("__CHAR_VARCHAR_TYPE_STRING", "char(24)"),
+        ("ARROW:extension:name", "unknown"),
+    ] {
+        let field = Field::new("key", DataType::Utf8, true)
+            .with_metadata(std::collections::HashMap::from([(name.into(), value.into())]));
+        for descending in [false, true] {
+            let sort = sort(
+                scan_field(field.clone()),
+                10,
+                SortOptions {
+                    descending,
+                    nulls_first: false,
+                },
+            );
+            assert!(TopKReaderFilterExec::try_new(&sort, &ConfigOptions::default())
+                .unwrap()
+                .is_none());
+        }
     }
 }
