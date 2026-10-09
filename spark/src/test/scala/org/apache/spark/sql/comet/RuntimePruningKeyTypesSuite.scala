@@ -217,11 +217,8 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
         s"Expected isSupported alias to return true for $sparkType")
     }
 
-    val unsupportedColumnStatsTypes: Seq[DataType] = Seq(
-      ByteType,
-      ShortType,
-      FloatType,
-      DoubleType)
+    val unsupportedColumnStatsTypes: Seq[DataType] =
+      Seq(ByteType, ShortType, FloatType, DoubleType)
 
     for (unsupported <- unsupportedColumnStatsTypes) {
       assert(
@@ -233,7 +230,15 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     }
 
     val supportedIcebergTypes =
-      Seq("int", "long", "date", "timestamp", "timestamptz", "string", "decimal(10,2)", "decimal(38,18)")
+      Seq(
+        "int",
+        "long",
+        "date",
+        "timestamp",
+        "timestamptz",
+        "string",
+        "decimal(10,2)",
+        "decimal(38,18)")
 
     for (icebergType <- supportedIcebergTypes) {
       assert(
@@ -245,13 +250,7 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     }
 
     val unsupportedIcebergTypes =
-      Seq(
-        "float",
-        "double",
-        "boolean",
-        "binary",
-        "fixed[16]",
-        "uuid")
+      Seq("float", "double", "boolean", "binary", "fixed[16]", "uuid")
 
     for (icebergType <- unsupportedIcebergTypes) {
       assert(

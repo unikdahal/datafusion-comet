@@ -30,27 +30,25 @@ import org.apache.comet.shims.CometTypeShim
  * Single source of truth for eligible runtime-pruning key types on the JVM/Spark side.
  *
  * Today, the JVM side gates two sets of types:
- *  1. Driver-side file statistics key types ([[isFileStatsKey]]):
- *     IntegerType, LongType, DateType, TimestampType, TimestampNTZType,
- *     exact DecimalType, and uncollated StringType (excluding fixed CHAR),
- *     and corresponding Iceberg schema types ([[isFileStatsIcebergType]]).
- *     Used by CometScanRule (join file pruning) and CometIcebergNativeScan
- *     (file statistics collection).
- *  2. Native Parquet reader filter keys ([[isParquetReaderKey]]):
- *     ByteType, ShortType, IntegerType, LongType
- *     Used by CometLocalTopKExec (Parquet TopK pushdown).
+ *   1. Driver-side file statistics key types ([[isFileStatsKey]]): IntegerType, LongType,
+ *      DateType, TimestampType, TimestampNTZType, exact DecimalType, and uncollated StringType
+ *      (excluding fixed CHAR), and corresponding Iceberg schema types
+ *      ([[isFileStatsIcebergType]]). Used by CometScanRule (join file pruning) and
+ *      CometIcebergNativeScan (file statistics collection). 2. Native Parquet reader filter keys
+ *      ([[isParquetReaderKey]]): ByteType, ShortType, IntegerType, LongType Used by
+ *      CometLocalTopKExec (Parquet TopK pushdown).
  *
  * TopK and MinMax key types remain restricted to integral and temporal types
  * ([[isSupportedTopKKey]], [[isSupportedMinMaxKey]]).
  *
- * Native join eligibility (including Decimal128 and string variants) and native TopK
- * pushdown eligibility are decided in native Rust code, not duplicated on the driver.
+ * Native join eligibility (including Decimal128 and string variants) and native TopK pushdown
+ * eligibility are decided in native Rust code, not duplicated on the driver.
  */
 object RuntimePruningKeyTypes extends CometTypeShim {
 
   /**
-   * Supported Spark data types for driver-side file statistics / runtime pruning keys.
-   * Gated for CometScanRule (join) and CometIcebergNativeScan.
+   * Supported Spark data types for driver-side file statistics / runtime pruning keys. Gated for
+   * CometScanRule (join) and CometIcebergNativeScan.
    */
   val SUPPORTED_FILE_STATS_TYPES: Seq[DataType] =
     Seq(
@@ -81,9 +79,8 @@ object RuntimePruningKeyTypes extends CometTypeShim {
   val SUPPORTED_TYPES: Seq[DataType] = SUPPORTED_FILE_STATS_TYPES
 
   /**
-   * Whether Catalyst metadata marks an attribute as a fixed-length CHAR.
-   * Stored Iceberg strings do not promise CHAR padding, so reader pruning must not compare
-   * them to padded join literals.
+   * Whether Catalyst metadata marks an attribute as a fixed-length CHAR. Stored Iceberg strings
+   * do not promise CHAR padding, so reader pruning must not compare them to padded join literals.
    */
   def isCharType(metadata: Metadata): Boolean =
     metadata.contains("__CHAR_VARCHAR_TYPE_STRING") &&
@@ -93,9 +90,9 @@ object RuntimePruningKeyTypes extends CometTypeShim {
         .startsWith("char(")
 
   /**
-   * Whether the given Spark `dataType` is an eligible driver-side file statistics key type
-   * (Int, Long, Date, Timestamp, TimestampNTZ, Decimal, String).
-   * Collated strings are excluded because Iceberg string bounds are binary/UTF-8 ordered.
+   * Whether the given Spark `dataType` is an eligible driver-side file statistics key type (Int,
+   * Long, Date, Timestamp, TimestampNTZ, Decimal, String). Collated strings are excluded because
+   * Iceberg string bounds are binary/UTF-8 ordered.
    */
   def isFileStatsKey(dataType: DataType): Boolean = dataType match {
     case IntegerType | LongType | DateType | TimestampType | TimestampNTZType | _: DecimalType =>
@@ -105,8 +102,8 @@ object RuntimePruningKeyTypes extends CometTypeShim {
   }
 
   /**
-   * Whether the given Spark `attr` is an eligible driver-side file statistics attribute.
-   * In addition to checking [[isFileStatsKey]], excludes fixed-length CHAR attributes.
+   * Whether the given Spark `attr` is an eligible driver-side file statistics attribute. In
+   * addition to checking [[isFileStatsKey]], excludes fixed-length CHAR attributes.
    */
   def isFileStatsAttribute(attr: Attribute): Boolean =
     isFileStatsKey(attr.dataType) && !isCharType(attr.metadata)
