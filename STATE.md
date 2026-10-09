@@ -164,3 +164,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - B7 green 4e4ace6be; queued for merge after b3b2 staging.
 - Integration ff to 93d2ddc0b (b3+b2). B7 staged on top: ws-merge-b7 0c32f9d36.
 - R1 3029829dc + B8 e7fa1781e green; reconciling onto B7 staging (semantic: TopK/MinMax string widening).
+- B7 staging green; integration will ff to ws-merge-r1b8 once green.

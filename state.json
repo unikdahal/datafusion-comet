@@ -115,8 +115,7 @@
   }
  ],
  "tasks": [
-  "rp-r1b8-onto-b7-r1",
-  "staging run 37922608746 (B7)"
+  "rp-r1b8-onto-b7-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -377,7 +376,7 @@
    "item": "string Top-K / min-max pruning",
    "agent": "gemini rp-b7-string-topk-r2",
    "branch": "adaptive-ci/ws-b7-string-topk",
-   "status": "cherry-picked onto 93d2ddc0b (fast-lane workflow conflict resolved: kept B7 patch-artifact formatting check) -> staging ws-merge-b7 0c32f9d36 run 37922608746"
+   "status": "staging ws-merge-b7 0c32f9d36 GREEN (37922608746). Will reach integration via ws-merge-r1b8 (built on it) to avoid cancelling integration full run on 93d2ddc0b."
   }
  },
  "providers_note": "CODEX WEEKLY LIMIT: unavailable until 2026-10-14 12:15 IST. Use gemini-3.8-flash-high (shared quota with 3.7; resets ~hourly), opencode/big-pickle, sonnet subagents (session limits).",
