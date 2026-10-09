@@ -24,8 +24,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.sql.types._
 
 /**
- * Cross-language agreement tests verifying per-consumer runtime pruning key types in Scala
- * agree with native Arrow types.
+ * Cross-language agreement tests verifying per-consumer runtime pruning key types in Scala agree
+ * with native Arrow types.
  *
  * Hard-coded cross-reference with native Rust tests:
  * `native/core/src/execution/operators/dynamic_filter/tests.rs`.
@@ -39,6 +39,7 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       (DateType, "Date32"),
       (TimestampType, "Timestamp(Microsecond, Some(...))"),
       (TimestampNTZType, "Timestamp(Microsecond, None)"),
+      (DecimalType.SYSTEM_DEFAULT, "Decimal128"),
       (StringType, "Utf8"))
 
     for ((sparkType, _) <- supportedJoinSparkToArrow) {
@@ -57,8 +58,6 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     val unsupportedJoinTypes: Seq[DataType] = Seq(
       ByteType,
       ShortType,
-      DecimalType(10, 2),
-      DecimalType(38, 18),
       FloatType,
       DoubleType,
       BooleanType,
@@ -113,9 +112,6 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       assert(
         !RuntimePruningKeyTypes.isSupportedTopKKey(unsupported),
         s"Expected $unsupported to be rejected as TopK key")
-      assert(
-        !RuntimePruningKeyTypes.isFileStatsKey(unsupported),
-        s"Expected $unsupported to be rejected as file stats key")
     }
   }
 
@@ -145,6 +141,7 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       ByteType,
       ShortType,
       DecimalType(10, 2),
+      DecimalType(38, 18),
       FloatType,
       DoubleType,
       BooleanType,
@@ -154,9 +151,6 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       assert(
         !RuntimePruningKeyTypes.isSupportedMinMaxKey(unsupported),
         s"Expected $unsupported to be rejected as MinMax key")
-      assert(
-        !RuntimePruningKeyTypes.isFileStatsKey(unsupported),
-        s"Expected $unsupported to be rejected as file stats key")
     }
   }
 
@@ -212,7 +206,7 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     }
 
     val unsupportedColumnStatsTypes: Seq[DataType] =
-      Seq(ByteType, ShortType, DecimalType(10, 2), DecimalType(38, 18), FloatType, DoubleType)
+      Seq(ByteType, ShortType, FloatType, DoubleType)
 
     for (unsupported <- unsupportedColumnStatsTypes) {
       assert(
@@ -224,7 +218,15 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     }
 
     val supportedIcebergTypes =
-      Seq("int", "long", "date", "timestamp", "timestamptz", "string")
+      Seq(
+        "int",
+        "long",
+        "date",
+        "timestamp",
+        "timestamptz",
+        "string",
+        "decimal(10,2)",
+        "decimal(38,18)")
 
     for (icebergType <- supportedIcebergTypes) {
       assert(
@@ -236,15 +238,7 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     }
 
     val unsupportedIcebergTypes =
-      Seq(
-        "decimal(10,2)",
-        "decimal(38,18)",
-        "float",
-        "double",
-        "boolean",
-        "binary",
-        "fixed[16]",
-        "uuid")
+      Seq("float", "double", "boolean", "binary", "fixed[16]", "uuid")
 
     for (icebergType <- unsupportedIcebergTypes) {
       assert(

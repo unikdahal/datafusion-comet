@@ -4519,11 +4519,29 @@ fn parse_iceberg_file_metrics(
             .filter_map(|(id, bytes)| {
                 let field = schema.field_by_id(*id)?;
                 let data_type = field.field_type.as_primitive_type()?;
+                // Defensive validation for decimal: scale must not exceed precision.
+                if let iceberg::spec::PrimitiveType::Decimal {
+                    precision,
+                    scale,
+                } = data_type
+                {
+                    if *scale > *precision {
+                        return None;
+                    }
+                }
                 // Invalid encodings fail open for this column. A 4-byte bound of a
                 // field promoted from INT to BIGINT decodes as that BIGINT value.
-                iceberg::spec::Datum::try_from_bytes(bytes, data_type.clone())
-                    .ok()
-                    .map(|datum| (*id, datum))
+                let datum = iceberg::spec::Datum::try_from_bytes(bytes, data_type.clone()).ok()?;
+                // Defensive validation for decimal: unscaled mantissa must not exceed precision.
+                if let iceberg::spec::PrimitiveType::Decimal { precision, .. } = data_type {
+                    if let iceberg::spec::PrimitiveLiteral::Int128(val) = datum.literal() {
+                        let max_unscaled = 10_u128.checked_pow(*precision)?;
+                        if val.unsigned_abs() >= max_unscaled {
+                            return None;
+                        }
+                    }
+                }
+                Some((*id, datum))
             })
             .collect()
     };
@@ -5331,6 +5349,164 @@ mod tests {
             tasks[1].file_metrics().unwrap()
         ));
         assert_eq!(tasks[0].file_metrics().unwrap().record_count(), Some(20));
+    }
+
+    #[test]
+    fn test_iceberg_file_metrics_decimal_bound_decoding() {
+        use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
+
+        let schema = Schema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "dec_normal", Type::decimal(18, 2).unwrap()).into(),
+                NestedField::optional(2, "dec_max_p38", Type::decimal(38, 0).unwrap()).into(),
+                NestedField::optional(
+                    3,
+                    "dec_bad_scale",
+                    Type::Primitive(PrimitiveType::Decimal {
+                        precision: 10,
+                        scale: 20,
+                    }),
+                )
+                .into(),
+                NestedField::optional(4, "dec_malformed_len", Type::decimal(18, 2).unwrap()).into(),
+                NestedField::optional(5, "dec_overflow", Type::decimal(18, 2).unwrap()).into(),
+            ])
+            .build()
+            .unwrap();
+
+        let max_p38 = 10_i128.pow(38) - 1;
+        let overflow_p18 = 10_i128.pow(18);
+
+        let proto = spark_operator::IcebergFileMetrics {
+            record_count: Some(10),
+            lower_bounds: std::collections::HashMap::from([
+                // Negative decimal
+                (1, (-12345_i128).to_be_bytes().to_vec()),
+                // Precision 38 min (-max_p38)
+                (2, (-max_p38).to_be_bytes().to_vec()),
+                // Scale > precision -> dropped
+                (3, 100_i128.to_be_bytes().to_vec()),
+                // Malformed length: 17 bytes -> dropped
+                (4, vec![0u8; 17]),
+            ]),
+            upper_bounds: std::collections::HashMap::from([
+                // Zero decimal
+                (1, 0_i128.to_be_bytes().to_vec()),
+                // Precision 38 max
+                (2, max_p38.to_be_bytes().to_vec()),
+                // Precision overflow for precision 18 -> dropped
+                (5, overflow_p18.to_be_bytes().to_vec()),
+            ]),
+            ..Default::default()
+        };
+
+        let metrics = super::parse_iceberg_file_metrics(&proto, &schema);
+
+        // Lower bounds: 1 (negative) and 2 (min p38) survive; 3 (bad scale) and 4 (len 17) dropped
+        assert_eq!(
+            metrics.lower_bounds().get(&1),
+            Some(&Datum::try_from_bytes(
+                &(-12345_i128).to_be_bytes(),
+                PrimitiveType::Decimal {
+                    precision: 18,
+                    scale: 2,
+                }
+            ).unwrap())
+        );
+        assert_eq!(
+            metrics.lower_bounds().get(&2),
+            Some(&Datum::try_from_bytes(
+                &(-max_p38).to_be_bytes(),
+                PrimitiveType::Decimal {
+                    precision: 38,
+                    scale: 0,
+                }
+            ).unwrap())
+        );
+        assert_eq!(metrics.lower_bounds().get(&3), None);
+        assert_eq!(metrics.lower_bounds().get(&4), None);
+
+        // Upper bounds: 1 (zero) and 2 (max p38) survive; 5 (overflow) dropped
+        assert_eq!(
+            metrics.upper_bounds().get(&1),
+            Some(&Datum::try_from_bytes(
+                &(0_i128).to_be_bytes(),
+                PrimitiveType::Decimal {
+                    precision: 18,
+                    scale: 2,
+                }
+            ).unwrap())
+        );
+        assert_eq!(
+            metrics.upper_bounds().get(&2),
+            Some(&Datum::try_from_bytes(
+                &max_p38.to_be_bytes(),
+                PrimitiveType::Decimal {
+                    precision: 38,
+                    scale: 0,
+                }
+            ).unwrap())
+        );
+        assert_eq!(metrics.upper_bounds().get(&5), None);
+    }
+
+    #[test]
+    fn test_iceberg_file_metrics_string_bounds() {
+        use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
+
+        let schema = Schema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "str_empty", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(2, "str_unicode", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(3, "str_invalid_utf8", Type::Primitive(PrimitiveType::String))
+                    .into(),
+                NestedField::optional(4, "str_truncated", Type::Primitive(PrimitiveType::String))
+                    .into(),
+            ])
+            .build()
+            .unwrap();
+
+        let unicode_str = "\u{4e1c}\u{4eac}\u{1f642}";
+        let truncated_prefix = "abcdefghijklmnop";
+
+        let proto = spark_operator::IcebergFileMetrics {
+            record_count: Some(10),
+            lower_bounds: std::collections::HashMap::from([
+                // Empty string bound
+                (1, b"".to_vec()),
+                // Non-ASCII / Unicode string bound
+                (2, unicode_str.as_bytes().to_vec()),
+                // Invalid UTF-8 bytes -> dropped
+                (3, vec![0xff, 0xfe, 0xfd]),
+                // Truncated string bound with long prefix
+                (4, truncated_prefix.as_bytes().to_vec()),
+            ]),
+            upper_bounds: std::collections::HashMap::from([
+                (1, b"".to_vec()),
+                (2, unicode_str.as_bytes().to_vec()),
+                (4, "abcdefghijklmnoq".as_bytes().to_vec()),
+            ]),
+            ..Default::default()
+        };
+
+        let metrics = super::parse_iceberg_file_metrics(&proto, &schema);
+
+        // Lower bounds checks
+        assert_eq!(metrics.lower_bounds().get(&1), Some(&Datum::string("")));
+        assert_eq!(metrics.lower_bounds().get(&2), Some(&Datum::string(unicode_str)));
+        assert_eq!(metrics.lower_bounds().get(&3), None);
+        assert_eq!(
+            metrics.lower_bounds().get(&4),
+            Some(&Datum::string(truncated_prefix))
+        );
+
+        // Upper bounds checks
+        assert_eq!(metrics.upper_bounds().get(&1), Some(&Datum::string("")));
+        assert_eq!(metrics.upper_bounds().get(&2), Some(&Datum::string(unicode_str)));
+        assert_eq!(
+            metrics.upper_bounds().get(&4),
+            Some(&Datum::string("abcdefghijklmnoq"))
+        );
     }
 
     mod empty_native_scan;
