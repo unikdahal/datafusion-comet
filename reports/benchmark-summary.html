@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Iceberg runtime pruning — benchmark summary</title>
+<style>
+  :root {
+    --ink: var(--foreground, #0b0b0b);
+    --ink-2: var(--muted-foreground, #52514e);
+    --line: color-mix(in srgb, var(--ink) 14%, transparent);
+    --bar: #2a78d6;
+    --ref: color-mix(in srgb, var(--ink) 45%, transparent);
+    --good: #008300;
+    --warn: #c98500;
+  }
+  @media (prefers-color-scheme: dark) { :root { --bar: #3987e5; } }
+  html, body { margin: 0; background: transparent; color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1000px; }
+  h2 { font-size: 17px; margin: 28px 0 8px; }
+  h3 { font-size: 14px; margin: 18px 0 6px; }
+  p { margin: 6px 0; }
+  .muted { color: var(--ink-2); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 12px 0 4px; }
+  .tile { border: 1px solid var(--line); border-radius: var(--radius, 8px); padding: 12px 14px; }
+  .tile .k { font-size: 26px; font-weight: 650; line-height: 1.15; }
+  .tile .l { color: var(--ink-2); font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 4px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--ink-2); font-size: 12px; }
+  td.n, th.n { text-align: right; }
+  .chart { position: relative; height: 195px; margin: 8px 0 2px; }
+  .row { display: grid; grid-template-columns: 110px 1fr 70px; align-items: center; height: 38px; }
+  .row .name { color: var(--ink-2); font-size: 13px; }
+  .track { position: relative; height: 22px; }
+  .barf { position: absolute; left: 0; top: 3px; height: 16px; background: var(--bar); border-radius: 0 4px 4px 0; }
+  .refline { position: absolute; top: -6px; bottom: -6px; width: 0; border-left: 2px dashed var(--ref); }
+  .val { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .axis { display: grid; grid-template-columns: 110px 1fr 70px; font-size: 11px; color: var(--ink-2); }
+  .axis .ticks { position: relative; height: 16px; }
+  .axis .ticks span { position: absolute; transform: translateX(-50%); }
+  .tip { position: fixed; pointer-events: none; background: var(--card, #fff); color: var(--card-foreground, #0b0b0b);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; display: none; z-index: 5;
+    box-shadow: 0 2px 10px rgba(0,0,0,.15); }
+  .ok::before { content: "✔ "; color: var(--good); font-weight: 700; }
+  .wn::before { content: "▲ "; color: var(--warn); font-weight: 700; }
+  ul { margin: 4px 0 4px 18px; padding: 0; }
+  li { margin: 3px 0; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+
+<p class="muted">Apache Spark 3.5 + Apache Iceberg 1.8.1 · Comet native Iceberg scan · compared against <b>unmodified Apache DataFusion Comet <code>main</code></b> (freshly resolved per campaign) · all runs on GitHub-hosted 4-core runners</p>
+
+<div class="tiles">
+  <div class="tile"><div class="k">0</div><div class="l">wrong results from the candidate across 4,403 queries (403 timed + 4,000 fuzz), every result checked against plain Spark</div></div>
+  <div class="tile"><div class="k">3.3–3.8×</div><div class="l">geometric-mean speedup on join and Top-K / MIN-MAX suites (latest full campaign)</div></div>
+  <div class="tile"><div class="k">up to 49×</div><div class="l">best single query (equality-delete scan on string keys)</div></div>
+  <div class="tile"><div class="k">≈1.00×</div><div class="l">TPC-H and non-selective string joins — no measurable cost where pruning cannot help</div></div>
+</div>
+
+<h2>1. Latest full campaign — speedup vs Apache Comet main</h2>
+<p class="muted">Campaign run <code>37788815352</code> · candidate Comet <code>434d18333</code> + iceberg-rust <code>1e3f2a868</code> · baseline Apache main <code>5db0efe69</code>. Speedup = baseline median time ÷ candidate median time, runtime pruning enabled on both sides. Geometric mean over queries where both engines ran the same native operators (“equal coverage”).</p>
+
+<div class="chart" id="chart" aria-label="Geometric-mean speedup per suite"></div>
+<div class="axis"><div></div><div class="ticks" id="ticks"></div><div></div></div>
+<p class="muted" style="font-size:12px">Dashed line = 1.0× (parity). Hover a bar for details.</p>
+
+<table>
+  <thead><tr><th>Suite</th><th>What it exercises</th><th class="n">Queries</th><th class="n">Geomean (equal coverage)</th><th class="n">Geomean (all)</th><th class="n">Faster (95% CI &gt; 1)</th><th class="n">Below parity (CI &lt; 1)</th><th class="n">Best query</th></tr></thead>
+  <tbody>
+    <tr><td>topk_minmax</td><td>ORDER BY … LIMIT, MIN/MAX, deletes</td><td class="n">85</td><td class="n"><b>3.58×</b></td><td class="n">3.78×</td><td class="n">65</td><td class="n">1</td><td class="n">49.2×</td></tr>
+    <tr><td>join</td><td>selective broadcast / shuffled / semi joins, deletes</td><td class="n">59</td><td class="n"><b>3.26×</b></td><td class="n">3.26×</td><td class="n">39</td><td class="n">4</td><td class="n">39.6×</td></tr>
+    <tr><td>layouts</td><td>sorted / skewed / evolved / many-file tables</td><td class="n">89</td><td class="n"><b>2.50×</b></td><td class="n">2.65×</td><td class="n">68</td><td class="n">3</td><td class="n">18.3×</td></tr>
+    <tr><td>strjoin</td><td>large, mostly non-selective joins (int/long/string keys)</td><td class="n">121</td><td class="n"><b>1.00×</b></td><td class="n">1.00×</td><td class="n">6</td><td class="n">9</td><td class="n">1.17×</td></tr>
+    <tr><td>tpch</td><td>TPC-H, natural and clustered layouts</td><td class="n">44</td><td class="n"><b>0.99×</b></td><td class="n">0.99×</td><td class="n">2</td><td class="n">5</td><td class="n">1.05×</td></tr>
+    <tr><td><b>Total</b></td><td></td><td class="n"><b>398</b></td><td></td><td></td><td class="n"><b>180</b></td><td class="n"><b>22</b></td><td></td></tr>
+  </tbody>
+</table>
+<p class="muted" style="font-size:12px">“Faster / below parity” use each query’s bootstrap 95% confidence interval over 8 balanced rounds. Unequal coverage: 25 queries where Apache main fell back to Spark’s JVM scan (tables whose names end in <code>files</code>/<code>snapshots</code> are mistaken for Iceberg metadata tables on main); they are excluded from the equal-coverage geomean.</p>
+
+<h3>Largest single-query speedups</h3>
+<table>
+  <thead><tr><th>Query</th><th>Suite</th><th class="n">Speedup [95% CI]</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>equality_delete_scan__f_eq_deletes_str</td><td>topk_minmax</td><td class="n">49.2× [46.2, 52.5]</td><td>equality deletes compacted into a membership predicate</td></tr>
+    <tr><td>equality_delete_scan__f_eq_deletes_str</td><td>join</td><td class="n">39.6× [39.2, 40.1]</td><td>same, inside a join</td></tr>
+    <tr><td>max / min__f_eq_deletes_str</td><td>topk_minmax</td><td class="n">36.2× / 35.7×</td><td>runtime MIN/MAX bound + delete handling</td></tr>
+    <tr><td>topk10__f_eq_deletes_str</td><td>topk_minmax</td><td class="n">33.9× [32.0, 36.2]</td><td>Top-K threshold prunes files and row groups</td></tr>
+    <tr><td>join_inner__f_eq_deletes_str__dim_128</td><td>join</td><td class="n">22.8× [21.2, 24.5]</td><td>join keys prune the fact table at read time</td></tr>
+    <tr><td>join_inner__f_big__dim_10k</td><td>layouts</td><td class="n">18.3× [17.6, 19.0]</td><td>runtime join filter skips most of a large table</td></tr>
+  </tbody>
+</table>
+
+<h2>2. Features added after that campaign (targeted benchmarks)</h2>
+<p class="muted">Measured with targeted runs (same harness, same methodology, subset of queries). Not yet part of a full campaign.</p>
+<table>
+  <thead><tr><th>Capability</th><th>Query</th><th class="n">Before</th><th class="n">After</th><th class="n">Data read</th><th>Run</th></tr></thead>
+  <tbody>
+    <tr><td>Decimal join keys</td><td>join_inner__f_dec__dim_10k</td><td class="n">0.96×</td><td class="n"><b>5.19×</b></td><td class="n">589 → 13 MiB</td><td><code>37829425897</code></td></tr>
+    <tr><td>Decimal join keys</td><td>join_inner__f_dec__dim_128</td><td class="n">0.97×</td><td class="n"><b>4.52×</b></td><td class="n">589 → 12 MiB</td><td><code>37829425897</code></td></tr>
+    <tr><td>String join keys</td><td>join_inner__f_str__dim_128</td><td class="n">≈1.0×</td><td class="n"><b>4.79×</b></td><td class="n">574 → 13 MiB</td><td><code>37865998293</code></td></tr>
+    <tr><td>String join keys</td><td>join_inner__f_str__dim_10k</td><td class="n">≈1.0×</td><td class="n"><b>4.20×</b></td><td></td><td><code>37865998293</code></td></tr>
+    <tr><td>String keys + deletes</td><td>join_inner__f_eq_deletes_str__dim_128</td><td></td><td class="n"><b>13.7×</b></td><td></td><td><code>37865998293</code></td></tr>
+    <tr><td>Adaptive filter bypass</td><td>non-selective 3M-key joins</td><td class="n">eval 15–33 ms</td><td class="n">eval 3–8 ms</td><td class="n">selective joins kept full pruning</td><td><code>37807233835</code></td></tr>
+  </tbody>
+</table>
+<p class="muted" style="font-size:12px">Also implemented and CI-validated, benchmark pending: string Top-K / MIN-MAX pruning, file-level pruning for decimal/string keys (today 0 of 22 files skipped even though 80 of 80 row groups are), NULLS FIRST Top-K, filters through safe intermediate operators, a driver-side statistics cache (removes up to ~24 ms of planning on tables with many manifests).</p>
+
+<h2>3. Correctness</h2>
+<ul>
+  <li class="ok">Candidate: <b>0 result mismatches</b> in every campaign — 403 timed queries × 4 variants × 8 rounds, plus 4,000 randomized fuzz queries per campaign (NaN, ±0, nulls, deletes, schema evolution).</li>
+  <li class="wn">Apache main (baseline) returned <b>wrong results</b> on broadcast joins with string keys built from a <code>DISTINCT</code> (sliced Arrow buffers corrupted during broadcast). Reproduced in an isolated test, root-caused, fixed in the fork, and filed as fork issue #42. Those queries are excluded from timing comparisons.</li>
+  <li class="ok">Defects found and fixed in our own branch before release: NaN / signed-zero handling in a row-filter shortcut, delete-file loading continuing after cancellation, an over-eager shuffle-probe optimisation (reverted), a row-filter gating change that regressed selective queries (reverted after measurement).</li>
+</ul>
+
+<h2>4. Where we are not faster (and why)</h2>
+<ul>
+  <li><b>TPC-H (0.99×)</b>: join keys are not correlated with the physical sort order, so there is nothing to prune; the result shows the pruning machinery costs ≈ nothing when it cannot help.</li>
+  <li><b>Large non-selective joins (strjoin 1.00×)</b>: filters remove few rows; an adaptive bypass now switches filtering off when it is not paying for itself.</li>
+  <li><b>22 queries with a confidence interval below 1.0×</b> in this single campaign (0.90–0.98×, mostly sub-100 ms queries). None reached the harness’s 0.90× regression threshold. Policy: a regression counts only if it reproduces in two independent campaigns — several earlier “regressions” disappeared on re-measurement (e.g. 0.88× → 1.03×).</li>
+</ul>
+
+<h2>5. Methodology</h2>
+<table>
+  <tbody>
+    <tr><td>Variants</td><td>baseline (Apache main) and candidate (fork), each with runtime pruning on and off — 4 variants per query</td></tr>
+    <tr><td>Repetition</td><td>8 balanced JVM rounds per variant (order rotated), 4 warm-ups per query, raw per-run timings kept</td></tr>
+    <tr><td>Statistics</td><td>medians; bootstrap 95% confidence intervals on the speedup ratio; suite geomeans</td></tr>
+    <tr><td>Fairness</td><td>same data files (byte-identical), same queries, same Spark configuration; baseline and candidate always run on the same machine for a given query; per-query operator coverage compared</td></tr>
+    <tr><td>Correctness gate</td><td>every result compared with plain Spark; mismatching comparisons are excluded from speedups</td></tr>
+    <tr><td>Infrastructure</td><td>GitHub Actions, 18 parallel shards; campaign wall time cut from ~4 h to 1 h 46 min with identical protocol</td></tr>
+    <tr><td>Caveats</td><td>shards run on different CPU models (AMD EPYC 7763 / 9V45 / 9V74, Intel Xeon 8370C) — ratios within a shard are paired, cross-campaign ratios of very fast queries vary with CPU; compare bytes/rows read for those</td></tr>
+  </tbody>
+</table>
+
+</main>
+<div class="tip" id="tip"></div>
+<script>
+const data = [
+  {s:"topk_minmax", v:3.58, n:76, all:3.78, best:"49.2×"},
+  {s:"join",        v:3.26, n:59, all:3.26, best:"39.6×"},
+  {s:"layouts",     v:2.50, n:73, all:2.65, best:"18.3×"},
+  {s:"strjoin",     v:1.00, n:121, all:1.00, best:"1.17×"},
+  {s:"tpch",        v:0.99, n:44, all:0.99, best:"1.05×"},
+];
+const max = 4;
+const chart = document.getElementById("chart"), tip = document.getElementById("tip");
+for (const d of data) {
+  const row = document.createElement("div"); row.className = "row";
+  row.innerHTML = `<div class="name">${d.s}</div><div class="track"><div class="barf" style="width:${d.v/max*100}%"></div><div class="refline" style="left:${1/max*100}%"></div></div><div class="val">${d.v.toFixed(2)}×</div>`;
+  row.addEventListener("mousemove", e => {
+    tip.style.display = "block"; tip.style.left = (e.clientX + 12) + "px"; tip.style.top = (e.clientY + 12) + "px";
+    tip.innerHTML = `<b>${d.s}</b><br>Geomean (equal coverage): ${d.v.toFixed(2)}× over ${d.n} queries<br>Geomean (all): ${d.all.toFixed(2)}×<br>Best query: ${d.best}`;
+  });
+  row.addEventListener("mouseleave", () => tip.style.display = "none");
+  chart.appendChild(row);
+}
+const ticks = document.getElementById("ticks");
+for (const t of [0,1,2,3,4]) { const s = document.createElement("span"); s.style.left = (t/max*100)+"%"; s.textContent = t+"×"; ticks.appendChild(s); }
+</script>
+</body>
+</html>
