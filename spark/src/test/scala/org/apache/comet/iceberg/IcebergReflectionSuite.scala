@@ -175,6 +175,15 @@ class IcebergReflectionSuite extends AnyFunSuite {
         IcebergReflection
           .runtimeFileStatistics(oldScan, runtimeTasks(oldSource), Seq("id"))
           .size == 3)
+      // The newer snapshot can select exactly the old paths. It must still miss: coverage
+      // alone must not mask a cache key that incorrectly uses the table's current snapshot.
+      val overlappingSource = currentSource.filter(Expressions.lessThan("id", Int.box(3)))
+      val overlappingScan = new CountingRuntimeScan(overlappingSource)
+      assert(
+        IcebergReflection
+          .runtimeFileStatistics(overlappingScan, runtimeTasks(overlappingSource), Seq("id"))
+          .size == 3)
+      assert(overlappingScan.planningCalls == 1)
       assert(
         IcebergReflection
           .runtimeFileStatistics(currentScan, runtimeTasks(currentSource), Seq("id"))
