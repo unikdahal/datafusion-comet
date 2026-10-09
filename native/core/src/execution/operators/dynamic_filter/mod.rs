@@ -39,6 +39,7 @@ pub(super) use batch_filter::DynamicFilterExec;
 
 /// Target consumer for runtime dynamic filter / pruning keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum RuntimePruningConsumer {
     /// Hash join dynamic filter keys.
     Join,
@@ -52,6 +53,7 @@ pub(crate) enum RuntimePruningConsumer {
     ColumnStats,
 }
 
+#[allow(dead_code)]
 impl RuntimePruningConsumer {
     /// Returns whether `data_type` is supported as a key type for this consumer.
     pub(crate) fn is_supported(&self, data_type: &DataType) -> bool {
@@ -113,11 +115,13 @@ pub(crate) fn is_supported_parquet_reader_key_type(data_type: &DataType) -> bool
 
 /// Returns whether `data_type` is an eligible column statistics / driver pruning key type
 /// (superset of all consumers).
+#[allow(dead_code)]
 pub(crate) fn is_supported_column_stats_key_type(data_type: &DataType) -> bool {
     is_supported_join_key_type(data_type)
 }
 
 /// Alias for column statistics / any-consumer key type support.
+#[allow(dead_code)]
 pub(crate) fn is_runtime_pruning_key_type(data_type: &DataType) -> bool {
     is_supported_column_stats_key_type(data_type)
 }
