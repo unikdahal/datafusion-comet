@@ -270,6 +270,11 @@
    "id": "B7",
    "item": "string Top-K / min-max pruning (topk10__f_str 1.01x)",
    "status": "queued"
+  },
+  {
+   "id": "B8",
+   "item": "driver-side FILE-level stats pruning for decimal/string (and byte/short) join keys \u2014 today decimal/string prune only via native row-group/page stats; needs bound serialization correctness (decimal scale, truncated strings) + e2e tests + bench",
+   "status": "queued (after Actions recovers)"
   }
  ],
  "policy": {
@@ -366,7 +371,7 @@
    "item": "unify join-key type allowlist + agreement tests",
    "agent": "gemini rp-r1-allowlist-r1",
    "branch": "adaptive-ci/ws-r1-key-types",
-   "status": "REJECTED cb8da1d06: narrowed Scala to 5 types -> would disable decimal+string join pruning. Fix task gemini rp-r1-fix-r1 (per-consumer helpers, pure refactor, rebase on fcd020283)."
+   "status": "v2 b2c8e0080 REJECTED by review (5 Scala widenings + Rust error-order change). v3 task gemini rp-r1-fix-r2: exact old sets."
   },
   "B7": {
    "item": "string Top-K / min-max pruning",
