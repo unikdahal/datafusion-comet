@@ -76,6 +76,9 @@ object RuntimePruningKeyTypes {
     case _ => false
   }
 
+  /** Alias for [[isParquetReaderKey]]. */
+  def isSupportedParquetReaderKey(dataType: DataType): Boolean = isParquetReaderKey(dataType)
+
   /** Whether the given Iceberg primitive type string is eligible for runtime file statistics. */
   def isFileStatsIcebergType(typeStr: String): Boolean =
     SUPPORTED_ICEBERG_FILE_STATS_TYPES.contains(typeStr)
