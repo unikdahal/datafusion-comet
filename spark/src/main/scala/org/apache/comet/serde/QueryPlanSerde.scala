@@ -1340,6 +1340,10 @@ object QueryPlanSerde extends Logging with CometExprShim with CometTypeShim {
     }
   }
 
+  /** String bounds are ordered as UTF8_BINARY in both Arrow and Iceberg. */
+  def isBinaryStringPruningType(dataType: DataType): Boolean =
+    dataType.isInstanceOf[StringType] && !isStringCollationType(dataType)
+
   // Catalyst represents CHAR as StringType plus metadata and may insert padding projections.
   // Trace aliases to that metadata, including below exchanges. Stored Iceberg strings do not
   // promise CHAR padding, so reader pruning must not compare them to runtime string literals.

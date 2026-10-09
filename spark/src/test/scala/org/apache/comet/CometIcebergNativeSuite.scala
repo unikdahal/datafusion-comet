@@ -1969,8 +1969,9 @@ class CometIcebergNativeSuite
             // Repeated keys exercise dictionary decoding. Both useful directions have
             // their best values first; suffixes differ beyond the manifest truncation.
             withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
-              spark
-                .range(120000L)
+              for (file <- 0 until 4) {
+                spark
+                .range(file * 30000L, (file + 1) * 30000L)
                 .coalesce(1)
                 .sortWithinPartitions("id")
                 .selectExpr(
@@ -1985,13 +1986,14 @@ class CometIcebergNativeSuite
                 .format("iceberg")
                 .mode("append")
                 .saveAsTable(table)
+              }
               val files = spark.sql(s"SELECT lower_bounds, upper_bounds, file_path FROM $table.files")
                 .collect()
-              assert(files.length == 1)
-              assert(new String(files.head.getMap[Int, Array[Byte]](0)(1), UTF_8) ==
-                "abcdefghijklmnop")
-              assert(new String(files.head.getMap[Int, Array[Byte]](1)(2), UTF_8) ==
-                "abcdefghijklmnoq")
+              assert(files.length == 4)
+              assert(files.exists(row => new String(row.getMap[Int, Array[Byte]](0)(1), UTF_8) ==
+                "abcdefghijklmnop"))
+              assert(files.exists(row => new String(row.getMap[Int, Array[Byte]](1)(2), UTF_8) ==
+                "abcdefghijklmnoq"))
               val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
                 org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
                   new org.apache.hadoop.fs.Path(files.head.getString(2)),
@@ -2034,9 +2036,15 @@ class CometIcebergNativeSuite
                   val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value +
                     scan.metrics("iceberg_runtime_file_tasks_pruned").value
                   if (enabled) {
+                    val common = OperatorOuterClass.IcebergScanCommon.parseFrom(scan.commonData)
+                    assert(common.getFileMetricsPoolCount == 4)
+                    common.getFileMetricsPoolList.asScala.foreach { metrics =>
+                      assert(metrics.getLowerBoundsCount == 1 && metrics.getUpperBoundsCount == 1)
+                    }
                     assert(scan.metrics("iceberg_runtime_predicate_tasks").value > 0L)
                     assert(scan.metrics("iceberg_runtime_predicate_refreshes").value > 0L)
                     assert(pruned > 0L, s"String threshold did not prune: $query\n$plan")
+                    assert(scan.metrics("iceberg_runtime_file_tasks_pruned").value > 0L)
                   } else {
                     assert(scan.metrics("iceberg_runtime_predicate_tasks").value == 0L)
                     assert(pruned == 0L)

@@ -45,7 +45,7 @@ import org.apache.comet.iceberg.{CometIcebergNativeScanMetadata, IcebergReflecti
 import org.apache.comet.objectstore.NativeConfig
 import org.apache.comet.serde.{CometOperatorSerde, OperatorOuterClass}
 import org.apache.comet.serde.OperatorOuterClass.{Operator, SparkStructField}
-import org.apache.comet.serde.QueryPlanSerde.serializeDataType
+import org.apache.comet.serde.QueryPlanSerde.{isBinaryStringPruningType, serializeDataType}
 
 object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] with Logging {
 
@@ -1247,7 +1247,8 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                               if runtimeFieldNames.contains(attr.name) &&
                                 (attr.dataType == IntegerType || attr.dataType == LongType ||
                                   attr.dataType == DateType || attr.dataType == TimestampType ||
-                                  attr.dataType == TimestampNTZType) =>
+                                  attr.dataType == TimestampNTZType ||
+                                  isBinaryStringPruningType(attr.dataType)) =>
                             id
                         }
                         .toSet
