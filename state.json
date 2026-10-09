@@ -2,8 +2,8 @@
  "updated": "2026-10-09 (W1 done)",
  "heads": {
   "iceberg": "17d0a12326333bc401efd1624f0981854211413d (string/binary keep row filters; on 1f154f5f3; CI green)",
-  "comet": "93d2ddc0b (manifest cache + NULLS FIRST + topk-through-filters; staging fast lane green 37918699731; integration full CI will run)",
-  "bench": "cbb461b77 (targeted string + revert controls)",
+  "comet": "2aec2d370fab5361a96b63682832ff41c8366128 (integration: manifest cache + b3 + b2 + B7 + R1 + B8; staging green; full CI triggered)",
+  "bench": "5f8ba0358 (FULL campaign, fuzz ext b87833475, pins comet 2aec2d370 / iceberg 17d0a1232)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
  "ci": {
@@ -115,7 +115,7 @@
   }
  ],
  "tasks": [
-  "rp-r1b8-delta-review-r1"
+  "full campaign 5f8ba0358"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -273,7 +273,7 @@
   {
    "id": "B8",
    "item": "driver-side FILE-level stats pruning for decimal/string (and byte/short) join keys \u2014 today decimal/string prune only via native row-group/page stats; needs bound serialization correctness (decimal scale, truncated strings) + e2e tests + bench",
-   "status": "GREEN e7fa1781e (37922870268); integrating with R1 onto B7"
+   "status": "MERGED 2aec2d370 (delta review: only allowed widening)"
   }
  ],
  "policy": {
@@ -354,7 +354,7 @@
    "item": "extend fuzz coverage (decimal/string keys, NULLS FIRST, NaN/\u00b10, deletes+runtime filters, modulo filters)",
    "agent": "gemini rp-fuzz-ext-r1",
    "branch": "adaptive-bench/ws-fuzz-ext (no trigger)",
-   "status": "DONE c8437490b on adaptive-bench/ws-fuzz-ext (6 feature areas; 500 q/round unchanged). Merge into bench branch for next FULL campaign (after B4 targeted bench)."
+   "status": "merged into bench branch b87833475"
   },
   "DIMEMPTY": {
    "item": "RCA dim_empty 0.94x fixed overhead",
@@ -370,13 +370,13 @@
    "item": "unify join-key type allowlist + agreement tests",
    "agent": "gemini rp-r1-allowlist-r1",
    "branch": "adaptive-ci/ws-r1-key-types",
-   "status": "reconciled onto B7: ws-merge-r1b8 2aec2d370 GREEN (37933945911, rust + jvm 3.5 + 4.1). Delta review vs 0c32f9d36 running (gemini rp-r1b8-delta-review-r1) \u2014 suspicion: Byte/Short widened in Scala TopK/MinMax/file stats."
+   "status": "MERGED 2aec2d370"
   },
   "B7": {
    "item": "string Top-K / min-max pruning",
    "agent": "gemini rp-b7-string-topk-r2",
    "branch": "adaptive-ci/ws-b7-string-topk",
-   "status": "staging ws-merge-b7 0c32f9d36 GREEN (37922608746). Will reach integration via ws-merge-r1b8 (built on it) to avoid cancelling integration full run on 93d2ddc0b."
+   "status": "MERGED 2aec2d370"
   }
  },
  "providers_note": "CODEX WEEKLY LIMIT: unavailable until 2026-10-14 12:15 IST. Use gemini-3.8-flash-high (shared quota with 3.7; resets ~hourly), opencode/big-pickle, sonnet subagents (session limits).",
