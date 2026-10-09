@@ -103,6 +103,15 @@
    "run": 37834528369,
    "type": "targeted B4/B6",
    "result": "0 validation failures; dim_10pct 1.00x (fixed) BUT unsorted dim_128 1.01x (was 2.41x), topk10__f_unsorted 3.00x (was 3.91x) -> B4 reverted; f_nan 1.00x; dec dim_128 4.97x; pos_deletes 5.15x; sorted dim_128 5.02x; semi 1.70x; topk1000_desc sorted 7.58x"
+  },
+  {
+   "run": 37865998293,
+   "type": "targeted string",
+   "pins": {
+    "comet": "007080ae0",
+    "iceberg": "17d0a1232"
+   },
+   "result": "0 validation failures; f_str dim_128 4.79x, dim_10k 4.20x, spread 2.61x; eq_deletes_str dim_128 13.66x; unsorted dim_128 2.50x (B4 revert confirmed); topk10__f_unsorted 2.96x (pruning work identical to 3.91x run: ratio difference = runner CPU fixed-overhead, NOT regression); topk10__f_str 1.01x (no string TopK pruning); strjoin_str_sort_merge_plain_500000 0.94x but cand_off/base_off 0.92 too (not pruning)"
   }
  ],
  "tasks": [
@@ -257,10 +266,16 @@
    "id": "R6",
    "item": "separate 9 behavior changes into own units; 26-PR upstream split plan",
    "status": "later"
+  },
+  {
+   "id": "B7",
+   "item": "string Top-K / min-max pruning (topk10__f_str 1.01x)",
+   "status": "queued"
   }
  ],
  "policy": {
-  "regression_rule": "count a regression only if CI<1.0 in two independent campaigns (cross-campaign noise \u00b15-10% on small queries; shard CPU heterogeneity: EPYC 7763/9V45/9V74, Xeon 8370C)"
+  "regression_rule": "count a regression only if CI<1.0 in two independent campaigns (cross-campaign noise \u00b15-10% on small queries; shard CPU heterogeneity: EPYC 7763/9V45/9V74, Xeon 8370C)",
+  "work_counters": "for fast pruned queries compare work counters (bytes/rows read, pruned files/RGs) across campaigns, not ratios \u2014 fixed overhead varies with runner CPU"
  },
  "operating_model": {
   "directive": "user: never idle; parallel workstreams; use other providers when limited; priorities speed, performance, upstreamability, correctness; keep refactoring",
@@ -313,7 +328,7 @@
    "item": "B1 phase 2 string keys",
    "agent": "codex rp-w1b-string-r1",
    "branch": "adaptive-ci/ws-b1-string (both repos)",
-   "status": "MERGED both repos (lead review: exact type match, dict by bytes, collation/CHAR fail-closed native + Spark CHAR lineage guard, strict shortcut off for string/binary/fixed). Needs targeted bench strjoin_str_* + string join queries. Nit: duplicated matches! in iceberg row_filter_semantics_match."
+   "status": "MERGED both repos (lead review: exact type match, dict by bytes, collation/CHAR fail-closed native + Spark CHAR lineage guard, strict shortcut off for string/binary/fixed). Needs targeted bench strjoin_str_* + string join queries. Nit: duplicated matches! in iceberg row_filter_semantics_match. BENCHMARKED: f_str 2.6-4.8x"
   },
   "R23": {
    "item": "iceberg: remove cfg(test) semaphore from DeleteFilter, decoder expects->errors, named consts, pub API shrink (check Comet usage)",
