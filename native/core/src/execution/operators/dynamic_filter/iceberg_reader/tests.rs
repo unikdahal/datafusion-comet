@@ -1043,7 +1043,10 @@ async fn runtime_pruning_nulls_first_preserves_nulls_and_prunes_out_of_range() {
         .await
         .unwrap();
     let total_rows_a: usize = result_a.iter().map(RecordBatch::num_rows).sum();
-    assert_eq!(total_rows_a, 2, "Only File 1 with nulls should be read");
+    assert_eq!(
+        total_rows_a, 1,
+        "Only the null row of File 1 survives row filtering; File 2 is pruned"
+    );
     let metrics_a = scan_a.metrics().unwrap();
     let pruned_a = metrics_a
         .sum_by_name("iceberg_runtime_file_tasks_pruned")
@@ -1099,7 +1102,10 @@ async fn runtime_pruning_nulls_first_preserves_nulls_and_prunes_out_of_range() {
         .await
         .unwrap();
     let total_rows_b: usize = result_b.iter().map(RecordBatch::num_rows).sum();
-    assert_eq!(total_rows_b, 2, "Only File 1 with nulls should be read");
+    assert_eq!(
+        total_rows_b, 1,
+        "Only the null row of File 1 survives row filtering; File 2 is pruned"
+    );
     let metrics_b = scan_b.metrics().unwrap();
     let pruned_b = metrics_b
         .sum_by_name("iceberg_runtime_file_tasks_pruned")
