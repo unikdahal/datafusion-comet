@@ -3133,13 +3133,7 @@ impl PhysicalPlanner {
     ) -> Result<Arc<dyn PhysicalExpr>, ExecutionError> {
         if direct_minmax
             && child.is::<Column>()
-            && matches!(
-                datatype,
-                DataType::Int32
-                    | DataType::Int64
-                    | DataType::Date32
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
-            )
+            && crate::execution::operators::dynamic_filter::is_supported_minmax_key_type(&datatype)
             && child.data_type(schema.as_ref())? == datatype
         {
             Ok(child)

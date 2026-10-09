@@ -48,14 +48,9 @@ object CometLocalTopKExec {
     def firstKeyEligible(scan: CometLeafExec, order: SortOrder): Boolean = {
       order.child.isInstanceOf[Attribute] && (scan match {
         case _: CometNativeScanExec =>
-          order.dataType match {
-            case ByteType | ShortType | IntegerType | LongType => true
-            case _ => false
-          }
+          RuntimePruningKeyTypes.isParquetReaderKey(order.dataType)
         case _: CometIcebergNativeScanExec =>
-          order.dataType == IntegerType || order.dataType == LongType ||
-          order.dataType == DateType || order.dataType == TimestampType ||
-          order.dataType == TimestampNTZType
+          RuntimePruningKeyTypes.isFileStatsKey(order.dataType)
         case _ => false
       })
     }

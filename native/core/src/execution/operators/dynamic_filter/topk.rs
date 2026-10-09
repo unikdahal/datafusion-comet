@@ -20,7 +20,6 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{internal_err, Result, Statistics};
@@ -72,15 +71,10 @@ impl TopKReaderFilterExec {
             return Ok(None);
         }
         let key = &sort.expr()[0].expr;
+        // TopK reader filter pushdown supports integer, date and timestamp runtime pruning keys.
         if !key.is::<Column>()
-            || !matches!(
-                key.data_type(sort.input().schema().as_ref())?,
-                DataType::Int8
-                    | DataType::Int16
-                    | DataType::Int32
-                    | DataType::Int64
-                    | DataType::Date32
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
+            || !super::is_supported_topk_key_type(
+                &key.data_type(sort.input().schema().as_ref())?,
             )
         {
             return Ok(None);

@@ -32,7 +32,7 @@ import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.comet.{CometBatchScanExec, CometNativeExec}
+import org.apache.spark.sql.comet.{CometBatchScanExec, CometNativeExec, RuntimePruningKeyTypes}
 import org.apache.spark.sql.comet.shims.ShimDataSourceRDDPartition
 import org.apache.spark.sql.execution.datasources.v2.{BatchScanExec, DataSourceRDD, DataSourceRDDPartition}
 import org.apache.spark.sql.types._
@@ -1245,9 +1245,7 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                         .collect {
                           case (attr, id)
                               if runtimeFieldNames.contains(attr.name) &&
-                                (attr.dataType == IntegerType || attr.dataType == LongType ||
-                                  attr.dataType == DateType || attr.dataType == TimestampType ||
-                                  attr.dataType == TimestampNTZType) =>
+                                RuntimePruningKeyTypes.isFileStatsKey(attr.dataType) =>
                             id
                         }
                         .toSet

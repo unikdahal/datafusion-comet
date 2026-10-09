@@ -36,7 +36,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, DynamicPruningExpre
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.{sideBySide, ArrayBasedMapData, DateTimeUtils, GenericArrayData, MetadataColumnHelper}
 import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.getExistenceDefaultValues
-import org.apache.spark.sql.comet.{CometBatchScanExec, CometScanExec}
+import org.apache.spark.sql.comet.{CometBatchScanExec, CometScanExec, RuntimePruningKeyTypes}
 import org.apache.spark.sql.execution.{FileSourceScanExec, InSubqueryExec, SparkPlan, SubqueryAdaptiveBroadcastExec}
 import org.apache.spark.sql.execution.datasources.HadoopFsRelation
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
@@ -1240,10 +1240,7 @@ object CometScanRule extends Logging {
     if (!joins && !topK && !minMax) return inputs
 
     def directKeyAttribute(expression: Expression): Option[Attribute] = expression match {
-      case attr: Attribute
-          if attr.dataType == IntegerType || attr.dataType == LongType ||
-            attr.dataType == DateType || attr.dataType == TimestampType ||
-            attr.dataType == TimestampNTZType =>
+      case attr: Attribute if RuntimePruningKeyTypes.isFileStatsKey(attr.dataType) =>
         Some(attr)
       case _ => None
     }

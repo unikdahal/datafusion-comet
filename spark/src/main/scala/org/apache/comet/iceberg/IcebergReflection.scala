@@ -27,6 +27,7 @@ import scala.util.control.NonFatal
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.comet.RuntimePruningKeyTypes
 import org.apache.spark.sql.internal.SQLConf
 
 import com.google.common.cache.{Cache, CacheBuilder}
@@ -483,7 +484,7 @@ object IcebergReflection extends Logging {
         .toSeq
         .flatMap { column =>
           val typeStr = getMethod(column.getClass, "type").invoke(column).toString
-          if (Set("int", "long", "date", "timestamp", "timestamptz").contains(typeStr)) {
+          if (RuntimePruningKeyTypes.isFileStatsIcebergType(typeStr)) {
             Some(getMethod(column.getClass, "name").invoke(column).asInstanceOf[String])
           } else {
             None

@@ -20,7 +20,6 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{internal_err, Result};
@@ -84,13 +83,10 @@ impl IcebergMinMaxFilterExec {
         let [argument] = arguments.as_slice() else {
             return Ok(None);
         };
+        // IcebergMinMaxFilterExec supports partial min/max aggregates on Int32, Int64, Date32, and Timestamp.
         if !argument.is::<Column>()
-            || !matches!(
-                argument.data_type(aggregate.input().schema().as_ref())?,
-                DataType::Int32
-                    | DataType::Int64
-                    | DataType::Date32
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
+            || !super::is_supported_minmax_key_type(
+                &argument.data_type(aggregate.input().schema().as_ref())?,
             )
         {
             return Ok(None);
