@@ -115,7 +115,7 @@
   }
  ],
  "tasks": [
-  "rp-r1b8-onto-b7-r1"
+  "rp-r1b8-delta-review-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -370,7 +370,7 @@
    "item": "unify join-key type allowlist + agreement tests",
    "agent": "gemini rp-r1-allowlist-r1",
    "branch": "adaptive-ci/ws-r1-key-types",
-   "status": "GREEN 3029829dc (37922828202). Integrating onto B7 staging with semantic reconciliation (gemini rp-r1b8-onto-b7-r1 -> ws-merge-r1b8)"
+   "status": "reconciled onto B7: ws-merge-r1b8 2aec2d370 GREEN (37933945911, rust + jvm 3.5 + 4.1). Delta review vs 0c32f9d36 running (gemini rp-r1b8-delta-review-r1) \u2014 suspicion: Byte/Short widened in Scala TopK/MinMax/file stats."
   },
   "B7": {
    "item": "string Top-K / min-max pruning",
@@ -402,5 +402,9 @@
   "ws-b8 bba05c754": 37910520951,
   "ws-b3 41efdf44d": 37910523774,
   "ws-b2 9360d387e": 37910527030
- }
+ },
+ "deliverables": [
+  "reports/benchmark-summary.html",
+  "reports/iceberg-runtime-pruning-benchmark-summary.pdf (office summary, ~/Downloads)"
+ ]
 }
