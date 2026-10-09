@@ -146,3 +146,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - Manifest rescan design done; impl queued (skip guards + snapshot cache).
 - W1b string → gemini (codex at capacity). ws-b3/b2 rust fixes → big-pickle. R5 green, merge with pin bump after revert.
 - B4 reverted (iceberg 1f154f5f3); Comet c408a06bd = R5 + pin. Manifest stats cache impl started (codex).
+- String join keys merged (iceberg 17d0a1232, Comet 007080ae0). R1 allowlist unification unblocked. Next: targeted string bench.

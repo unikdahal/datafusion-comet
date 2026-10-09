@@ -1,8 +1,8 @@
 {
  "updated": "2026-10-09 (W1 done)",
  "heads": {
-  "iceberg": "1f154f5f3afe7b2d06b7e45fd1ced3f0c5e9ff53 (B4 reverted; branch CI green 37859240837)",
-  "comet": "c408a06bd7ad8c904c255e67b56f35cbc2ae009a (R5 + pin iceberg 1f154f5f3; full CI running)",
+  "iceberg": "17d0a12326333bc401efd1624f0981854211413d (string/binary keep row filters; on 1f154f5f3; CI green)",
+  "comet": "007080ae0 (string join keys on c408a06bd; fast lane green; integration full CI running)",
   "bench": "7c2dd47e8 (B4/B6 targeted)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
@@ -107,7 +107,6 @@
  ],
  "tasks": [
   "rp-b3b2-ci-fix-r1",
-  "rp-w1b-string-r2",
   "rp-manifest-impl-r1"
  ],
  "missing_evidence": [
@@ -249,11 +248,6 @@
    "status": "low priority"
   },
   {
-   "id": "R1",
-   "item": "unify join-key type allowlist (6+ places, inconsistent: Scala TimestampNTZ vs native micros) + agreement test",
-   "status": "after W1b string"
-  },
-  {
    "id": "R4",
    "item": "split pipeline.rs::process (681 lines)",
    "status": "after B4 merge"
@@ -262,6 +256,11 @@
    "id": "R6",
    "item": "separate 9 behavior changes into own units; 26-PR upstream split plan",
    "status": "later"
+  },
+  {
+   "id": "R1",
+   "item": "unify join-key type allowlist (6+ places) + agreement test",
+   "status": "UNBLOCKED (strings merged)"
   }
  ],
  "policy": {
@@ -318,7 +317,7 @@
    "item": "B1 phase 2 string keys",
    "agent": "codex rp-w1b-string-r1",
    "branch": "adaptive-ci/ws-b1-string (both repos)",
-   "status": "codex at capacity; continued by gemini rp-w1b-string-r2"
+   "status": "MERGED both repos (lead review: exact type match, dict by bytes, collation/CHAR fail-closed native + Spark CHAR lineage guard, strict shortcut off for string/binary/fixed). Needs targeted bench strjoin_str_* + string join queries. Nit: duplicated matches! in iceberg row_filter_semantics_match."
   },
   "R23": {
    "item": "iceberg: remove cfg(test) semaphore from DeleteFilter, decoder expects->errors, named consts, pub API shrink (check Comet usage)",
