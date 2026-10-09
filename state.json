@@ -116,7 +116,7 @@
  ],
  "tasks": [
   "rp-b3b2-ci-fix-r1",
-  "rp-b8-design-r1"
+  "rp-b7b8-review-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -274,7 +274,7 @@
   {
    "id": "B8",
    "item": "driver-side FILE-level stats pruning for decimal/string (and byte/short) join keys \u2014 today decimal/string prune only via native row-group/page stats; needs bound serialization correctness (decimal scale, truncated strings) + e2e tests + bench",
-   "status": "design gemini rp-b8-design-r1"
+   "status": "impl pushed bba05c754 (stacked on ws-r1 1ca825a4d); unvalidated"
   }
  ],
  "policy": {
@@ -385,5 +385,14 @@
   "batch Comet integration merge: ws-manifest-stats-cache (0635e00d8) + ws-r1-key-types (when green) [+ ws-b3/ws-b2 if fixed]",
   "targeted bench: manifest plan_ms on f_snapshots/f_many_files (cache off/cold/warm)"
  ],
- "blocker": "02:20 UTC: Actions on unikdahal/datafusion-comet: runs created as queued with ZERO jobs; push to integration (fcd020283) created no run; rerun 403 'already running'; agents saw 'Actions has been disabled for this repository'/'repository invocation blocked'. API permissions enabled; githubstatus operational; cache 8.3/10GB. ESCALATED to user (needs account/billing/abuse check)."
+ "blocker": "02:20 UTC: Actions on unikdahal/datafusion-comet: runs created as queued with ZERO jobs; push to integration (fcd020283) created no run; rerun 403 'already running'; agents saw 'Actions has been disabled for this repository'/'repository invocation blocked'. API permissions enabled; githubstatus operational; cache 8.3/10GB. ESCALATED to user (needs account/billing/abuse check).",
+ "unvalidated_queue": [
+  "comet integration fcd020283 (manifest cache)",
+  "ws-r1-key-types 1ca825a4d",
+  "ws-b7-string-topk 5608eab25",
+  "ws-b8-file-stats-dec-str bba05c754 (on r1)",
+  "ws-b3-nulls-first",
+  "ws-b2-topk-filters"
+ ],
+ "ops_note": "03:05 UTC: /tmp quota filled by downloaded artifacts; cleaned /tmp/rp-* (regenerable). Download future artifacts to a dir and delete after analysis."
 }
