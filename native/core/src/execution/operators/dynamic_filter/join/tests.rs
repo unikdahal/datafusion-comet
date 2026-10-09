@@ -2005,7 +2005,7 @@ fn string_eligibility_requires_matching_types_and_native_iceberg() {
             let scan = probe
                 .downcast_ref::<crate::execution::operators::IcebergScanExec>()
                 .unwrap();
-            assert_eq!(scan.runtime_predicate_field_name(0), Some("key".into()));
+            assert_eq!(scan.runtime_predicate_field(0), Some((1, "key".into())));
             let candidate = single_key_join_plans(
                 string_input(vec![Some("x")], &build_type),
                 probe,
