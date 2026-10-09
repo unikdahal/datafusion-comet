@@ -116,7 +116,7 @@
  ],
  "tasks": [
   "rp-b3b2-ci-fix-r1",
-  "rp-r1-fix-r1"
+  "rp-b8-design-r1"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -274,7 +274,7 @@
   {
    "id": "B8",
    "item": "driver-side FILE-level stats pruning for decimal/string (and byte/short) join keys \u2014 today decimal/string prune only via native row-group/page stats; needs bound serialization correctness (decimal scale, truncated strings) + e2e tests + bench",
-   "status": "queued (after Actions recovers)"
+   "status": "design gemini rp-b8-design-r1"
   }
  ],
  "policy": {
@@ -371,7 +371,7 @@
    "item": "unify join-key type allowlist + agreement tests",
    "agent": "gemini rp-r1-allowlist-r1",
    "branch": "adaptive-ci/ws-r1-key-types",
-   "status": "v2 b2c8e0080 REJECTED by review (5 Scala widenings + Rust error-order change). v3 task gemini rp-r1-fix-r2: exact old sets."
+   "status": "v3 1ca825a4d pushed (claims exact old sets per call site + Rust order restored); needs CI (Actions blocked) + quick re-verify before merge"
   },
   "B7": {
    "item": "string Top-K / min-max pruning",

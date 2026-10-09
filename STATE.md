@@ -154,3 +154,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - 02:20 UTC: manifest cache merged (fcd020283). ACTIONS ANOMALY: runs queued/not created on comet fork. B7 pushed 5608eab25 awaiting CI.
 - R1 rejected (would disable decimal/string pruning); fix dispatched. ACTIONS BLOCKED on comet fork — escalated to user.
 - R1 v2 rejected (Scala widenings). Finding: decimal/string get NO driver file-level stats today (row-group/page pruning only) -> new B8.
+- R1 v3 pushed 1ca825a4d (awaiting CI). B8 design started.
