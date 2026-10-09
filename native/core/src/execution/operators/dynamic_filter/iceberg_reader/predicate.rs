@@ -311,7 +311,12 @@ mod tests {
     fn string_thresholds_preserve_strictness_and_full_literal() {
         use datafusion::physical_expr::expressions::lit;
 
-        for value in ["", "é東京🙂", "abcdefghijklmnop000000", "abcdefghijklmnop999999"] {
+        for value in [
+            "",
+            "é東京🙂",
+            "abcdefghijklmnop000000",
+            "abcdefghijklmnop999999",
+        ] {
             for scalar in [
                 ScalarValue::Utf8(Some(value.into())),
                 ScalarValue::LargeUtf8(Some(value.into())),
@@ -325,8 +330,14 @@ mod tests {
                     ),
                 ] {
                     for (op, expected) in [
-                        (Operator::Lt, Reference::new("id").less_than(Datum::string(value))),
-                        (Operator::Gt, Reference::new("id").greater_than(Datum::string(value))),
+                        (
+                            Operator::Lt,
+                            Reference::new("id").less_than(Datum::string(value)),
+                        ),
+                        (
+                            Operator::Gt,
+                            Reference::new("id").greater_than(Datum::string(value)),
+                        ),
                         (
                             Operator::LtEq,
                             Reference::new("id").less_than_or_equal_to(Datum::string(value)),
@@ -341,7 +352,10 @@ mod tests {
                             op,
                             lit(literal.clone()),
                         ));
-                        assert_eq!(extract_iceberg_predicate(&expression, 0, "id"), Some(expected));
+                        assert_eq!(
+                            extract_iceberg_predicate(&expression, 0, "id"),
+                            Some(expected)
+                        );
                     }
                 }
             }
@@ -357,8 +371,15 @@ mod tests {
         use arrow::datatypes::DataType;
 
         let values = [
-            "", "A", "a", "abcdefghijklmnop000000", "abcdefghijklmnop999999",
-            "abcdefghijklmnoq", "é", "東京", "🙂",
+            "",
+            "A",
+            "a",
+            "abcdefghijklmnop000000",
+            "abcdefghijklmnop999999",
+            "abcdefghijklmnoq",
+            "é",
+            "東京",
+            "🙂",
         ];
         let strings = StringArray::from(values.to_vec());
         for value_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
@@ -380,7 +401,9 @@ mod tests {
                     for (i, left) in values.iter().enumerate() {
                         for (j, right) in values.iter().enumerate() {
                             let bytes = left.as_bytes().cmp(right.as_bytes());
-                            let datum = Datum::string(left).partial_cmp(&Datum::string(right)).unwrap();
+                            let datum = Datum::string(left)
+                                .partial_cmp(&Datum::string(right))
+                                .unwrap();
                             assert_eq!(datum, bytes);
                             assert_eq!(cmp(i, j), if descending { bytes.reverse() } else { bytes });
                         }

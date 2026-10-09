@@ -286,9 +286,10 @@ fn binary_string_minmax_attaches_for_all_arrow_encodings() {
         ] {
             for max in [false, true] {
                 let aggregate = aggregate(scan(data_type.clone()), max, false, false);
-                let wrapper = IcebergMinMaxFilterExec::try_new(&aggregate, &ConfigOptions::default())
-                    .unwrap()
-                    .expect("binary string MIN/MAX");
+                let wrapper =
+                    IcebergMinMaxFilterExec::try_new(&aggregate, &ConfigOptions::default())
+                        .unwrap()
+                        .expect("binary string MIN/MAX");
                 let runtime = wrapper.build_runtime_aggregate().unwrap();
                 assert!(runtime.input().is::<IcebergScanExec>());
                 assert_eq!(runtime.dynamic_expressions_produced().len(), 1);
@@ -304,13 +305,16 @@ fn annotated_string_columns_fail_closed() {
         ("__CHAR_VARCHAR_TYPE_STRING", "char(24)"),
         ("ARROW:extension:name", "unknown"),
     ] {
-        let field = Field::new("key", DataType::Utf8, true)
-            .with_metadata(std::collections::HashMap::from([(name.into(), value.into())]));
+        let field = Field::new("key", DataType::Utf8, true).with_metadata(
+            std::collections::HashMap::from([(name.into(), value.into())]),
+        );
         for max in [false, true] {
             let aggregate = aggregate(scan_field(field.clone()), max, false, false);
-            assert!(IcebergMinMaxFilterExec::try_new(&aggregate, &ConfigOptions::default())
-                .unwrap()
-                .is_none());
+            assert!(
+                IcebergMinMaxFilterExec::try_new(&aggregate, &ConfigOptions::default())
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 }
