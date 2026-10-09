@@ -20,7 +20,6 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{internal_err, Result, Statistics};
@@ -42,7 +41,7 @@ use futures::StreamExt;
 mod reader;
 
 use super::iceberg_reader::reaches_iceberg_reader;
-use super::join::{is_direct_pruning_key, is_string_key_type};
+use super::join::is_direct_pruning_key;
 use super::safety::is_safe_to_prune_before;
 use reader::try_attach_topk_reader_filter;
 
@@ -75,7 +74,7 @@ impl TopKReaderFilterExec {
         }
         let key = &sort.expr()[0].expr;
         let key_type = key.data_type(sort.input().schema().as_ref())?;
-        let string_key = is_string_key_type(&key_type);
+        let string_key = super::is_runtime_pruning_string_key_type(&key_type);
         // String bounds require the Iceberg binary domain and unannotated column lineage.
         // NULLS FIRST string support is owned by the separate null-ordering workstream.
         if string_key
@@ -85,18 +84,8 @@ impl TopKReaderFilterExec {
         {
             return Ok(None);
         }
-        if !key.is::<Column>()
-            || !(string_key
-                || matches!(
-                    key_type,
-                    DataType::Int8
-                        | DataType::Int16
-                        | DataType::Int32
-                        | DataType::Int64
-                        | DataType::Date32
-                        | DataType::Timestamp(TimeUnit::Microsecond, _)
-                ))
-        {
+        // TopK reader filter pushdown supports integer, date, timestamp and binary string runtime pruning keys.
+        if !key.is::<Column>() || !super::is_supported_topk_key_type(&key_type) {
             return Ok(None);
         }
         // Every sort expression is evaluated before rows enter the heap. A

@@ -27,7 +27,7 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::DataType;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{JoinType, NullEquality, Result, Statistics};
@@ -80,8 +80,7 @@ impl DynamicFilterJoinExec {
     }
 
     fn new(join: &HashJoinExec, config: ConfigOptions) -> Result<Self> {
-        Ok(Self {
-            template: join.builder().reset_state().build()?,
+        Ok(Self {\n            template: join.builder().reset_state().build()?,
             config,
             metrics: ExecutionPlanMetricsSet::new(),
         })
@@ -342,19 +341,7 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
     }
     let build_type = build_key.data_type(join.left().schema().as_ref())?;
     let probe_type = probe_key.data_type(join.right().schema().as_ref())?;
-    if build_type != probe_type
-        || !(is_string_key_type(&build_type)
-            || matches!(
-                build_type,
-                DataType::Int8
-                    | DataType::Int16
-                    | DataType::Int32
-                    | DataType::Int64
-                    | DataType::Date32
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
-                    | DataType::Decimal128(_, _)
-            ))
-    {
+    if build_type != probe_type || !super::is_supported_join_key_type(&build_type) {
         return Ok(Some(
             "requires matching integer, date, timestamp, decimal or string keys",
         ));
@@ -384,16 +371,7 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
 /// Keep the exact Arrow type match above, including the dictionary key/value types;
 /// Utf8/Utf8View coercions must be materialized before the join, not inferred here.
 pub(super) fn is_string_key_type(data_type: &DataType) -> bool {
-    match data_type {
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => true,
-        DataType::Dictionary(_, value) => {
-            matches!(
-                value.as_ref(),
-                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-            )
-        }
-        _ => false,
-    }
+    super::is_runtime_pruning_string_key_type(data_type)
 }
 
 /// A cast or padding expression in a projection is still a computed pruning key,

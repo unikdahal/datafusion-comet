@@ -296,6 +296,8 @@ fn extract_bound(
     }
 }
 
+/// Converts a runtime pruning scalar to an Iceberg Datum.
+/// Supported variants correspond to [`crate::execution::operators::dynamic_filter::is_runtime_pruning_key_type`].
 fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
     match value {
         ScalarValue::Int8(Some(value)) => Some(Datum::int(i32::from(*value))),

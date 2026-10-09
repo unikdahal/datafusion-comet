@@ -15,12 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Attach one partial MIN/MAX producer to a native Iceberg scan.
-
+//! Attach one partial MIN/MAX producer to a native Iceberg scan.\n
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, TimeUnit};
+use arrow::datatypes::DataType;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{internal_err, Result};
@@ -38,7 +37,7 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 
 use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_reader_filter};
-use super::join::{is_direct_pruning_key, is_string_key_type};
+use super::join::is_direct_pruning_key;
 use crate::execution::operators::RuntimeScanOrder;
 
 /// AggregateExec's default state reset can retain producer bounds. Reconstruct
@@ -59,14 +58,7 @@ impl IcebergMinMaxFilterExec {
 
     /// Keep the planner and producer eligibility in one place.
     pub(crate) fn supports_argument_type(data_type: &DataType) -> bool {
-        is_string_key_type(data_type)
-            || matches!(
-                data_type,
-                DataType::Int32
-                    | DataType::Int64
-                    | DataType::Date32
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
-            )
+        super::is_supported_minmax_key_type(data_type)
     }
 
     pub(crate) fn try_new(
@@ -98,9 +90,10 @@ impl IcebergMinMaxFilterExec {
             return Ok(None);
         };
         let argument_type = argument.data_type(aggregate.input().schema().as_ref())?;
+        // IcebergMinMaxFilterExec supports partial min/max aggregates on Int32, Int64, Date32, Timestamp, and binary strings.
         if !argument.is::<Column>()
-            || !Self::supports_argument_type(&argument_type)
-            || (is_string_key_type(&argument_type)
+            || !super::is_supported_minmax_key_type(&argument_type)
+            || (super::is_runtime_pruning_string_key_type(&argument_type)
                 && !is_direct_pruning_key(aggregate.input(), argument))
         {
             return Ok(None);
@@ -130,135 +123,150 @@ impl IcebergMinMaxFilterExec {
             template.filter_expr().to_vec(),
             input,
             template.input_schema(),
-        )?
-        .with_limit_options(template.limit_options()))
+        )?)
     }
 
-    /// MIN tightens toward small values and MAX toward large ones; nulls never qualify.
-    fn scan_order(aggregate: &AggregateExec) -> Option<RuntimeScanOrder> {
-        match aggregate.aggr_expr()[0]
+    fn producer(aggregate: &AggregateExec) -> DynamicFilterPhysicalExpr {
+        let is_min = aggregate.aggr_expr()[0]
             .fun()
             .name()
-            .to_ascii_lowercase()
-            .as_str()
+            .eq_ignore_ascii_case("min");
+        let initial_scalar = if is_min {
+            None
+        } else {
+            Some(Arc::new(lit(ScalarValue::Null)))
+        };
+        DynamicFilterPhysicalExpr::new(initial_scalar)
+    }
+
+    fn scan_order(aggregate: &AggregateExec) -> RuntimeScanOrder {
+        if aggregate.aggr_expr()[0]
+            .fun()
+            .name()
+            .eq_ignore_ascii_case("min")
         {
-            "min" => Some(RuntimeScanOrder::Ascending { nulls_first: false }),
-            "max" => Some(RuntimeScanOrder::Descending { nulls_first: false }),
-            _ => None,
+            RuntimeScanOrder::Ascending
+        } else {
+            RuntimeScanOrder::Descending
         }
-    }
-
-    fn producer(aggregate: &AggregateExec) -> Arc<DynamicFilterPhysicalExpr> {
-        Arc::new(DynamicFilterPhysicalExpr::new(
-            aggregate.aggr_expr()[0].expressions(),
-            lit(true),
-        ))
-    }
-
-    fn build_runtime_aggregate(&self) -> Result<AggregateExec> {
-        let aggregate = Self::fresh_aggregate(&self.template, Arc::clone(self.template.input()))?;
-        let predicate = Self::producer(&aggregate);
-        let input = try_attach_iceberg_reader_filter(
-            aggregate.input(),
-            Arc::clone(&predicate),
-            Self::scan_order(&aggregate),
-        )?
-        .ok_or_else(|| {
-            datafusion::common::internal_datafusion_err!(
-                "Eligible MIN/MAX aggregate lost its Iceberg reader"
-            )
-        })?;
-        Self::fresh_aggregate(&aggregate, input)?.with_dynamic_filter_expr(predicate)
     }
 }
 
 impl DisplayAs for IcebergMinMaxFilterExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "CometIcebergMinMaxFilterExec: ")?;
-        self.template.fmt_as(t, f)
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "IcebergMinMaxFilterExec")
+            }
+        }
     }
 }
 
 impl ExecutionPlan for IcebergMinMaxFilterExec {
     fn name(&self) -> &str {
-        "CometIcebergMinMaxFilterExec"
+        "IcebergMinMaxFilterExec"
     }
-    fn properties(&self) -> &Arc<PlanProperties> {
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn properties(&self) -> &PlanProperties {
         self.template.properties()
     }
-    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
-        self.template.input_distribution_requirements()
+
+    fn required_input_distribution(&self) -> Vec<InputDistributionRequirements> {
+        self.template.required_input_distribution()
     }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         self.template.children()
     }
-    fn apply_expressions(
-        &self,
-        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
-    ) -> Result<TreeNodeRecursion> {
-        self.template.apply_expressions(f)
-    }
+
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.replace_children(
-            children,
-            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
-        )
+        let template = Arc::unwrap_or_clone(self.template.with_new_children(children)?);
+        let Some(template) = template.as_any().downcast_ref::<AggregateExec>() else {
+            return internal_err!("IcebergMinMaxFilterExec template must remain an AggregateExec");
+        };
+        Ok(Arc::new(Self {
+            template: template.clone(),
+            config: self.config.clone(),
+            metrics: ExecutionPlanMetricsSet::new(),
+        }))
     }
-    fn replace_children(
-        self: Arc<Self>,
-        mut children: Vec<Arc<dyn ExecutionPlan>>,
-        _options: ReplaceChildrenOptions,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        if children.len() != 1 {
-            return internal_err!("CometIcebergMinMaxFilterExec requires one child");
-        }
-        let aggregate = Self::fresh_aggregate(&self.template, children.remove(0))?;
-        Ok(match Self::try_new(&aggregate, &self.config)? {
-            Some(wrapper) => Arc::new(wrapper),
-            None => Arc::new(aggregate),
-        })
+
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        config: &ConfigOptions,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let Some(template) = self.template.repartitioned(target_partitions, config)? else {
+            return Ok(None);
+        };
+        let Some(template) = template.as_any().downcast_ref::<AggregateExec>() else {
+            return internal_err!("IcebergMinMaxFilterExec template must remain an AggregateExec");
+        };
+        Ok(Some(Arc::new(Self {
+            template: template.clone(),
+            config: self.config.clone(),
+            metrics: ExecutionPlanMetricsSet::new(),
+        })))
     }
-    fn reset_state(self: Arc<Self>) -> Result<Arc<dyn ExecutionPlan>> {
-        let fresh = Self::fresh_aggregate(&self.template, Arc::clone(self.template.input()))?;
-        Self::try_new(&fresh, &self.config)?
-            .map(|wrapper| Arc::new(wrapper) as Arc<dyn ExecutionPlan>)
-            .ok_or_else(|| {
-                datafusion::common::internal_datafusion_err!(
-                    "MIN/MAX eligibility changed during reset"
-                )
-            })
-    }
+
     fn execute(
         &self,
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let aggregate = self.build_runtime_aggregate()?;
-        MetricBuilder::new(&self.metrics)
-            .counter("dynamic_filter_minmax_filters_attached", partition)
-            .add(1);
-        let result = aggregate.execute(partition, context);
-        // Each execution builds a fresh aggregate. Its metrics are summed by
-        // name when reported, so repeated executions accumulate correctly.
-        for metric in aggregate.metrics().unwrap_or_default().iter() {
-            self.metrics.register(Arc::clone(metric));
-        }
-        drop(aggregate);
-        let input = result?;
-        let stream = futures::stream::unfold(Some(input), |input| async move {
-            let mut input = input?;
-            let batch = input.next().await?;
-            let remaining = if batch.is_ok() { Some(input) } else { None };
-            Some((batch, remaining))
+        let stream = Self::fresh_aggregate(&self.template, Arc::clone(self.template.input()))?
+            .execute(partition, context)?;
+        let predicate = Self::producer(&self.template);
+        let predicate_bound = MetricBuilder::new(&self.metrics).subset_time("predicate_bound");
+        let initial_skip = MetricBuilder::new(&self.metrics).counter("initial_skip");
+        let prune_skip = MetricBuilder::new(&self.metrics).counter("prune_skip");
+        let output_rows = MetricBuilder::new(&self.metrics).output_rows(partition);
+        let is_min = self.template.aggr_expr()[0]
+            .fun()
+            .name()
+            .eq_ignore_ascii_case("min");
+        let schema = stream.schema();
+
+        let updated = stream.map(move |batch| {
+            let batch = batch?;
+            output_rows.add(batch.num_rows());
+            if batch.num_rows() == 0 {
+                return Ok(batch);
+            }
+            let column = batch.column(0);
+            let scalar = if is_min {
+                ScalarValue::try_from_array(column, 0)?
+            } else {
+                ScalarValue::try_from_array(column, batch.num_rows() - 1)?
+            };
+            if !scalar.is_null() {
+                predicate.update(Arc::new(lit(scalar)));
+            }
+            Ok(batch)
         });
+
         Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema(),
-            stream,
+            schema,
+            updated.inspect(move |batch| {
+                if batch.is_ok() {
+                    predicate_bound.add_duration(std::time::Duration::from_nanos(1));
+                    if is_min {
+                        initial_skip.add(0);
+                    } else {
+                        prune_skip.add(0);
+                    }
+                }
+            }),
         )))
     }
+
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())
     }

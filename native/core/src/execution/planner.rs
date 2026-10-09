@@ -3133,7 +3133,7 @@ impl PhysicalPlanner {
     ) -> Result<Arc<dyn PhysicalExpr>, ExecutionError> {
         if direct_minmax
             && child.is::<Column>()
-            && IcebergMinMaxFilterExec::supports_argument_type(&datatype)
+            && crate::execution::operators::dynamic_filter::is_supported_minmax_key_type(&datatype)
             && child.data_type(schema.as_ref())? == datatype
         {
             Ok(child)
