@@ -124,9 +124,8 @@ object CometConf extends ShimCometConf {
   val COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.scan.icebergNative.runtimeStatsCache.enabled")
       .category(CATEGORY_SCAN)
-      .doc(
-        "Whether to cache runtime-filter column statistics on the driver for immutable " +
-          "Iceberg snapshots. Disabling the cache collects statistics on each eligible scan.")
+      .doc("Whether to cache runtime-filter column statistics on the driver for immutable " +
+        "Iceberg snapshots. Disabling the cache collects statistics on each eligible scan.")
       .booleanConf
       .createWithDefault(true)
 

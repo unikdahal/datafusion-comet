@@ -512,8 +512,10 @@ object IcebergReflection extends Logging {
     }
   }
 
-  private def runtimeStatsKey(icebergScan: Any, scan: Any, columns: Seq[String])
-      : Option[RuntimeStatsKey] = {
+  private def runtimeStatsKey(
+      icebergScan: Any,
+      scan: Any,
+      columns: Seq[String]): Option[RuntimeStatsKey] = {
     for {
       table <- getTable(scan)
       location <- getMetadataLocation(table)
