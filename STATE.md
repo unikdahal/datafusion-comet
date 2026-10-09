@@ -167,3 +167,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - B7 staging green; integration will ff to ws-merge-r1b8 once green.
 - Office PDF summary produced (~/Downloads, notes reports/). r1b8 staging green 2aec2d370; delta review pending before integration ff.
 - Integration 2aec2d370 = everything merged (R1, B7, B8, b3, b2, manifest cache). FULL campaign with extended fuzz launched (5f8ba0358).
+- 2026-10-10 STOPPED by user. Final: iceberg 17d0a1232, comet 2aec2d370 (both CI green). Last campaign: candidate 0 failures; fuzz ext harness bug (column raw) prevented fuzz.

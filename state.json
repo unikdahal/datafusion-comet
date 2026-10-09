@@ -114,9 +114,7 @@
    "result": "0 validation failures; f_str dim_128 4.79x, dim_10k 4.20x, spread 2.61x; eq_deletes_str dim_128 13.66x; unsorted dim_128 2.50x (B4 revert confirmed); topk10__f_unsorted 2.96x (pruning work identical to 3.91x run: ratio difference = runner CPU fixed-overhead, NOT regression); topk10__f_str 1.01x (no string TopK pruning); strjoin_str_sort_merge_plain_500000 0.94x but cand_off/base_off 0.92 too (not pruning)"
   }
  ],
- "tasks": [
-  "full campaign 5f8ba0358"
- ],
+ "tasks": [],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
  ],
@@ -406,5 +404,14 @@
  "deliverables": [
   "reports/benchmark-summary.html",
   "reports/iceberg-runtime-pruning-benchmark-summary.pdf (office summary, ~/Downloads)"
- ]
+ ],
+ "status": "STOPPED by user 2026-10-10. Heartbeat schedule deleted.",
+ "final": {
+  "iceberg-rust": "adaptive-ci/runtime-pruning-rewrite-20261006 @ 17d0a12326333bc401efd1624f0981854211413d (CI green 37865950433)",
+  "datafusion-comet": "adaptive-ci/runtime-pruning-rewrite-20261006 @ 2aec2d370fab5361a96b63682832ff41c8366128 (full CI green 37943657736; pins iceberg 17d0a1232)"
+ },
+ "last_campaign": {
+  "run": 37943700291,
+  "result": "candidate 0 validation failures; baseline strjoin wrong results (known main bug #42); fuzz suite did NOT run: harness bug in fuzz extension (b87833475) referencing non-existent column `raw` in data generation \u2014 fix before next campaign"
+ }
 }
