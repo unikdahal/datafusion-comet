@@ -115,8 +115,8 @@
   }
  ],
  "tasks": [
-  "rp-r1b8-ci-fix-r1",
-  "staging run 37922608746"
+  "rp-r1b8-onto-b7-r1",
+  "staging run 37922608746 (B7)"
  ],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
@@ -274,7 +274,7 @@
   {
    "id": "B8",
    "item": "driver-side FILE-level stats pruning for decimal/string (and byte/short) join keys \u2014 today decimal/string prune only via native row-group/page stats; needs bound serialization correctness (decimal scale, truncated strings) + e2e tests + bench",
-   "status": "impl bba05c754 review APPROVE (nit: redundant collation check). Awaiting CI."
+   "status": "GREEN e7fa1781e (37922870268); integrating with R1 onto B7"
   }
  ],
  "policy": {
@@ -371,7 +371,7 @@
    "item": "unify join-key type allowlist + agreement tests",
    "agent": "gemini rp-r1-allowlist-r1",
    "branch": "adaptive-ci/ws-r1-key-types",
-   "status": "1ca825a4d failed fmt (rustfmt topk.rs + spotless). Fix gemini rp-r1b8-ci-fix-r1"
+   "status": "GREEN 3029829dc (37922828202). Integrating onto B7 staging with semantic reconciliation (gemini rp-r1b8-onto-b7-r1 -> ws-merge-r1b8)"
   },
   "B7": {
    "item": "string Top-K / min-max pruning",
