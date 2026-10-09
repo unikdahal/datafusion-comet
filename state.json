@@ -2,7 +2,7 @@
  "updated": "2026-10-09 (W1 done)",
  "heads": {
   "iceberg": "17d0a12326333bc401efd1624f0981854211413d (string/binary keep row filters; on 1f154f5f3; CI green)",
-  "comet": "007080ae0 (string join keys on c408a06bd; fast lane green; integration full CI running)",
+  "comet": "fcd020283 (manifest stats cache on 007080ae0; integration 007080ae0 was GREEN 37865955287; NO run created yet for fcd020283)",
   "bench": "cbb461b77 (targeted string + revert controls)",
   "apache_main": "f80042f78715e5a009352f1582f6c246a5f96131"
  },
@@ -361,7 +361,7 @@
   "MANIFEST": {
    "item": "eliminate/cheapen second manifest scan for runtime stats (scales with manifests)",
    "agent": "gemini rp-manifest-rescan-design-r1 (design)",
-   "status": "READY 0635e00d8 (fast lane green 37866246186; lead-reviewed: key=metadata loc+scan snapshot+key field ids, coverage check, no incomplete caching). Follow-up: weigh cache by file count not entries. Merge in batch with R1."
+   "status": "MERGED fcd020283 (rebased)"
   },
   "R1": {
    "item": "unify join-key type allowlist + agreement tests",
@@ -371,12 +371,14 @@
   "B7": {
    "item": "string Top-K / min-max pruning",
    "agent": "gemini rp-b7-string-topk-r2",
-   "branch": "adaptive-ci/ws-b7-string-topk"
+   "branch": "adaptive-ci/ws-b7-string-topk",
+   "status": "pushed 5608eab25 on ws-b7-string-topk (root cause: numeric-only gates in topk.rs/aggregate.rs/planner.rs + Scala gates); fast lane run 37873083057 QUEUED \u2014 Actions not scheduling"
   }
  },
  "providers_note": "CODEX WEEKLY LIMIT: unavailable until 2026-10-14 12:15 IST. Use gemini-3.8-flash-high (shared quota with 3.7; resets ~hourly), opencode/big-pickle, sonnet subagents (session limits).",
  "pending": [
   "batch Comet integration merge: ws-manifest-stats-cache (0635e00d8) + ws-r1-key-types (when green) [+ ws-b3/ws-b2 if fixed]",
   "targeted bench: manifest plan_ms on f_snapshots/f_many_files (cache off/cold/warm)"
- ]
+ ],
+ "blocker": "2026-10-09 02:16 UTC: GitHub Actions runs stuck queued / not created on unikdahal/datafusion-comet though API says enabled and githubstatus operational. Watching."
 }
