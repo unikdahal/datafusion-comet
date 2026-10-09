@@ -161,3 +161,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - B7 + B8 reviews: APPROVE (nits only). All work blocked on Actions re-enable.
 - 09:20 UTC: Actions RECOVERED. Dispatched validation for integration + r1/b7/b8/b3/b2.
 - Integration fcd020283 GREEN. b3+b2 green+reviewed -> staging ws-merge-b3b2. R1/B8 fmt fixes + B7 compile fix dispatched (gemini).
+- B7 green 4e4ace6be; queued for merge after b3b2 staging.

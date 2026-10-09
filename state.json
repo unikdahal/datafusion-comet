@@ -116,7 +116,6 @@
  ],
  "tasks": [
   "rp-r1b8-ci-fix-r1",
-  "rp-b7-ci-fix-r1",
   "staging run 37918699731"
  ],
  "missing_evidence": [
@@ -378,7 +377,7 @@
    "item": "string Top-K / min-max pruning",
    "agent": "gemini rp-b7-string-topk-r2",
    "branch": "adaptive-ci/ws-b7-string-topk",
-   "status": "5608eab25 failed scala test compile type mismatch CometIcebergNativeSuite:2033. Fix gemini rp-b7-ci-fix-r1"
+   "status": "GREEN 4e4ace6be (37919067134; 3.5 withSQLConf Unit fix); reviewed APPROVE. Merge after staging b3b2."
   }
  },
  "providers_note": "CODEX WEEKLY LIMIT: unavailable until 2026-10-14 12:15 IST. Use gemini-3.8-flash-high (shared quota with 3.7; resets ~hourly), opencode/big-pickle, sonnet subagents (session limits).",
