@@ -364,9 +364,8 @@ mod tests {
 
     #[test]
     fn arrow_and_iceberg_strings_share_unsigned_byte_order() {
-        use arrow::array::StringArray;
+        use arrow::array::{make_comparator, StringArray};
         use arrow::compute::cast;
-        use arrow::compute::kernels::ord::make_comparator;
         use arrow::compute::SortOptions;
         use arrow::datatypes::DataType;
 
