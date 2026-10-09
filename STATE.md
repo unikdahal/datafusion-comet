@@ -158,3 +158,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - B8 design accepted; impl started stacked on R1 (CI blocked).
 - 03:05 UTC: Actions still blocked. B8 pushed. Unvalidated queue recorded. B7+B8 review dispatched (big-pickle). /tmp cleaned.
 - 04:10 UTC: Actions disabled at ACCOUNT level (dispatch 422). ws-b3/ws-b2 fixed (pin restore). Worktrees audited clean. B7/B8 review on gemini.
+- B7 + B8 reviews: APPROVE (nits only). All work blocked on Actions re-enable.

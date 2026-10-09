@@ -114,9 +114,7 @@
    "result": "0 validation failures; f_str dim_128 4.79x, dim_10k 4.20x, spread 2.61x; eq_deletes_str dim_128 13.66x; unsorted dim_128 2.50x (B4 revert confirmed); topk10__f_unsorted 2.96x (pruning work identical to 3.91x run: ratio difference = runner CPU fixed-overhead, NOT regression); topk10__f_str 1.01x (no string TopK pruning); strjoin_str_sort_merge_plain_500000 0.94x but cand_off/base_off 0.92 too (not pruning)"
   }
  ],
- "tasks": [
-  "rp-b7b8-review-r2"
- ],
+ "tasks": [],
  "missing_evidence": [
   "runtime-pruning-close-inspection-20261008.md (codex cloud)"
  ],
@@ -273,7 +271,7 @@
   {
    "id": "B8",
    "item": "driver-side FILE-level stats pruning for decimal/string (and byte/short) join keys \u2014 today decimal/string prune only via native row-group/page stats; needs bound serialization correctness (decimal scale, truncated strings) + e2e tests + bench",
-   "status": "impl pushed bba05c754 (stacked on ws-r1 1ca825a4d); unvalidated"
+   "status": "impl bba05c754 review APPROVE (nit: redundant collation check). Awaiting CI."
   }
  ],
  "policy": {
@@ -376,7 +374,7 @@
    "item": "string Top-K / min-max pruning",
    "agent": "gemini rp-b7-string-topk-r2",
    "branch": "adaptive-ci/ws-b7-string-topk",
-   "status": "pushed 5608eab25 on ws-b7-string-topk (root cause: numeric-only gates in topk.rs/aggregate.rs/planner.rs + Scala gates); fast lane run 37873083057 QUEUED \u2014 Actions not scheduling"
+   "status": "review APPROVE (gemini; nit: driver collects string stats for NULLS FIRST TopK, benign). Awaiting CI."
   }
  },
  "providers_note": "CODEX WEEKLY LIMIT: unavailable until 2026-10-14 12:15 IST. Use gemini-3.8-flash-high (shared quota with 3.7; resets ~hourly), opencode/big-pickle, sonnet subagents (session limits).",
