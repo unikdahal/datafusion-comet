@@ -74,7 +74,8 @@ class IcebergReflectionSuite extends AnyFunSuite {
                   .asScala
                   .toSeq
               }
-              val result = method.invoke(delegate, Option(args).getOrElse(Array.empty[AnyRef]): _*)
+              val result =
+                method.invoke(delegate, Option(args).getOrElse(Array.empty[AnyRef]): _*)
               result match {
                 case next: TableScan => counted(next)
                 case other => other
@@ -129,8 +130,10 @@ class IcebergReflectionSuite extends AnyFunSuite {
       val source = table.newScan()
       val scan = new CountingRuntimeScan(source)
       val tasks = runtimeTasks(source)
-      assert(IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 0), Seq("id")).isEmpty)
-      assert(IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 1), Seq("id")).isEmpty)
+      assert(
+        IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 0), Seq("id")).isEmpty)
+      assert(
+        IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 1), Seq("id")).isEmpty)
       assert(scan.planningCalls == 0)
     }
   }

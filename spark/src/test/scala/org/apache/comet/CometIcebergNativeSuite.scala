@@ -1248,8 +1248,16 @@ class CometIcebergNativeSuite
                       common.getFileMetricsPoolList.asScala.foreach { metrics =>
                         val serializedFieldIds =
                           metrics.getValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
-                            metrics.getNullValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
-                            metrics.getNanValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
+                            metrics.getNullValueCountsMap
+                              .keySet()
+                              .asScala
+                              .map(_.intValue())
+                              .toSet ++
+                            metrics.getNanValueCountsMap
+                              .keySet()
+                              .asScala
+                              .map(_.intValue())
+                              .toSet ++
                             metrics.getLowerBoundsMap.keySet().asScala.map(_.intValue()).toSet ++
                             metrics.getUpperBoundsMap.keySet().asScala.map(_.intValue()).toSet
                         assert(
