@@ -18,7 +18,7 @@
 use super::*;
 
 use crate::execution::operators::IcebergScanExec;
-use arrow::datatypes::{Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::ScalarValue;
 use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::logical_expr::Operator;
