@@ -2051,6 +2051,7 @@ class CometIcebergNativeSuite
               "SELECT max(hi) FROM string_extrema_fact")
             for (query <- queries) {
               def run(enabled: Boolean): Long = {
+                var bytes = 0L
                 withSQLConf(
                   CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key -> enabled.toString,
                   CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
@@ -2075,8 +2076,9 @@ class CometIcebergNativeSuite
                     assert(scan.metrics("iceberg_runtime_predicate_tasks").value == 0L)
                     assert(pruned == 0L)
                   }
-                  scan.metrics("bytes_scanned").value
+                  bytes = scan.metrics("bytes_scanned").value
                 }
+                bytes
               }
               val fullBytes = run(false)
               val liveBytes = run(true)
