@@ -171,12 +171,14 @@ class IcebergReflectionSuite extends AnyFunSuite {
       val currentSource = table.newScan().useSnapshot(table.currentSnapshot().snapshotId())
       val oldScan = new CountingRuntimeScan(oldSource)
       val currentScan = new CountingRuntimeScan(currentSource)
-      assert(IcebergReflection.runtimeFileStatistics(oldScan, runtimeTasks(oldSource), Seq("id"))
-        .size == 3)
-      assert(IcebergReflection.runtimeFileStatistics(
-        currentScan,
-        runtimeTasks(currentSource),
-        Seq("id")).size == 4)
+      assert(
+        IcebergReflection
+          .runtimeFileStatistics(oldScan, runtimeTasks(oldSource), Seq("id"))
+          .size == 3)
+      assert(
+        IcebergReflection
+          .runtimeFileStatistics(currentScan, runtimeTasks(currentSource), Seq("id"))
+          .size == 4)
       assert(oldScan.planningCalls == 1)
       assert(currentScan.planningCalls == 1)
       IcebergReflection.runtimeFileStatistics(oldScan, runtimeTasks(oldSource), Seq("id"))
@@ -187,10 +189,12 @@ class IcebergReflectionSuite extends AnyFunSuite {
   test("runtime statistics replan when cached paths do not cover the planned files") {
     withRuntimeStatsTable { table =>
       val source = table.newScan()
-      val filtered = new CountingRuntimeScan(source.filter(Expressions.lessThan("id", Int.box(2))))
+      val filtered =
+        new CountingRuntimeScan(source.filter(Expressions.lessThan("id", Int.box(2))))
       val filteredTasks = runtimeTasks(source.filter(Expressions.lessThan("id", Int.box(2))))
       assert(filteredTasks.size() == 2)
-      assert(IcebergReflection.runtimeFileStatistics(filtered, filteredTasks, Seq("id")).size == 2)
+      assert(
+        IcebergReflection.runtimeFileStatistics(filtered, filteredTasks, Seq("id")).size == 2)
       val full = new CountingRuntimeScan(source)
       val tasks = runtimeTasks(source)
       assert(IcebergReflection.runtimeFileStatistics(full, tasks, Seq("id")).size == 3)
