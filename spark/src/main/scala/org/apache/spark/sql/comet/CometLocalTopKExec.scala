@@ -50,7 +50,7 @@ object CometLocalTopKExec {
         case _: CometNativeScanExec =>
           RuntimePruningKeyTypes.isParquetReaderKey(order.dataType)
         case _: CometIcebergNativeScanExec =>
-          RuntimePruningKeyTypes.isFileStatsKey(order.dataType)
+          RuntimePruningKeyTypes.isSupportedTopKKey(order.dataType)
         case _ => false
       })
     }

@@ -36,7 +36,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, DynamicPruningExpre
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.{sideBySide, ArrayBasedMapData, DateTimeUtils, GenericArrayData, MetadataColumnHelper}
 import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.getExistenceDefaultValues
-import org.apache.spark.sql.comet.{CometBatchScanExec, CometScanExec, RuntimePruningKeyTypes}
+import org.apache.spark.sql.comet.{CometBatchScanExec, CometHashJoinExec, CometScanExec, RuntimePruningKeyTypes}
 import org.apache.spark.sql.execution.{FileSourceScanExec, InSubqueryExec, SparkPlan, SubqueryAdaptiveBroadcastExec}
 import org.apache.spark.sql.execution.datasources.HadoopFsRelation
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
@@ -1240,7 +1240,19 @@ object CometScanRule extends Logging {
     if (!joins && !topK && !minMax) return inputs
 
     def directKeyAttribute(expression: Expression): Option[Attribute] = expression match {
-      case attr: Attribute if RuntimePruningKeyTypes.isFileStatsKey(attr.dataType) =>
+      case attr: Attribute if RuntimePruningKeyTypes.isFileStatsAttribute(attr) =>
+        Some(attr)
+      case _ => None
+    }
+
+    def directTopKKeyAttribute(expression: Expression): Option[Attribute] = expression match {
+      case attr: Attribute if RuntimePruningKeyTypes.isSupportedTopKKey(attr.dataType) =>
+        Some(attr)
+      case _ => None
+    }
+
+    def directMinMaxKeyAttribute(expression: Expression): Option[Attribute] = expression match {
+      case attr: Attribute if RuntimePruningKeyTypes.isSupportedMinMaxKey(attr.dataType) =>
         Some(attr)
       case _ => None
     }
@@ -1280,7 +1292,11 @@ object CometScanRule extends Logging {
       node match {
         case join: HashJoin
             if joins && (join.joinType == Inner || join.joinType == LeftSemi) &&
-              join.leftKeys.size == 1 && join.rightKeys.size == 1 =>
+              join.leftKeys.size == 1 && join.rightKeys.size == 1 &&
+              !CometHashJoinExec.hasCharJoinKey(join.left, join.leftKeys) &&
+              !CometHashJoinExec.hasCharJoinKey(join.right, join.rightKeys) &&
+              !RuntimePruningKeyTypes.isStringCollationType(join.leftKeys.head.dataType) &&
+              !RuntimePruningKeyTypes.isStringCollationType(join.rightKeys.head.dataType) =>
           val probe = join.buildSide match {
             case BuildLeft => Some((join.right, join.rightKeys.head))
             case BuildRight => Some((join.left, join.leftKeys.head))
@@ -1294,7 +1310,7 @@ object CometScanRule extends Logging {
         case limit: TakeOrderedAndProjectExec
             if topK && limit.limit > 0 && limit.sortOrder.nonEmpty &&
               !SortOrder.orderingSatisfies(limit.child.outputOrdering, limit.sortOrder) =>
-          directKeyAttribute(limit.sortOrder.head.child)
+          directTopKKeyAttribute(limit.sortOrder.head.child)
             .foreach(key => readerInput(limit.child, key, allowFilters = false))
 
         case aggregate: BaseAggregateExec
@@ -1305,7 +1321,7 @@ object CometScanRule extends Logging {
           if (expression.mode == Partial && !expression.isDistinct && expression.filter.isEmpty &&
             (function.isInstanceOf[Min] || function.isInstanceOf[Max])) {
             function.children.headOption
-              .flatMap(directKeyAttribute)
+              .flatMap(directMinMaxKeyAttribute)
               .foreach(key => readerInput(aggregate.child, key, allowFilters = true))
           }
 

@@ -1245,7 +1245,7 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                         .collect {
                           case (attr, id)
                               if runtimeFieldNames.contains(attr.name) &&
-                                RuntimePruningKeyTypes.isFileStatsKey(attr.dataType) =>
+                                RuntimePruningKeyTypes.isFileStatsAttribute(attr) =>
                             id
                         }
                         .toSet

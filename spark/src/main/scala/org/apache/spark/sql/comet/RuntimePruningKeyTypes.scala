@@ -19,31 +19,48 @@
 
 package org.apache.spark.sql.comet
 
+import java.util.Locale
+
+import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.types._
+
+import org.apache.comet.shims.CometTypeShim
 
 /**
  * Single source of truth for eligible runtime-pruning key types on the JVM/Spark side.
  *
  * Today, the JVM side gates two sets of types:
- *   1. Driver-side file statistics key types ([[isFileStatsKey]]): IntegerType, LongType,
- *      DateType, TimestampType, TimestampNTZType and corresponding Iceberg schema types
- *      ([[isFileStatsIcebergType]]). Used by CometScanRule (join/TopK/MinMax file pruning),
- *      CometIcebergNativeScan (file statistics collection), and CometLocalTopKExec (Iceberg
- *      TopK). 2. Native Parquet reader filter keys ([[isParquetReaderKey]]): ByteType, ShortType,
- *      IntegerType, LongType Used by CometLocalTopKExec (Parquet TopK pushdown).
+ *  1. Driver-side file statistics key types ([[isFileStatsKey]]):
+ *     IntegerType, LongType, DateType, TimestampType, TimestampNTZType,
+ *     exact DecimalType, and uncollated StringType (excluding fixed CHAR),
+ *     and corresponding Iceberg schema types ([[isFileStatsIcebergType]]).
+ *     Used by CometScanRule (join file pruning) and CometIcebergNativeScan
+ *     (file statistics collection).
+ *  2. Native Parquet reader filter keys ([[isParquetReaderKey]]):
+ *     ByteType, ShortType, IntegerType, LongType
+ *     Used by CometLocalTopKExec (Parquet TopK pushdown).
  *
- * Native join eligibility (including Decimal128 and string variants) and native TopK pushdown
- * eligibility are decided in native Rust code, not duplicated on the driver.
+ * TopK and MinMax key types remain restricted to integral and temporal types
+ * ([[isSupportedTopKKey]], [[isSupportedMinMaxKey]]).
+ *
+ * Native join eligibility (including Decimal128 and string variants) and native TopK
+ * pushdown eligibility are decided in native Rust code, not duplicated on the driver.
  */
-object RuntimePruningKeyTypes {
+object RuntimePruningKeyTypes extends CometTypeShim {
 
   /**
-   * Supported Spark data types for driver-side file statistics / runtime pruning keys. Gated
-   * today for CometScanRule (join, TopK, MinMax), CometIcebergNativeScan, and CometLocalTopKExec
-   * (Iceberg TopK).
+   * Supported Spark data types for driver-side file statistics / runtime pruning keys.
+   * Gated for CometScanRule (join) and CometIcebergNativeScan.
    */
   val SUPPORTED_FILE_STATS_TYPES: Seq[DataType] =
-    Seq(IntegerType, LongType, DateType, TimestampType, TimestampNTZType)
+    Seq(
+      IntegerType,
+      LongType,
+      DateType,
+      TimestampType,
+      TimestampNTZType,
+      DecimalType.SYSTEM_DEFAULT,
+      StringType)
 
   /** Supported Spark data types for native Parquet reader pushdown keys. */
   val SUPPORTED_PARQUET_READER_TYPES: Seq[DataType] =
@@ -51,24 +68,48 @@ object RuntimePruningKeyTypes {
 
   /** Supported Iceberg primitive schema type strings for driver-side file statistics. */
   val SUPPORTED_ICEBERG_FILE_STATS_TYPES: Set[String] =
-    Set("int", "long", "date", "timestamp", "timestamptz")
+    Set("int", "long", "date", "timestamp", "timestamptz", "string")
 
   /** Aliases for driver file stats types. */
   val SUPPORTED_JOIN_TYPES: Seq[DataType] = SUPPORTED_FILE_STATS_TYPES
-  val SUPPORTED_TOPK_TYPES: Seq[DataType] = SUPPORTED_FILE_STATS_TYPES
-  val SUPPORTED_MINMAX_TYPES: Seq[DataType] = SUPPORTED_FILE_STATS_TYPES
+  val SUPPORTED_TOPK_TYPES: Seq[DataType] =
+    Seq(IntegerType, LongType, DateType, TimestampType, TimestampNTZType)
+  val SUPPORTED_MINMAX_TYPES: Seq[DataType] =
+    Seq(IntegerType, LongType, DateType, TimestampType, TimestampNTZType)
   val SUPPORTED_COLUMN_STATS_TYPES: Seq[DataType] = SUPPORTED_FILE_STATS_TYPES
   val SUPPORTED_ICEBERG_TYPES: Set[String] = SUPPORTED_ICEBERG_FILE_STATS_TYPES
   val SUPPORTED_TYPES: Seq[DataType] = SUPPORTED_FILE_STATS_TYPES
 
   /**
-   * Whether the given Spark `dataType` is an eligible driver-side file statistics key type (Int,
-   * Long, Date, Timestamp, TimestampNTZ).
+   * Whether Catalyst metadata marks an attribute as a fixed-length CHAR.
+   * Stored Iceberg strings do not promise CHAR padding, so reader pruning must not compare
+   * them to padded join literals.
+   */
+  def isCharType(metadata: Metadata): Boolean =
+    metadata.contains("__CHAR_VARCHAR_TYPE_STRING") &&
+      metadata
+        .getString("__CHAR_VARCHAR_TYPE_STRING")
+        .toLowerCase(Locale.ROOT)
+        .startsWith("char(")
+
+  /**
+   * Whether the given Spark `dataType` is an eligible driver-side file statistics key type
+   * (Int, Long, Date, Timestamp, TimestampNTZ, Decimal, String).
+   * Collated strings are excluded because Iceberg string bounds are binary/UTF-8 ordered.
    */
   def isFileStatsKey(dataType: DataType): Boolean = dataType match {
-    case IntegerType | LongType | DateType | TimestampType | TimestampNTZType => true
+    case IntegerType | LongType | DateType | TimestampType | TimestampNTZType | _: DecimalType =>
+      true
+    case st: StringType if !isStringCollationType(st) => true
     case _ => false
   }
+
+  /**
+   * Whether the given Spark `attr` is an eligible driver-side file statistics attribute.
+   * In addition to checking [[isFileStatsKey]], excludes fixed-length CHAR attributes.
+   */
+  def isFileStatsAttribute(attr: Attribute): Boolean =
+    isFileStatsKey(attr.dataType) && !isCharType(attr.metadata)
 
   /** Whether the given Spark `dataType` is supported by native Parquet reader pushdown. */
   def isParquetReaderKey(dataType: DataType): Boolean = dataType match {
@@ -81,15 +122,22 @@ object RuntimePruningKeyTypes {
 
   /** Whether the given Iceberg primitive type string is eligible for runtime file statistics. */
   def isFileStatsIcebergType(typeStr: String): Boolean =
-    SUPPORTED_ICEBERG_FILE_STATS_TYPES.contains(typeStr)
+    SUPPORTED_ICEBERG_FILE_STATS_TYPES.contains(typeStr) ||
+      typeStr.startsWith("decimal(")
 
   /** Alias for [[isFileStatsIcebergType]]. */
   def isSupportedIcebergType(typeStr: String): Boolean = isFileStatsIcebergType(typeStr)
 
-  /** Consumer aliases delegating to [[isFileStatsKey]]. */
+  /** Consumer aliases. */
   def isSupportedJoinKey(dataType: DataType): Boolean = isFileStatsKey(dataType)
-  def isSupportedTopKKey(dataType: DataType): Boolean = isFileStatsKey(dataType)
-  def isSupportedMinMaxKey(dataType: DataType): Boolean = isFileStatsKey(dataType)
+  def isSupportedTopKKey(dataType: DataType): Boolean = dataType match {
+    case IntegerType | LongType | DateType | TimestampType | TimestampNTZType => true
+    case _ => false
+  }
+  def isSupportedMinMaxKey(dataType: DataType): Boolean = dataType match {
+    case IntegerType | LongType | DateType | TimestampType | TimestampNTZType => true
+    case _ => false
+  }
   def isSupportedColumnStatsKey(dataType: DataType): Boolean = isFileStatsKey(dataType)
   def isSupported(dataType: DataType): Boolean = isFileStatsKey(dataType)
 }

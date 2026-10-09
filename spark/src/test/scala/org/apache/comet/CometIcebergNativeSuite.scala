@@ -8011,4 +8011,255 @@ class CometIcebergNativeSuite
       }
     }
   }
+
+  test("decimal(18,2) join prunes disjoint Iceberg files via runtime file stats") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+        SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true") {
+        val table = "test_cat.db.decimal_disjoint_files"
+        spark.sql(s"""CREATE TABLE $table (id DECIMAL(18,2), payload STRING) USING iceberg
+          TBLPROPERTIES (
+            'format-version' = '2',
+            'write.distribution-mode' = 'none',
+            'read.split.adaptive-size.enabled' = 'false',
+            'read.split.open-file-cost' = '1',
+            'write.parquet.row-group-size-bytes' = '131072',
+            'write.parquet.compression-codec' = 'uncompressed')""")
+        try {
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            spark
+              .range(1, 101)
+              .selectExpr(
+                "CAST(id AS DECIMAL(18,2)) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+            spark
+              .range(200, 301)
+              .selectExpr(
+                "CAST(id AS DECIMAL(18,2)) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+            spark
+              .range(400, 501)
+              .selectExpr(
+                "CAST(id AS DECIMAL(18,2)) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+          }
+
+          val fileCount =
+            spark.sql(s"SELECT count(*) FROM $table.files").collect().head.getLong(0)
+          assert(fileCount == 3, s"Expected 3 disjoint data files, got $fileCount")
+
+          val dimPath = new File(warehouseDir, "decimal_dim").getAbsolutePath
+          spark
+            .range(250, 252)
+            .selectExpr("CAST(id AS DECIMAL(18,2)) AS id")
+            .coalesce(1)
+            .write
+            .parquet(dimPath)
+          spark.read.parquet(dimPath).createOrReplaceTempView("decimal_dim")
+
+          val query =
+            s"SELECT /*+ BROADCAST(d) */ f.id, f.payload FROM $table f JOIN decimal_dim d ON f.id = d.id"
+          val (_, plan) = checkSparkAnswer(query)
+          val scans = collectIcebergNativeScans(plan)
+          assert(scans.nonEmpty, s"Expected native Iceberg scans in plan: $plan")
+          val prunedFiles =
+            scans.map(_.metrics("iceberg_runtime_file_tasks_pruned").value).sum
+          assert(prunedFiles > 0L, s"Expected file-level pruning > 0, got $prunedFiles: $plan")
+        } finally {
+          spark.catalog.dropTempView("decimal_dim")
+          spark.sql(s"DROP TABLE IF EXISTS $table PURGE")
+        }
+      }
+    }
+  }
+
+  test("string join prunes disjoint Iceberg files via runtime file stats") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+        SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true") {
+        val table = "test_cat.db.string_disjoint_files"
+        spark.sql(s"""CREATE TABLE $table (id STRING, payload STRING) USING iceberg
+          TBLPROPERTIES (
+            'format-version' = '2',
+            'write.distribution-mode' = 'none',
+            'read.split.adaptive-size.enabled' = 'false',
+            'read.split.open-file-cost' = '1',
+            'write.parquet.row-group-size-bytes' = '131072',
+            'write.parquet.compression-codec' = 'uncompressed')""")
+        try {
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            spark
+              .range(1, 101)
+              .selectExpr(
+                "concat('aaa_', lpad(CAST(id AS STRING), 6, '0')) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+            spark
+              .range(1, 101)
+              .selectExpr(
+                "concat('mmm_', lpad(CAST(id AS STRING), 6, '0')) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+            spark
+              .range(1, 101)
+              .selectExpr(
+                "concat('zzz_', lpad(CAST(id AS STRING), 6, '0')) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+          }
+
+          val fileCount =
+            spark.sql(s"SELECT count(*) FROM $table.files").collect().head.getLong(0)
+          assert(fileCount == 3, s"Expected 3 disjoint data files, got $fileCount")
+
+          val dimPath = new File(warehouseDir, "string_dim").getAbsolutePath
+          spark
+            .range(50, 52)
+            .selectExpr("concat('mmm_', lpad(CAST(id AS STRING), 6, '0')) AS id")
+            .coalesce(1)
+            .write
+            .parquet(dimPath)
+          spark.read.parquet(dimPath).createOrReplaceTempView("string_dim")
+
+          val query =
+            s"SELECT /*+ BROADCAST(d) */ f.id, f.payload FROM $table f JOIN string_dim d ON f.id = d.id"
+          val (_, plan) = checkSparkAnswer(query)
+          val scans = collectIcebergNativeScans(plan)
+          assert(scans.nonEmpty, s"Expected native Iceberg scans in plan: $plan")
+          val prunedFiles =
+            scans.map(_.metrics("iceberg_runtime_file_tasks_pruned").value).sum
+          assert(prunedFiles > 0L, s"Expected file-level pruning > 0, got $prunedFiles: $plan")
+        } finally {
+          spark.catalog.dropTempView("string_dim")
+          spark.sql(s"DROP TABLE IF EXISTS $table PURGE")
+        }
+      }
+    }
+  }
+
+  test("adversarial string join with long shared prefix beyond truncation produces correct results") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+        SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true") {
+        val table = "test_cat.db.string_adversarial_prefix"
+        // Truncate string bounds to 16 bytes. The shared prefix is 24 bytes long.
+        spark.sql(s"""CREATE TABLE $table (id STRING, payload STRING) USING iceberg
+          TBLPROPERTIES (
+            'format-version' = '2',
+            'write.distribution-mode' = 'none',
+            'write.metadata.metrics.column.id' = 'truncate(16)',
+            'read.split.adaptive-size.enabled' = 'false',
+            'read.split.open-file-cost' = '1',
+            'write.parquet.row-group-size-bytes' = '131072',
+            'write.parquet.compression-codec' = 'uncompressed')""")
+        val commonPrefix = "abcdefghijklmnopqrstuvwx"
+        try {
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            spark
+              .range(1, 101)
+              .selectExpr(
+                s"concat('$commonPrefix', '_aaa_', lpad(CAST(id AS STRING), 6, '0')) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+            spark
+              .range(1, 101)
+              .selectExpr(
+                s"concat('$commonPrefix', '_mmm_', lpad(CAST(id AS STRING), 6, '0')) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+            spark
+              .range(1, 101)
+              .selectExpr(
+                s"concat('$commonPrefix', '_zzz_', lpad(CAST(id AS STRING), 6, '0')) AS id",
+                "sha2(CAST(id AS STRING), 256) AS payload")
+              .coalesce(1)
+              .write
+              .format("iceberg")
+              .mode("append")
+              .saveAsTable(table)
+          }
+
+          val dimPath = new File(warehouseDir, "string_adv_dim").getAbsolutePath
+          spark
+            .range(50, 52)
+            .selectExpr(s"concat('$commonPrefix', '_mmm_', lpad(CAST(id AS STRING), 6, '0')) AS id")
+            .coalesce(1)
+            .write
+            .parquet(dimPath)
+          spark.read.parquet(dimPath).createOrReplaceTempView("string_adv_dim")
+
+          val query =
+            s"SELECT /*+ BROADCAST(d) */ f.id, f.payload FROM $table f JOIN string_adv_dim d ON f.id = d.id"
+          val (_, plan) = checkSparkAnswer(query)
+          val scans = collectIcebergNativeScans(plan)
+          assert(scans.nonEmpty, s"Expected native Iceberg scans in plan: $plan")
+        } finally {
+          spark.catalog.dropTempView("string_adv_dim")
+          spark.sql(s"DROP TABLE IF EXISTS $table PURGE")
+        }
+      }
+    }
+  }
 }

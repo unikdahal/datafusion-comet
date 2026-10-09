@@ -21,6 +21,7 @@ package org.apache.spark.sql.comet
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.types._
 
 /**
@@ -38,7 +39,9 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       (LongType, "Int64"),
       (DateType, "Date32"),
       (TimestampType, "Timestamp(Microsecond, Some(...))"),
-      (TimestampNTZType, "Timestamp(Microsecond, None)"))
+      (TimestampNTZType, "Timestamp(Microsecond, None)"),
+      (DecimalType.SYSTEM_DEFAULT, "Decimal128"),
+      (StringType, "Utf8"))
 
     for ((sparkType, _) <- supportedJoinSparkToArrow) {
       assert(
@@ -49,6 +52,15 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
         s"Expected $sparkType to be supported as file stats key")
     }
 
+    for (decType <- Seq(DecimalType(10, 2), DecimalType(38, 18))) {
+      assert(
+        RuntimePruningKeyTypes.isSupportedJoinKey(decType),
+        s"Expected $decType to be supported as Join key")
+      assert(
+        RuntimePruningKeyTypes.isFileStatsKey(decType),
+        s"Expected $decType to be supported as file stats key")
+    }
+
     assert(
       RuntimePruningKeyTypes.SUPPORTED_JOIN_TYPES == supportedJoinSparkToArrow.map(_._1),
       "SUPPORTED_JOIN_TYPES must match expected sequence")
@@ -56,9 +68,6 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     val unsupportedJoinTypes: Seq[DataType] = Seq(
       ByteType,
       ShortType,
-      DecimalType(10, 2),
-      DecimalType(38, 18),
-      StringType,
       FloatType,
       DoubleType,
       BooleanType,
@@ -114,9 +123,6 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       assert(
         !RuntimePruningKeyTypes.isSupportedTopKKey(unsupported),
         s"Expected $unsupported to be rejected as TopK key")
-      assert(
-        !RuntimePruningKeyTypes.isFileStatsKey(unsupported),
-        s"Expected $unsupported to be rejected as file stats key")
     }
   }
 
@@ -147,6 +153,7 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       ShortType,
       StringType,
       DecimalType(10, 2),
+      DecimalType(38, 18),
       FloatType,
       DoubleType,
       BooleanType,
@@ -156,9 +163,6 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       assert(
         !RuntimePruningKeyTypes.isSupportedMinMaxKey(unsupported),
         s"Expected $unsupported to be rejected as MinMax key")
-      assert(
-        !RuntimePruningKeyTypes.isFileStatsKey(unsupported),
-        s"Expected $unsupported to be rejected as file stats key")
     }
   }
 
@@ -216,9 +220,6 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     val unsupportedColumnStatsTypes: Seq[DataType] = Seq(
       ByteType,
       ShortType,
-      DecimalType(10, 2),
-      DecimalType(38, 18),
-      StringType,
       FloatType,
       DoubleType)
 
@@ -232,7 +233,7 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     }
 
     val supportedIcebergTypes =
-      Seq("int", "long", "date", "timestamp", "timestamptz")
+      Seq("int", "long", "date", "timestamp", "timestamptz", "string", "decimal(10,2)", "decimal(38,18)")
 
     for (icebergType <- supportedIcebergTypes) {
       assert(
@@ -245,9 +246,6 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
 
     val unsupportedIcebergTypes =
       Seq(
-        "string",
-        "decimal(10,2)",
-        "decimal(38,18)",
         "float",
         "double",
         "boolean",
@@ -263,5 +261,27 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
         !RuntimePruningKeyTypes.isFileStatsIcebergType(icebergType),
         s"Expected isFileStatsIcebergType to reject '$icebergType'")
     }
+  }
+
+  test("CHAR and collated String exclusions for file stats") {
+    val plainStrAttr = AttributeReference("plain", StringType)()
+    assert(RuntimePruningKeyTypes.isFileStatsAttribute(plainStrAttr))
+
+    val charMeta = new MetadataBuilder()
+      .putString("__CHAR_VARCHAR_TYPE_STRING", "char(10)")
+      .build()
+    val charAttr = AttributeReference("c", StringType, metadata = charMeta)()
+    assert(!RuntimePruningKeyTypes.isFileStatsAttribute(charAttr))
+    assert(RuntimePruningKeyTypes.isCharType(charAttr.metadata))
+
+    val varcharMeta = new MetadataBuilder()
+      .putString("__CHAR_VARCHAR_TYPE_STRING", "varchar(10)")
+      .build()
+    val varcharAttr = AttributeReference("v", StringType, metadata = varcharMeta)()
+    assert(RuntimePruningKeyTypes.isFileStatsAttribute(varcharAttr))
+    assert(!RuntimePruningKeyTypes.isCharType(varcharAttr.metadata))
+
+    val decAttr = AttributeReference("d", DecimalType(18, 2))()
+    assert(RuntimePruningKeyTypes.isFileStatsAttribute(decAttr))
   }
 }
