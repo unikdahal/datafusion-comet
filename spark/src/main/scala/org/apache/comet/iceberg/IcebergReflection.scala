@@ -29,6 +29,8 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.internal.SQLConf
 
+import com.google.common.cache.{Cache, CacheBuilder}
+
 import org.apache.comet.CometConf
 import org.apache.comet.util.ClassLoaders
 
@@ -499,18 +501,29 @@ object IcebergReflection extends Logging {
       snapshotId: Long,
       fieldIds: Seq[Int])
 
-  // Access order provides strict LRU eviction, including when a session lowers the bound.
   // Retain data files with selected column metrics, never tasks, residuals or delete files.
-  private val runtimeStatsCache =
-    new java.util.LinkedHashMap[RuntimeStatsKey, Map[String, AnyRef]](16, 0.75f, true)
+  // Guava is already bundled by Comet. A single segment gives one LRU eviction order.
+  private val runtimeStatsCacheLock = new Object
+  private var runtimeStatsCacheMaxEntries = 64
+  private var runtimeStatsCache = newRuntimeStatsCache(runtimeStatsCacheMaxEntries)
 
-  private def trimRuntimeStatsCache(maxEntries: Int): Unit = {
-    val iterator = runtimeStatsCache.keySet().iterator()
-    while (runtimeStatsCache.size() > maxEntries && iterator.hasNext) {
-      iterator.next()
-      iterator.remove()
+  private def newRuntimeStatsCache(maxEntries: Int): Cache[RuntimeStatsKey, Map[String, AnyRef]] =
+    CacheBuilder
+      .newBuilder()
+      .concurrencyLevel(1)
+      .maximumSize(maxEntries.toLong)
+      .build[RuntimeStatsKey, Map[String, AnyRef]]()
+
+  private def runtimeStatsCacheFor(maxEntries: Int): Cache[RuntimeStatsKey, Map[String, AnyRef]] =
+    runtimeStatsCacheLock.synchronized {
+      // Bounds are session-configurable. Rebuild rather than retain an oversized cache when
+      // the limit changes; in-flight callers can safely finish using their previous cache.
+      if (runtimeStatsCacheMaxEntries != maxEntries) {
+        runtimeStatsCache = newRuntimeStatsCache(maxEntries)
+        runtimeStatsCacheMaxEntries = maxEntries
+      }
+      runtimeStatsCache
     }
-  }
 
   private def runtimeStatsKey(
       icebergScan: Any,
@@ -562,10 +575,8 @@ object IcebergReflection extends Logging {
         try { runtimeStatsKey(icebergScan, scan, columns) }
         catch { case NonFatal(_) => None }
       } else { None }
-      val cached = runtimeStatsCache.synchronized {
-        trimRuntimeStatsCache(maxEntries)
-        cacheKey.flatMap(key => Option(runtimeStatsCache.get(key)))
-      }
+      val cache = runtimeStatsCacheFor(maxEntries)
+      val cached = cacheKey.flatMap(key => Option(cache.getIfPresent(key)))
       cached.filter(stats => selected.forall(stats.contains)) match {
         case Some(stats) => return stats.filter { case (path, _) => selected.contains(path) }
         case None =>
@@ -595,10 +606,7 @@ object IcebergReflection extends Logging {
         val statistics = result.result()
         // Do not cache an incomplete plan. A later scan needing additional paths must rescan.
         if (selected.forall(statistics.contains)) {
-          runtimeStatsCache.synchronized {
-            cacheKey.foreach { key => runtimeStatsCache.put(key, statistics) }
-            trimRuntimeStatsCache(maxEntries)
-          }
+          cacheKey.foreach { key => cache.put(key, statistics) }
         }
         statistics
       } finally { planned.asInstanceOf[AutoCloseable].close() }
