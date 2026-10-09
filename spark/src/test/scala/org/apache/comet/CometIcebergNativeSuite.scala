@@ -2037,7 +2037,7 @@ class CometIcebergNativeSuite
                   val scans = collectIcebergNativeScans(plan)
                   assert(scans.size == 1, s"Expected native string scan: $plan")
                   val scan = scans.head
-                  assert(scan.metrics("num_splits").value == 1L)
+                  assert(scan.metrics("num_splits").value == 4L)
                   val pruned = scan.metrics("iceberg_runtime_row_groups_pruned").value +
                     scan.metrics("iceberg_runtime_file_tasks_pruned").value
                   if (enabled) {
