@@ -24,8 +24,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.sql.types._
 
 /**
- * Cross-language agreement tests verifying per-consumer runtime pruning key types in Scala
- * agree with native Arrow types.
+ * Cross-language agreement tests verifying per-consumer runtime pruning key types in Scala agree
+ * with native Arrow types.
  *
  * Hard-coded cross-reference with native Rust tests:
  * `native/core/src/execution/operators/dynamic_filter/tests.rs`.
@@ -163,11 +163,8 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
   }
 
   test("ParquetReader consumer key types agreement with Arrow") {
-    val supportedParquetReaderSparkToArrow: Seq[(DataType, String)] = Seq(
-      (ByteType, "Int8"),
-      (ShortType, "Int16"),
-      (IntegerType, "Int32"),
-      (LongType, "Int64"))
+    val supportedParquetReaderSparkToArrow: Seq[(DataType, String)] =
+      Seq((ByteType, "Int8"), (ShortType, "Int16"), (IntegerType, "Int32"), (LongType, "Int64"))
 
     for ((sparkType, _) <- supportedParquetReaderSparkToArrow) {
       assert(

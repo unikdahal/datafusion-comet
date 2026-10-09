@@ -73,9 +73,7 @@ impl TopKReaderFilterExec {
         let key = &sort.expr()[0].expr;
         // TopK reader filter pushdown supports integer, date and timestamp runtime pruning keys.
         if !key.is::<Column>()
-            || !super::is_supported_topk_key_type(
-                &key.data_type(sort.input().schema().as_ref())?,
-            )
+            || !super::is_supported_topk_key_type(&key.data_type(sort.input().schema().as_ref())?)
         {
             return Ok(None);
         }

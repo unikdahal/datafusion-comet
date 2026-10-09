@@ -25,24 +25,22 @@ import org.apache.spark.sql.types._
  * Single source of truth for eligible runtime-pruning key types on the JVM/Spark side.
  *
  * Today, the JVM side gates two sets of types:
- *  1. Driver-side file statistics key types ([[isFileStatsKey]]):
- *     IntegerType, LongType, DateType, TimestampType, TimestampNTZType
- *     and corresponding Iceberg schema types ([[isFileStatsIcebergType]]).
- *     Used by CometScanRule (join/TopK/MinMax file pruning), CometIcebergNativeScan
- *     (file statistics collection), and CometLocalTopKExec (Iceberg TopK).
- *  2. Native Parquet reader filter keys ([[isParquetReaderKey]]):
- *     ByteType, ShortType, IntegerType, LongType
- *     Used by CometLocalTopKExec (Parquet TopK pushdown).
+ *   1. Driver-side file statistics key types ([[isFileStatsKey]]): IntegerType, LongType,
+ *      DateType, TimestampType, TimestampNTZType and corresponding Iceberg schema types
+ *      ([[isFileStatsIcebergType]]). Used by CometScanRule (join/TopK/MinMax file pruning),
+ *      CometIcebergNativeScan (file statistics collection), and CometLocalTopKExec (Iceberg
+ *      TopK). 2. Native Parquet reader filter keys ([[isParquetReaderKey]]): ByteType, ShortType,
+ *      IntegerType, LongType Used by CometLocalTopKExec (Parquet TopK pushdown).
  *
- * Native join eligibility (including Decimal128 and string variants) and native TopK
- * pushdown eligibility are decided in native Rust code, not duplicated on the driver.
+ * Native join eligibility (including Decimal128 and string variants) and native TopK pushdown
+ * eligibility are decided in native Rust code, not duplicated on the driver.
  */
 object RuntimePruningKeyTypes {
 
   /**
-   * Supported Spark data types for driver-side file statistics / runtime pruning keys.
-   * Gated today for CometScanRule (join, TopK, MinMax), CometIcebergNativeScan,
-   * and CometLocalTopKExec (Iceberg TopK).
+   * Supported Spark data types for driver-side file statistics / runtime pruning keys. Gated
+   * today for CometScanRule (join, TopK, MinMax), CometIcebergNativeScan, and CometLocalTopKExec
+   * (Iceberg TopK).
    */
   val SUPPORTED_FILE_STATS_TYPES: Seq[DataType] =
     Seq(IntegerType, LongType, DateType, TimestampType, TimestampNTZType)
@@ -64,8 +62,8 @@ object RuntimePruningKeyTypes {
   val SUPPORTED_TYPES: Seq[DataType] = SUPPORTED_FILE_STATS_TYPES
 
   /**
-   * Whether the given Spark `dataType` is an eligible driver-side file statistics key type
-   * (Int, Long, Date, Timestamp, TimestampNTZ).
+   * Whether the given Spark `dataType` is an eligible driver-side file statistics key type (Int,
+   * Long, Date, Timestamp, TimestampNTZ).
    */
   def isFileStatsKey(dataType: DataType): Boolean = dataType match {
     case IntegerType | LongType | DateType | TimestampType | TimestampNTZType => true
