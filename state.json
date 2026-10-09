@@ -107,8 +107,7 @@
  ],
  "tasks": [
   "rp-b3b2-ci-fix-r1",
-  "rp-manifest-impl-r1",
-  "rp-r1-allowlist-r1",
+  "rp-r1-allowlist-r2",
   "bench cbb461b77"
  ],
  "missing_evidence": [
@@ -347,7 +346,7 @@
   "MANIFEST": {
    "item": "eliminate/cheapen second manifest scan for runtime stats (scales with manifests)",
    "agent": "gemini rp-manifest-rescan-design-r1 (design)",
-   "status": "impl codex rp-manifest-impl-r1 -> adaptive-ci/ws-manifest-stats-cache"
+   "status": "READY 0635e00d8 (fast lane green 37866246186; lead-reviewed: key=metadata loc+scan snapshot+key field ids, coverage check, no incomplete caching). Follow-up: weigh cache by file count not entries. Merge in batch with R1."
   },
   "R1": {
    "item": "unify join-key type allowlist + agreement tests",
@@ -357,7 +356,7 @@
  },
  "providers_note": "codex at capacity; sonnet session limit until 04:40 IST; gemini + big-pickle active",
  "pending": [
-  "batch Comet integration push: pin iceberg -> c4e8a66e9 (after its CI) + ws-b3/ws-b2 merges",
-  "next full campaign: merge ws-fuzz-ext into bench branch + pin newest green Comet/iceberg"
+  "batch Comet integration merge: ws-manifest-stats-cache (0635e00d8) + ws-r1-key-types (when green) [+ ws-b3/ws-b2 if fixed]",
+  "targeted bench: manifest plan_ms on f_snapshots/f_many_files (cache off/cold/warm)"
  ]
 }

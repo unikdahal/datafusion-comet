@@ -148,3 +148,4 @@ Candidate: Apache Comet main string-join wrong results seen in bench baseline (f
 - B4 reverted (iceberg 1f154f5f3); Comet c408a06bd = R5 + pin. Manifest stats cache impl started (codex).
 - String join keys merged (iceberg 17d0a1232, Comet 007080ae0). R1 allowlist unification unblocked. Next: targeted string bench.
 - Targeted string bench cbb461b77 started; R1 allowlist unification started (gemini).
+- Manifest stats cache ready (0635e00d8, reviewed). Batch merge with R1 pending.
