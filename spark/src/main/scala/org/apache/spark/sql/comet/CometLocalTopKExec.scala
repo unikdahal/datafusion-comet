@@ -69,8 +69,9 @@ object CometLocalTopKExec {
         Some(protos).filter(_.forall(_.isDefined)).map(_.flatten).map { sortOrders =>
           // Spark's physical limit already includes the offset. Each partition retains that
           // many candidates; only the final TopK applies the offset after the shuffle.
-          val dynamicFilterEnabled = CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get(op.conf) &&
-            !hasCharPruningKey(scan, orders.map(_.child))
+          val dynamicFilterEnabled =
+            CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get(op.conf) &&
+              !hasCharPruningKey(scan, orders.map(_.child))
           val sort = Sort
             .newBuilder()
             .addAllSortOrders(sortOrders.asJava)

@@ -1971,29 +1971,34 @@ class CometIcebergNativeSuite
             withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
               for (file <- 0 until 4) {
                 spark
-                .range(file * 30000L, (file + 1) * 30000L)
-                .coalesce(1)
-                .sortWithinPartitions("id")
-                .selectExpr(
-                  "CASE WHEN id % 17 = 0 THEN NULL WHEN id < 32 THEN 'é東京🙂' ELSE " +
-                    "concat('abcdefghijklmnop', " +
-                    "lpad(CAST((120000 - id) DIV 32 AS STRING), 6, '0')) END AS hi",
-                  "CASE WHEN id % 17 = 0 THEN NULL WHEN id < 32 THEN '' ELSE " +
-                    "concat('abcdefghijklmnop', " +
-                    "lpad(CAST(id DIV 32 AS STRING), 6, '0')) END AS lo",
-                  "sha2(CAST(id AS STRING), 256) AS payload")
-                .write
-                .format("iceberg")
-                .mode("append")
-                .saveAsTable(table)
+                  .range(file * 30000L, (file + 1) * 30000L)
+                  .coalesce(1)
+                  .sortWithinPartitions("id")
+                  .selectExpr(
+                    "CASE WHEN id % 17 = 0 THEN NULL WHEN id < 32 THEN 'é東京🙂' ELSE " +
+                      "concat('abcdefghijklmnop', " +
+                      "lpad(CAST((120000 - id) DIV 32 AS STRING), 6, '0')) END AS hi",
+                    "CASE WHEN id % 17 = 0 THEN NULL WHEN id < 32 THEN '' ELSE " +
+                      "concat('abcdefghijklmnop', " +
+                      "lpad(CAST(id DIV 32 AS STRING), 6, '0')) END AS lo",
+                    "sha2(CAST(id AS STRING), 256) AS payload")
+                  .write
+                  .format("iceberg")
+                  .mode("append")
+                  .saveAsTable(table)
               }
-              val files = spark.sql(s"SELECT lower_bounds, upper_bounds, file_path FROM $table.files")
+              val files = spark
+                .sql(s"SELECT lower_bounds, upper_bounds, file_path FROM $table.files")
                 .collect()
               assert(files.length == 4)
-              assert(files.exists(row => new String(row.getMap[Int, Array[Byte]](0)(1), UTF_8) ==
-                "abcdefghijklmnop"))
-              assert(files.exists(row => new String(row.getMap[Int, Array[Byte]](1)(2), UTF_8) ==
-                "abcdefghijklmnoq"))
+              assert(
+                files.exists(row =>
+                  new String(row.getMap[Int, Array[Byte]](0)(1), UTF_8) ==
+                    "abcdefghijklmnop"))
+              assert(
+                files.exists(row =>
+                  new String(row.getMap[Int, Array[Byte]](1)(2), UTF_8) ==
+                    "abcdefghijklmnoq"))
               val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
                 org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
                   new org.apache.hadoop.fs.Path(files.head.getString(2)),
@@ -2054,7 +2059,8 @@ class CometIcebergNativeSuite
               }
               val fullBytes = run(false)
               val liveBytes = run(true)
-              assert(liveBytes > 0L && liveBytes < fullBytes,
+              assert(
+                liveBytes > 0L && liveBytes < fullBytes,
                 s"$query: live=$liveBytes full=$fullBytes")
             }
             def checkNoPruning(query: String): Unit = {
@@ -2076,7 +2082,8 @@ class CometIcebergNativeSuite
             val charMetadata = new MetadataBuilder()
               .putString("__CHAR_VARCHAR_TYPE_STRING", "char(24)")
               .build()
-            spark.table("string_extrema_fact")
+            spark
+              .table("string_extrema_fact")
               .select(col("lo").as("id", charMetadata))
               .createOrReplaceTempView("string_extrema_char")
             checkNoPruning(
@@ -2084,8 +2091,9 @@ class CometIcebergNativeSuite
             checkNoPruning("SELECT min(id) FROM string_extrema_char")
             checkNoPruning("SELECT max(id) FROM string_extrema_char")
             if (isSpark40Plus) {
-              checkNoPruning("SELECT lo FROM string_extrema_fact " +
-                "ORDER BY lo COLLATE UTF8_LCASE ASC NULLS LAST LIMIT 10")
+              checkNoPruning(
+                "SELECT lo FROM string_extrema_fact " +
+                  "ORDER BY lo COLLATE UTF8_LCASE ASC NULLS LAST LIMIT 10")
               checkNoPruning("SELECT min(lo COLLATE UTF8_LCASE) FROM string_extrema_fact")
               checkNoPruning("SELECT max(lo COLLATE UTF8_LCASE) FROM string_extrema_fact")
             }
