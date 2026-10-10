@@ -4673,12 +4673,22 @@ fn parse_file_scan_tasks_from_common(
                 .with_partition_spec_id(del.partition_spec_id)
                 .with_equality_ids((!del.equality_ids.is_empty()).then(|| del.equality_ids.clone()))
                 .with_referenced_data_file(del.referenced_data_file.clone())
-                .with_content_offset(delete_file_coordinate(del.content_offset, "content_offset", &file_path)?)
-                .with_content_size_in_bytes(delete_file_coordinate(del.content_size_in_bytes, "content_size_in_bytes", &file_path)?)
+                .with_content_offset(delete_file_coordinate(
+                    del.content_offset,
+                    "content_offset",
+                    &file_path,
+                )?)
+                .with_content_size_in_bytes(delete_file_coordinate(
+                    del.content_size_in_bytes,
+                    "content_size_in_bytes",
+                    &file_path,
+                )?)
                 .with_record_count(record_count)
                 .with_key_metadata(del.key_metadata.clone().map(Vec::into_boxed_slice))
                 .build()
-                .map_err(|error| GeneralError(format!("Invalid delete file '{file_path}': {error}")))
+                .map_err(|error| {
+                    GeneralError(format!("Invalid delete file '{file_path}': {error}"))
+                })
         })
         .collect::<Result<Vec<_>, ExecutionError>>()?;
 
@@ -5292,9 +5302,18 @@ mod tests {
     #[test]
     fn delete_file_coordinates_reject_negative_values() {
         for field in ["content_offset", "content_size_in_bytes"] {
-            assert_eq!(super::delete_file_coordinate(None, field, "dv.puffin").unwrap(), None);
-            assert_eq!(super::delete_file_coordinate(Some(0), field, "dv.puffin").unwrap(), Some(0));
-            assert_eq!(super::delete_file_coordinate(Some(i64::MAX), field, "dv.puffin").unwrap(), Some(i64::MAX as u64));
+            assert_eq!(
+                super::delete_file_coordinate(None, field, "dv.puffin").unwrap(),
+                None
+            );
+            assert_eq!(
+                super::delete_file_coordinate(Some(0), field, "dv.puffin").unwrap(),
+                Some(0)
+            );
+            assert_eq!(
+                super::delete_file_coordinate(Some(i64::MAX), field, "dv.puffin").unwrap(),
+                Some(i64::MAX as u64)
+            );
             let error = super::delete_file_coordinate(Some(-1), field, "dv.puffin").unwrap_err();
             assert!(error.to_string().contains(field));
             assert!(error.to_string().contains("dv.puffin"));
