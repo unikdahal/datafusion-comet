@@ -156,7 +156,11 @@ class UtilsSuite extends CometTestBase {
     val allocator = new RootAllocator(Long.MaxValue)
     val first = new VarCharVector("first", allocator)
     val transferError = new IOException("injected partial transfer failure")
-    val second = new IntVector("second", allocator) {
+    val second = new ListVector(
+      "second",
+      allocator,
+      FieldType.nullable(ArrowType.List.INSTANCE),
+      null) {
       override def getTransferPair(targetAllocator: BufferAllocator): TransferPair = {
         val pair = super.getTransferPair(targetAllocator)
         new TransferPair {
@@ -170,12 +174,17 @@ class UtilsSuite extends CometTestBase {
         }
       }
     }
+    val secondValues = second
+      .addOrGetVector[IntVector](FieldType.nullable(new ArrowType.Int(32, true)))
+      .getVector
     val root = new VectorSchemaRoot(Arrays.asList[FieldVector](first, second))
     try {
       first.allocateNew()
       first.setSafe(0, "retained source".getBytes(UTF_8))
-      second.allocateNew(1)
-      second.set(0, 42)
+      second.allocateNew()
+      val start = second.startNewValue(0)
+      secondValues.setSafe(start, 42)
+      second.endValue(0, 1)
       root.setRowCount(1)
       val sourceBytes = allocator.getAllocatedMemory
       val buffers = root.getFieldVectors.asScala.flatMap(_.getFieldBuffers.asScala).toSeq
@@ -185,7 +194,8 @@ class UtilsSuite extends CometTestBase {
       assert(allocator.getAllocatedMemory == sourceBytes)
       assert(buffers.map(_.refCnt()) == refs)
       assert(first.getObject(0).toString == "retained source")
-      assert(second.get(0) == 42)
+      assert(secondValues.get(0) == 42)
+      assert(second.getObject(0).size() == 1)
       root.clear()
       assert(allocator.getAllocatedMemory == 0L)
     } finally {
