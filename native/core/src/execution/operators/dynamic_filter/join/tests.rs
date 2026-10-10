@@ -1845,9 +1845,17 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
     ));
     predicate
         .update(Arc::new(BinaryExpr::new(
-            Arc::new(Column::new("key", 0)),
-            Operator::Eq,
-            lit(99_i32),
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("key", 0)),
+                Operator::GtEq,
+                lit(99_i32),
+            )),
+            Operator::And,
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("key", 0)),
+                Operator::LtEq,
+                lit(99_i32),
+            )),
         )))
         .unwrap();
     let reattached =
