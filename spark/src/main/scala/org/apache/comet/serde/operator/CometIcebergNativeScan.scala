@@ -51,6 +51,20 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
 
   override def enabledConfig: Option[ConfigEntry[Boolean]] = None
 
+  private[operator] def internFileMetrics(
+      contentFileClass: Class[_],
+      pool: mutable.Map[(String, Set[Int]), Int],
+      common: OperatorOuterClass.IcebergScanCommon.Builder,
+      path: String,
+      statistics: AnyRef,
+      fieldIds: Set[Int]): Int =
+    pool.getOrElseUpdate(
+      (path, fieldIds), {
+        val index = pool.size
+        common.addFileMetricsPool(fileMetrics(contentFileClass, statistics, fieldIds))
+        index
+      })
+
   /** Retains manifest statistics without decoding bounds or mutating Iceberg ByteBuffers. */
   private def fileMetrics(
       contentFileClass: Class[_],
@@ -1027,7 +1041,9 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     // Only exact runtime-filter key columns carry per-file statistics.
     val runtimeFieldNames = metadata.runtimeStatisticsColumns
     val runtimeMetricsEnabled = runtimeFieldNames.nonEmpty
-    val fileMetricsToPoolIndex = mutable.HashMap[String, Int]()
+    // Task schemas (including historical/delete projections) determine the selected IDs.
+    // Reuse only the same file's same metrics subset, even across splits.
+    val fileMetricsToPoolIndex = mutable.HashMap[(String, Set[Int]), Int]()
     // Individual delete files are interned into a flat pool; deleteFilesToPoolIndex then dedups
     // the per-task sets as lists of indices into it, so a delete file that applies to many data
     // files (Iceberg's default partition delete granularity) is serialized once rather than once
@@ -1257,13 +1273,13 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                         }
                         .toSet
                       if (runtimeFieldIds.nonEmpty) {
-                        val metricsIdx = fileMetricsToPoolIndex.getOrElseUpdate(
-                          taskBuilder.getDataFilePath, {
-                            val idx = fileMetricsToPoolIndex.size
-                            commonBuilder.addFileMetricsPool(
-                              fileMetrics(contentFileClass, statistics, runtimeFieldIds))
-                            idx
-                          })
+                        val metricsIdx = internFileMetrics(
+                          contentFileClass,
+                          fileMetricsToPoolIndex,
+                          commonBuilder,
+                          taskBuilder.getDataFilePath,
+                          statistics,
+                          runtimeFieldIds)
                         taskBuilder.setFileMetricsIdx(metricsIdx)
                       }
                   }
