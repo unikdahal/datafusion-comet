@@ -42,25 +42,32 @@ limit, or to a non-positive value to convert every eligible join regardless of s
 ### Join Runtime Filters
 
 Set `spark.comet.exec.join.dynamicFilter.enabled=true` to try experimental native hash join runtime
-filtering. It is disabled by default. Eligible joins are inner joins with one direct signed integer
-key (`TINYINT`, `SMALLINT`, `INT`, or `BIGINT`) and one native partition per input within each task.
+filtering. It is disabled by default. Eligible joins are inner and semi joins with one direct signed
+integer key (`TINYINT`, `SMALLINT`, `INT`, or `BIGINT`; native Iceberg probe sides also accept `DATE`)
+and one native partition per input within each task. Anti and outer joins keep their existing path,
+because their probe rows without a match still reach the output.
 Both broadcast and shuffled hash joins support either Spark build side. Unsupported joins keep
 their existing execution path.
 
 Once the build completes, its key domain filters probe batches before the hash probe. Eligible
-native Parquet readers also use the domain to prune row groups. Reader attachment can pass through
-direct-column `IS NOT NULL` checks, including conjunctions, and remaps columns when the scan itself
-projects the file schema. The original null checks and residual runtime filter remain in place.
+native Parquet and Iceberg readers also use the domain to prune row groups before reading their
+column chunks. Reader attachment can pass through direct-column `IS NOT NULL` checks, including
+conjunctions. Parquet remaps columns through its scan schema adapter; Iceberg resolves the projected
+probe column through the task field ID before creating the runtime predicate. The original null
+checks and residual runtime filter remain in place.
 The original join still verifies matches, including any hash collisions admitted by the filter.
-Standalone projections, other filter expressions, and limits prevent reader attachment.
+Limits prevent reader attachment. Parquet readers attach only through direct-column `IS NOT NULL`
+checks and no projections; native Iceberg readers also attach through other deterministic filters
+and through deterministic projections that pass the key column through, because a row the runtime
+predicate rejects can never reach the join's output.
 
-To preserve schema-conversion and timestamp-overflow errors, runtime reader pruning is disabled for
-each file whose projected or statically filtered columns require schema adaptations beyond direct
-column mappings or literal values. This conservative check also disables reader pruning for allowed
-`INT32` to `BIGINT` promotion and for projecting a subset of a struct's fields, even when those
-adaptations cannot fail. Nested column pruning still reads only the requested struct fields. Scans
-with supplied file statistics also skip reader attachment. These cases still use runtime filtering
-on decoded batches.
+For native Parquet, schema-conversion safeguards still apply: runtime reader pruning is disabled
+for each file whose projected or statically filtered columns require schema adaptations beyond
+direct column mappings or literal values. This conservative check also disables Parquet reader
+pruning for allowed `INT32` to `BIGINT` promotion and struct-subset projection. Iceberg uses its
+projected field IDs and task schema when binding the runtime predicate; if that mapping or binding
+is not safe, the runtime predicate is ignored for that task. In every case, decoded-batch filtering
+and the hash join remain responsible for correctness.
 
 Filters stay within the task's native plan and do not propagate across Spark exchanges or JVM/Arrow
 boundaries. A shuffled hash join can still filter probe batches after shuffle, but it cannot send
@@ -154,6 +161,45 @@ threshold already available and increments `row_groups_pruned_statistics`. With 
 file, the dynamic counter can stay zero despite substantial TopK pruning. The statistics counter also
 includes other predicates, so compare with filtering disabled to assess TopK savings.
 See [TopK metrics](../metrics.md#local-topk).
+
+### Native Iceberg Readers
+
+Join, TopK and MIN/MAX runtime bounds also reach native Iceberg scans
+(`spark.comet.scan.icebergNative.enabled=true`). The reader samples the current bound when each
+data-file task starts and refreshes it at row-group boundaries. With column statistics it can
+reject a whole data file before reading its footer or delete files, prune unread row groups,
+refresh the next row group's page selection and row filter, and avoid reading payload columns of
+rejected rows. Positional and equality deletes keep their original semantics. A bound that cannot
+be applied to a file, for example after schema evolution, is ignored for that file.
+
+To prune files before opening them, Comet re-plans only the eligible Iceberg reader input on the
+driver and retains statistics only for the exact direct `INT`, `BIGINT` or `DATE` runtime-filter
+key.
+For joins this is the probe side only. If the linked Iceberg version cannot request selected column
+statistics, Comet skips whole-file pruning and keeps row-group runtime pruning instead of loading
+statistics for every column.
+
+Iceberg scans add three behaviors:
+
+- A build side with at most 1024 distinct keys is applied as an exact `IN` predicate as well as a
+  range, so keys spread across the key range can still prune row groups and pages.
+- A local TopK may order by further direct columns after an eligible first key; only the first key
+  bounds the reader.
+- A scan feeding a TopK or MIN/MAX reads its files best-first for that bound: lowest lower bound
+  first for an ascending TopK or `MIN`, highest upper bound first for a descending TopK or `MAX`.
+  For a descending TopK or `MAX` it also reads each file's row groups largest first. The bound
+  then tightens on the first file and later files are rejected from their statistics.
+
+### MIN/MAX Reader Pruning
+
+Set `spark.comet.exec.aggregate.dynamicFilter.enabled=true` to pass the improving bound of a
+partial `MIN` or `MAX` aggregate to its native Iceberg reader. This option is experimental and
+disabled by default. It supports one direct `INT`, `BIGINT` or `DATE` argument, no `GROUP BY`, no
+aggregate filter, and one native input partition. Each execution creates a fresh bound. Rows that
+cannot improve the current minimum or maximum are skipped by the reader; the aggregate still
+computes the result. Disable Iceberg aggregate pushdown
+(`spark.sql.iceberg.aggregate-push-down.enabled=false`) when comparing, because Iceberg can answer
+these aggregates from metadata without a scan.
 
 ## Optimizing Sorting on Floating-Point Values
 

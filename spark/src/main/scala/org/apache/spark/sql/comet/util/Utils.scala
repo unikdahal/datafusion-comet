@@ -50,6 +50,10 @@ import org.apache.comet.vector.CometVector
 
 object Utils extends CometTypeShim with Logging {
   private val VariantExtensionName = "arrow.parquet.variant"
+  // IPC is compressed one batch at a time. A 1 MiB scratch chunk allocates a large
+  // heap object even for a few build keys; use bounded chunks without copying on growth.
+  // The final coalesced broadcast keeps its larger chunks for throughput on large builds.
+  private val BatchIpcChunkSize = 64 * 1024
 
   def majorMinorPatchVersion(version: String): Option[(Int, Int, Int)] =
     org.apache.spark.util.VersionUtils.majorMinorPatchVersion(version)
@@ -256,7 +260,7 @@ object Utils extends CometTypeShim with Logging {
       val dictionaryProvider: CDataDictionaryProvider = new CDataDictionaryProvider
 
       val codec = CompressionCodec.createCodec(SparkEnv.get.conf)
-      val cbbos = new ChunkedByteBufferOutputStream(1024 * 1024, ByteBuffer.allocate)
+      val cbbos = new ChunkedByteBufferOutputStream(BatchIpcChunkSize, ByteBuffer.allocate)
       val out = new DataOutputStream(codec.compressedOutputStream(cbbos))
 
       val (fieldVectors, batchProviderOpt) = getBatchFieldVectors(batch)
@@ -267,11 +271,19 @@ object Utils extends CometTypeShim with Logging {
       }
       val provider = batchProviderOpt.getOrElse(dictionaryProvider)
 
-      val writer = new ArrowStreamWriter(root, provider, Channels.newChannel(out))
-      writer.start()
-      writer.writeBatch()
-      root.clear()
-      writer.close()
+      val normalized = normalizeBatchOffsets(root)
+      val writer = new ArrowStreamWriter(normalized, provider, Channels.newChannel(out))
+      try {
+        writer.start()
+        writer.writeBatch()
+      } finally {
+        try {
+          writer.close()
+        } finally {
+          normalized.close()
+          root.clear()
+        }
+      }
 
       if (out.size() > 0) {
         (batch.numRows().toLong, cbbos.toChunkedByteBuffer)
@@ -380,7 +392,12 @@ object Utils extends CometTypeShim with Logging {
                 targetRoot.allocateNew()
               }
               try {
-                VectorSchemaRootAppender.append(targetRoot, sourceRoot)
+                val normalized = normalizeBatchOffsets(sourceRoot)
+                try {
+                  VectorSchemaRootAppender.append(targetRoot, normalized)
+                } finally {
+                  normalized.close()
+                }
               } catch {
                 case e: IllegalArgumentException =>
                   logWarning(
@@ -435,6 +452,19 @@ object Utils extends CometTypeShim with Logging {
     } finally {
       allocator.close()
     }
+  }
+
+  /**
+   * Native arrays can retain nonzero offsets and unused prefixes after slicing. IPC writing would
+   * repeatedly transmit those prefixes, and Arrow's appender assumes zero-based offsets, merging
+   * a prefix into the first appended value. Transfer pairs normalize offsets, including nested
+   * vectors, while sharing the used data buffers. The caller owns the returned root.
+   */
+  private def normalizeBatchOffsets(root: VectorSchemaRoot): VectorSchemaRoot = {
+    val normalized = root.slice(0, root.getRowCount)
+    // A zero-column root cannot infer its row count from vectors.
+    normalized.setRowCount(root.getRowCount)
+    normalized
   }
 
   /**

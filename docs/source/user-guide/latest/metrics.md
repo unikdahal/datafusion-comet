@@ -131,6 +131,20 @@ zero even when TopK skips most later groups. The statistics counter also include
 predicates, so compare both counters and `bytes_scanned` with filtering disabled to assess TopK savings.
 This feature adds no separate decoded-batch filter or evaluated/pruned row counters to the TopK.
 
+### Native Iceberg Scans
+
+With a join, TopK or MIN/MAX runtime filter attached, native Iceberg scans also report:
+
+| Metric                                   | Description                                                           |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| `iceberg_runtime_predicate_tasks`        | Data-file tasks that used a runtime predicate.                        |
+| `iceberg_runtime_file_tasks_pruned`      | Tasks rejected from column statistics before opening their data file. |
+| `iceberg_runtime_row_groups_pruned`      | Row groups skipped by runtime predicate statistics.                   |
+| `iceberg_runtime_row_groups_pruned_live` | The part of those row groups skipped after a refresh during a file.   |
+| `iceberg_runtime_predicate_refreshes`    | Newer runtime predicates picked up at row-group boundaries.           |
+
+Compare `bytes_scanned` with the runtime filters disabled to assess the reader savings.
+
 ### Exchange
 
 Comet adds some additional metrics:

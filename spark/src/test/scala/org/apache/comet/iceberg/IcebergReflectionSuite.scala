@@ -19,22 +19,243 @@
 
 package org.apache.comet.iceberg
 
-import java.lang.reflect.Modifier
+import java.lang.reflect.{InvocationHandler, Method, Modifier, Proxy}
+import java.nio.file.Files
 import java.util.Collections
+
+import scala.jdk.CollectionConverters._
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
 import org.apache.iceberg.BaseMetastoreTableOperations
 import org.apache.iceberg.BaseTable
 import org.apache.iceberg.DataFiles
+import org.apache.iceberg.FileScanTask
+import org.apache.iceberg.Metrics
 import org.apache.iceberg.PartitionSpec
 import org.apache.iceberg.PartitionSpecParser
 import org.apache.iceberg.Schema
+import org.apache.iceberg.Table
 import org.apache.iceberg.TableMetadata
+import org.apache.iceberg.TableScan
+import org.apache.iceberg.expressions.Expressions
+import org.apache.iceberg.hadoop.HadoopTables
 import org.apache.iceberg.io.FileIO
+import org.apache.iceberg.types.Conversions
 import org.apache.iceberg.types.Types
+import org.apache.spark.sql.internal.SQLConf
+
+import org.apache.comet.CometConf
 
 class IcebergReflectionSuite extends AnyFunSuite {
+
+  /** Wrap real immutable Iceberg scans, counting only Comet's second planning pass. */
+  class CountingRuntimeScan(source: TableScan) {
+    var planningCalls = 0
+    var requestedColumns = Seq.empty[String]
+
+    def table(): Table = source.table()
+    def scan(): TableScan = counted(source)
+
+    private def counted(delegate: TableScan): TableScan =
+      Proxy
+        .newProxyInstance(
+          classOf[TableScan].getClassLoader,
+          Array[Class[_]](classOf[TableScan]),
+          new InvocationHandler {
+            override def invoke(proxy: AnyRef, method: Method, args: Array[AnyRef]): AnyRef = {
+              if (method.getName == "planFiles") planningCalls += 1
+              if (method.getName == "includeColumnStats") {
+                assert(args != null && args.length == 1, "must request only runtime columns")
+                requestedColumns = args(0)
+                  .asInstanceOf[java.util.Collection[String]]
+                  .asScala
+                  .toSeq
+              }
+              val result =
+                method.invoke(delegate, Option(args).getOrElse(Array.empty[AnyRef]): _*)
+              result match {
+                case next: TableScan => counted(next)
+                case other => other
+              }
+            }
+          })
+        .asInstanceOf[TableScan]
+  }
+
+  private def withRuntimeStatsTable(f: Table => Unit): Unit = {
+    val conf = new Configuration()
+    val directory = new Path(Files.createTempDirectory("comet-runtime-stats").toUri)
+    val schema = new Schema(
+      Types.NestedField.required(1, "id", Types.IntegerType.get()),
+      Types.NestedField.required(2, "extra", Types.IntegerType.get()))
+    val table = new HadoopTables(conf).create(schema, directory.toString)
+    val sqlConf = new SQLConf
+    try {
+      appendRuntimeStatsFiles(table, 0, 3)
+      SQLConf.withExistingConf(sqlConf) { f(table) }
+    } finally {
+      directory.getFileSystem(conf).delete(directory, true)
+    }
+  }
+
+  private def appendRuntimeStatsFiles(table: Table, start: Int, end: Int): Unit = {
+    val append = table.newAppend()
+    (start until end).foreach { index =>
+      val bounds = Map(
+        Integer.valueOf(1) -> Conversions.toByteBuffer(Types.IntegerType.get(), Int.box(index)),
+        Integer.valueOf(2) -> Conversions.toByteBuffer(Types.IntegerType.get(), Int.box(index)))
+      val metrics = new Metrics(10L, null, null, null, null, bounds.asJava, bounds.asJava)
+      append.appendFile(
+        DataFiles
+          .builder(PartitionSpec.unpartitioned())
+          .withPath(s"${table.location()}/data/$index.parquet")
+          .withFileSizeInBytes(100L)
+          .withMetrics(metrics)
+          .build())
+    }
+    append.commit()
+  }
+
+  private def runtimeTasks(scan: TableScan): java.util.List[FileScanTask] = {
+    val planned = scan.planFiles()
+    try planned.iterator().asScala.toVector.asJava
+    finally planned.close()
+  }
+
+  test("runtime statistics skip zero and one task without replanning") {
+    withRuntimeStatsTable { table =>
+      val source = table.newScan()
+      val scan = new CountingRuntimeScan(source)
+      val tasks = runtimeTasks(source)
+      assert(
+        IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 0), Seq("id")).isEmpty)
+      assert(
+        IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 1), Seq("id")).isEmpty)
+      assert(scan.planningCalls == 0)
+    }
+  }
+
+  test("runtime statistics reuse a snapshot and request only the runtime columns") {
+    withRuntimeStatsTable { table =>
+      val source = table.newScan().useSnapshot(table.currentSnapshot().snapshotId())
+      val scan = new CountingRuntimeScan(source)
+      val tasks = runtimeTasks(source)
+      val first = IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
+      assert(first.size == 3)
+      assert(scan.planningCalls == 1)
+      assert(scan.requestedColumns == Seq("id"))
+      first.values.foreach { file =>
+        val dataFile = file.asInstanceOf[org.apache.iceberg.DataFile]
+        assert(dataFile.lowerBounds().keySet().asScala.toSet == Set(Integer.valueOf(1)))
+      }
+      val repeated = new CountingRuntimeScan(source)
+      val cached = IcebergReflection.runtimeFileStatistics(repeated, tasks, Seq("id"))
+      assert(cached == first)
+      assert(repeated.planningCalls == 0)
+      val subset = IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 2), Seq("id"))
+      assert(subset.size == 2)
+      assert(scan.planningCalls == 1)
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("extra"))
+      assert(scan.planningCalls == 2)
+    }
+  }
+
+  test("runtime statistics key the pinned snapshot rather than the table's current snapshot") {
+    withRuntimeStatsTable { table =>
+      val oldSnapshot = table.currentSnapshot().snapshotId()
+      appendRuntimeStatsFiles(table, 3, 4)
+      val oldSource = table.newScan().useSnapshot(oldSnapshot)
+      val currentSource = table.newScan().useSnapshot(table.currentSnapshot().snapshotId())
+      val oldScan = new CountingRuntimeScan(oldSource)
+      val currentScan = new CountingRuntimeScan(currentSource)
+      assert(
+        IcebergReflection
+          .runtimeFileStatistics(oldScan, runtimeTasks(oldSource), Seq("id"))
+          .size == 3)
+      // The newer snapshot can select exactly the old paths. It must still miss: coverage
+      // alone must not mask a cache key that incorrectly uses the table's current snapshot.
+      val overlappingSource = currentSource.filter(Expressions.lessThan("id", Int.box(3)))
+      val overlappingScan = new CountingRuntimeScan(overlappingSource)
+      assert(
+        IcebergReflection
+          .runtimeFileStatistics(overlappingScan, runtimeTasks(overlappingSource), Seq("id"))
+          .size == 3)
+      assert(overlappingScan.planningCalls == 1)
+      assert(
+        IcebergReflection
+          .runtimeFileStatistics(currentScan, runtimeTasks(currentSource), Seq("id"))
+          .size == 4)
+      assert(oldScan.planningCalls == 1)
+      assert(currentScan.planningCalls == 1)
+      IcebergReflection.runtimeFileStatistics(oldScan, runtimeTasks(oldSource), Seq("id"))
+      assert(oldScan.planningCalls == 1)
+    }
+  }
+
+  test("runtime statistics replan when cached paths do not cover the planned files") {
+    withRuntimeStatsTable { table =>
+      val source = table.newScan()
+      val filtered =
+        new CountingRuntimeScan(source.filter(Expressions.lessThan("id", Int.box(2))))
+      val filteredTasks = runtimeTasks(source.filter(Expressions.lessThan("id", Int.box(2))))
+      assert(filteredTasks.size() == 2)
+      assert(
+        IcebergReflection.runtimeFileStatistics(filtered, filteredTasks, Seq("id")).size == 2)
+      val full = new CountingRuntimeScan(source)
+      val tasks = runtimeTasks(source)
+      assert(IcebergReflection.runtimeFileStatistics(full, tasks, Seq("id")).size == 3)
+      assert(full.planningCalls == 1)
+      IcebergReflection.runtimeFileStatistics(full, tasks, Seq("id"))
+      assert(full.planningCalls == 1)
+    }
+  }
+
+  test("runtime statistics cache is bounded with least recently used eviction") {
+    withRuntimeStatsTable { table =>
+      val conf = SQLConf.get
+      conf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, "2")
+      val source = table.newScan()
+      val scan = new CountingRuntimeScan(source)
+      val tasks = runtimeTasks(source)
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("extra"))
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id", "extra"))
+      assert(scan.planningCalls == 3)
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("extra", "id"))
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
+      assert(scan.planningCalls == 3)
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("extra"))
+      assert(scan.planningCalls == 4)
+      conf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, "1")
+      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
+      assert(scan.planningCalls == 5)
+    }
+  }
+
+  test("disabled runtime statistics cache replans and preserves the same bounds") {
+    withRuntimeStatsTable { table =>
+      val source = table.newScan()
+      val scan = new CountingRuntimeScan(source)
+      val tasks = runtimeTasks(source)
+      val cached = IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
+      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key, "false")
+      (1 to 2).foreach { _ =>
+        val uncached = IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
+        assert(uncached.keySet == cached.keySet)
+        uncached.foreach { case (path, file) =>
+          val expected = cached(path).asInstanceOf[org.apache.iceberg.DataFile]
+          val actual = file.asInstanceOf[org.apache.iceberg.DataFile]
+          assert(actual.lowerBounds() == expected.lowerBounds())
+          assert(actual.upperBounds() == expected.upperBounds())
+        }
+      }
+      assert(scan.planningCalls == 3)
+    }
+  }
 
   /** Mimics HiveTableOperations/GlueTableOperations which inherit current(). */
   class StubTableOperations extends BaseMetastoreTableOperations {

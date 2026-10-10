@@ -54,7 +54,8 @@ pub mod spark_config {
 #[cfg(test)]
 mod tests {
     use super::spark_operator::{
-        partition_writer, LocalPartitionWriter, PartitionWriter, RssPartitionWriter, ShuffleWriter,
+        partition_writer, HashAggregate, LocalPartitionWriter, PartitionWriter, RssPartitionWriter,
+        ShuffleWriter,
     };
     use prost::Message;
 
@@ -64,6 +65,40 @@ mod tests {
         output_data_file: String,
         #[prost(string, tag = "4")]
         output_index_file: String,
+    }
+
+    // Main already assigns aggregate output ordering to tag 9. Runtime filtering must not
+    // reinterpret an existing ordered aggregate plan, or cause an older reader to invent ordering.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct LegacyAggregateOrdering {
+        #[prost(bool, tag = "9")]
+        ordered_by_grouping_keys: bool,
+    }
+
+    #[test]
+    fn runtime_filter_preserves_existing_aggregate_ordering_wire_field() {
+        let legacy = LegacyAggregateOrdering {
+            ordered_by_grouping_keys: true,
+        };
+        let decoded = HashAggregate::decode(legacy.encode_to_vec().as_slice()).unwrap();
+        assert!(decoded.ordered_by_grouping_keys);
+        assert!(!decoded.dynamic_filter_enabled);
+    }
+
+    #[test]
+    fn runtime_filter_does_not_advertise_aggregate_ordering_to_legacy_reader() {
+        let filtered = HashAggregate {
+            dynamic_filter_enabled: true,
+            ..Default::default()
+        };
+        let bytes = filtered.encode_to_vec();
+        let legacy = LegacyAggregateOrdering::decode(bytes.as_slice()).unwrap();
+        assert!(!legacy.ordered_by_grouping_keys);
+        assert!(
+            HashAggregate::decode(bytes.as_slice())
+                .unwrap()
+                .dynamic_filter_enabled
+        );
     }
 
     fn local_shuffle_writer() -> ShuffleWriter {
