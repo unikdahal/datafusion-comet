@@ -114,10 +114,10 @@ With `spark.comet.exec.topK.dynamicFilter.enabled=true`, eligible fused local To
 these counters. See [TopK Reader Pruning](tuning/operators.md#topk-reader-pruning) for the required
 fusion option and reader restrictions.
 
-| Metric                                 | Description                                                                  |
-| -------------------------------------- | ---------------------------------------------------------------------------- |
-| `dynamic_filter_topk_filters_attached` | Live TopK threshold attachments to native Parquet or Iceberg readers.         |
-| `dynamic_filter_topk_filters_skipped`  | Eligible TopK executions whose input cannot accept reader attachment.        |
+| Metric                                 | Description                                                           |
+| -------------------------------------- | --------------------------------------------------------------------- |
+| `dynamic_filter_topk_filters_attached` | Live TopK threshold attachments to native Parquet or Iceberg readers. |
+| `dynamic_filter_topk_filters_skipped`  | Eligible TopK executions whose input cannot accept reader attachment. |
 
 These counters belong to the local TopK. An attached predicate may prune nothing, and a file's
 schema adaptation can disable it to preserve conversion errors. For Parquet, reader work remains on the scan:

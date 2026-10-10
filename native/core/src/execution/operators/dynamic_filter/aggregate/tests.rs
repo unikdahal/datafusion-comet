@@ -26,8 +26,8 @@ use datafusion::physical_expr::aggregate::AggregateExprBuilder;
 use datafusion::physical_expr::expressions::Literal;
 use datafusion::physical_expr::expressions::{BinaryExpr, CastExpr};
 use datafusion::physical_plan::aggregates::PhysicalGroupBy;
-use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::physical_plan::empty::EmptyExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use iceberg::scan::FileScanTask;
 use iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
 
