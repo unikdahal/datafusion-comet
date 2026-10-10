@@ -5321,6 +5321,174 @@ mod tests {
     }
 
     #[test]
+    fn iceberg_file_metrics_sign_extend_negative_int_bounds_for_evolved_long() {
+        use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
+
+        let schema = Schema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "promoted", Type::Primitive(PrimitiveType::Long)).into(),
+            ])
+            .build()
+            .unwrap();
+        for (lower, upper) in [(i32::MIN, -1_i32), (-10, -5), (-1, -1)] {
+            let proto = spark_operator::IcebergFileMetrics {
+                record_count: Some(20),
+                lower_bounds: std::collections::HashMap::from([(1, lower.to_le_bytes().to_vec())]),
+                upper_bounds: std::collections::HashMap::from([(1, upper.to_le_bytes().to_vec())]),
+                ..Default::default()
+            };
+            let metrics = super::parse_iceberg_file_metrics(&proto, &schema);
+            assert_eq!(
+                metrics.lower_bounds().get(&1),
+                Some(&Datum::long(i64::from(lower)))
+            );
+            assert_eq!(
+                metrics.upper_bounds().get(&1),
+                Some(&Datum::long(i64::from(upper)))
+            );
+            // Exercise the pooled Scala/protobuf/native transport as well as
+            // the pinned iceberg-rust four-byte LONG decoder.
+            let common = spark_operator::IcebergScanCommon {
+                schema_pool: vec![serde_json::to_string(&schema).unwrap()],
+                project_field_ids_pool: vec![spark_operator::ProjectFieldIdList {
+                    field_ids: vec![1],
+                }],
+                file_metrics_pool: vec![proto],
+                ..Default::default()
+            };
+            let task = spark_operator::IcebergFileScanTask {
+                data_file_path: "file:///tmp/negative-promoted.parquet".to_string(),
+                file_size_in_bytes: 100,
+                file_metrics_idx: Some(0),
+                ..Default::default()
+            };
+            let tasks = super::convert_file_scan_tasks(&[task], Some(&common), None).unwrap();
+            assert_eq!(
+                tasks[0].file_metrics().unwrap().lower_bounds(),
+                metrics.lower_bounds()
+            );
+            assert_eq!(
+                tasks[0].file_metrics().unwrap().upper_bounds(),
+                metrics.upper_bounds()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn negative_promoted_int_metrics_preserve_iceberg_reader_matches() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use arrow::array::{Int32Array, Int64Array, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use datafusion::physical_expr::expressions::{lit, BinaryExpr, Column};
+        use datafusion::physical_expr::PhysicalExpr;
+        use datafusion::physical_plan::filter::FilterExec;
+        use datafusion::physical_plan::{collect, ExecutionPlan};
+        use datafusion::prelude::SessionContext;
+        use iceberg::arrow::{RuntimePredicateProvider, RuntimePredicateSnapshot};
+        use iceberg::expr::{Predicate, Reference};
+        use iceberg::scan::FileScanTask;
+        use iceberg::spec::{DataFileFormat, Datum, NestedField, PrimitiveType, Schema, Type};
+        use parquet::arrow::ArrowWriter;
+
+        struct Provider(Predicate);
+        impl RuntimePredicateProvider for Provider {
+            fn generation(&self) -> u64 {
+                1
+            }
+            fn snapshot(&self) -> iceberg::Result<RuntimePredicateSnapshot> {
+                Ok(RuntimePredicateSnapshot::new(Some(self.0.clone()), 1))
+            }
+        }
+
+        let physical_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("promoted", DataType::Int32, false).with_metadata(HashMap::from([
+                (
+                    parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+                    "1".to_string(),
+                ),
+            ])),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&physical_schema),
+            vec![Arc::new(Int32Array::from(vec![-10, -5, -1]))],
+        )
+        .unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file.reopen().unwrap(), physical_schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(1, "promoted", Type::Primitive(PrimitiveType::Long)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let proto = spark_operator::IcebergFileMetrics {
+            record_count: Some(3),
+            lower_bounds: HashMap::from([(1, (-10_i32).to_le_bytes().to_vec())]),
+            upper_bounds: HashMap::from([(1, (-1_i32).to_le_bytes().to_vec())]),
+            ..Default::default()
+        };
+        let task = FileScanTask::builder()
+            .with_file_size_in_bytes(file.as_file().metadata().unwrap().len())
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path(file.path().to_string_lossy().into_owned())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(Arc::clone(&schema))
+            .with_project_field_ids(vec![1])
+            .with_case_sensitive(true)
+            .with_file_metrics(Some(Arc::new(super::parse_iceberg_file_metrics(
+                &proto, &schema,
+            ))))
+            .build()
+            .unwrap();
+        let output_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "promoted", DataType::Int64, true,
+        )]));
+        let session = SessionContext::new();
+        for enabled in [false, true] {
+            let scan = crate::execution::operators::IcebergScanExec::new(
+                file.path().to_string_lossy().into_owned(),
+                Arc::clone(&output_schema),
+                Default::default(),
+                String::new(),
+                vec![task.clone()],
+                1,
+            )
+            .unwrap();
+            let scan = if enabled {
+                scan.with_runtime_predicate_provider(
+                    Arc::new(Provider(Reference::new("promoted").less_than(Datum::long(-5)))),
+                    None,
+                )
+            } else {
+                scan
+            };
+            let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("promoted", 0)),
+                datafusion::logical_expr::Operator::Lt,
+                lit(-5_i64),
+            ));
+            let plan: Arc<dyn ExecutionPlan> =
+                Arc::new(FilterExec::try_new(predicate, Arc::new(scan)).unwrap());
+            let output = collect(plan, session.task_ctx()).await.unwrap();
+            let values: Vec<i64> = output
+                .iter()
+                .flat_map(|batch| {
+                    batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap().values().to_vec()
+                })
+                .collect();
+            assert_eq!(values, vec![-10], "runtime pruning enabled={enabled}");
+        }
+    }
+
+    #[test]
     fn iceberg_file_metrics_decode_bounds_and_ignore_unusable_encodings() {
         use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
         let schema = Schema::builder()
