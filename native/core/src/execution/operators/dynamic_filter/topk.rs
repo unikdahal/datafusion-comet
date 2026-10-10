@@ -15,12 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Connect a local TopK's improving threshold to its native Parquet reader.
+//! Connect a local TopK's improving threshold to its native Parquet or Iceberg reader.
 
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow::datatypes::DataType;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{internal_err, Result, Statistics};
@@ -41,7 +40,12 @@ use futures::StreamExt;
 
 mod reader;
 
+use super::iceberg_reader::reaches_iceberg_reader;
+use super::join::is_direct_pruning_key;
+use super::safety::is_safe_to_prune_before;
 use reader::try_attach_topk_reader_filter;
+
+use crate::execution::operators::RuntimeScanOrder;
 
 /// Keep an unexecuted template in the Spark plan. Each stream gets a fresh TopK
 /// and reader predicate, so a previous execution's threshold cannot discard rows
@@ -64,16 +68,33 @@ impl TopKReaderFilterExec {
             || !config.optimizer.enable_topk_dynamic_filter_pushdown
             || !matches!(sort.fetch(), Some(fetch) if fetch > 0)
             || sort.input().output_partitioning().partition_count() != 1
-            || sort.expr().len() != 1
+            || sort.expr().is_empty()
         {
             return Ok(None);
         }
         let key = &sort.expr()[0].expr;
-        if !key.is::<Column>()
-            || !matches!(
-                key.data_type(sort.input().schema().as_ref())?,
-                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
-            )
+        let key_type = key.data_type(sort.input().schema().as_ref())?;
+        let string_key = super::is_runtime_pruning_string_key_type(&key_type);
+        // String bounds require the Iceberg binary domain and unannotated column lineage.
+        // NULLS FIRST string support is owned by the separate null-ordering workstream.
+        if string_key
+            && (sort.expr()[0].options.nulls_first
+                || !reaches_iceberg_reader(sort.input())
+                || !is_direct_pruning_key(sort.input(), key))
+        {
+            return Ok(None);
+        }
+        // TopK reader filter pushdown supports integer, date, timestamp and binary string runtime pruning keys.
+        if !key.is::<Column>() || !super::is_supported_topk_key_type(&key_type) {
+            return Ok(None);
+        }
+        // Every sort expression is evaluated before rows enter the heap. A
+        // primary-key bound must not hide a later row's secondary-key error.
+        if sort
+            .expr()
+            .iter()
+            .skip(1)
+            .any(|order| !is_safe_to_prune_before(&order.expr, sort.input().schema().as_ref()))
         {
             return Ok(None);
         }
@@ -95,14 +116,33 @@ impl TopKReaderFilterExec {
     }
 
     fn build_runtime_sort(&self) -> Result<RuntimeTopK> {
+        // Like DataFusion's own pushdown, the filter lists every sort key. A multi-key filter
+        // only reaches readers that bound the first key (see the Iceberg extraction).
         let predicate = Arc::new(DynamicFilterPhysicalExpr::new(
-            vec![Arc::clone(&self.template.expr()[0].expr)],
+            self.template
+                .expr()
+                .iter()
+                .map(|order| Arc::clone(&order.expr))
+                .collect(),
             lit(true),
         ));
+        // Read the files holding the first key's best values first, so the bound tightens at
+        // once and the remaining files are rejected by their statistics.
+        let first = self.template.expr()[0].options;
+        let order = if first.descending {
+            RuntimeScanOrder::Descending {
+                nulls_first: first.nulls_first,
+            }
+        } else {
+            RuntimeScanOrder::Ascending {
+                nulls_first: first.nulls_first,
+            }
+        };
         let reader = try_attach_topk_reader_filter(
             self.template.input(),
             Arc::clone(&predicate),
             &self.config,
+            order,
         )?;
         let reader_filter_attached = reader.is_some();
         let input = reader.unwrap_or_else(|| Arc::clone(self.template.input()));

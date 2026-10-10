@@ -36,7 +36,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, DynamicPruningExpre
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.{sideBySide, ArrayBasedMapData, DateTimeUtils, GenericArrayData, MetadataColumnHelper}
 import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.getExistenceDefaultValues
-import org.apache.spark.sql.comet.{CometBatchScanExec, CometScanExec}
+import org.apache.spark.sql.comet.{CometBatchScanExec, CometScanExec, RuntimePruningKeyTypes}
 import org.apache.spark.sql.execution.{FileSourceScanExec, InSubqueryExec, SparkPlan, SubqueryAdaptiveBroadcastExec}
 import org.apache.spark.sql.execution.datasources.HadoopFsRelation
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
@@ -50,6 +50,7 @@ import org.apache.comet.CometSparkSessionExtensions.{isCometLoaded, isSpark35Plu
 import org.apache.comet.iceberg.{CometIcebergNativeScanMetadata, IcebergReflection, IcebergStorageSchemes}
 import org.apache.comet.objectstore.NativeConfig
 import org.apache.comet.parquet.CometParquetUtils.{encryptionEnabled, isEncryptionConfigSupported, readFieldId}
+import org.apache.comet.serde.QueryPlanSerde.{hasCharPruningKey, isBinaryStringPruningType}
 import org.apache.comet.serde.operator.{CometIcebergNativeScan, CometNativeScan}
 import org.apache.comet.shims.{CometTypeShim, ShimCometStreaming, ShimFileFormat, ShimSubqueryBroadcast}
 
@@ -89,6 +90,7 @@ case class CometScanRule(session: SparkSession)
     }
 
     val fullPlan = plan
+    val runtimeFilterColumns = CometScanRule.runtimeFilterColumns(plan, conf)
 
     def transformScan(scanNode: SparkPlan): SparkPlan = scanNode match {
       // Tagged by CometSpark34AqeDppFallbackRule on Spark < 3.5 to keep a peer scan
@@ -111,7 +113,8 @@ case class CometScanRule(session: SparkSession)
       // is ever offered it. `transformV2Scan` applies the guard right after its contrib hook
       // declines.
       case scanExec: BatchScanExec =>
-        transformV2Scan(scanExec)
+        val columns = Option(runtimeFilterColumns.get(scanExec)).getOrElse(Set.empty[String])
+        transformV2Scan(scanExec, columns)
     }
 
     plan.transform {
@@ -146,8 +149,29 @@ case class CometScanRule(session: SparkSession)
     // (...metadata.json#all_manifests) but uppercase via the catalog-identifier form
     // (db.table.ALL_DATA_FILES), and the latter must hit this gate too rather than fall through
     // to reflection that fails on the metadata-table class.
-    val name = scanExec.table.name().toLowerCase(Locale.ROOT)
-    metadataTableSuffix.exists(name.endsWith)
+    //
+    // Prefer the Iceberg table's own type: every metadata table extends BaseMetadataTable, so a
+    // data table whose name merely ends with one of these words (`orders_history`,
+    // `user_files`, `snapshots`) still gets the native scan. Only when the scan is not
+    // Iceberg's, or the table cannot be reached, fall back to the name, and then only to a
+    // whole name segment (`db.t.files`, `...metadata.json#files`).
+    val icebergTable =
+      if (scanExec.scan.getClass.getName.startsWith("org.apache.iceberg.")) {
+        IcebergReflection.getTable(scanExec.scan)
+      } else {
+        None
+      }
+    icebergTable match {
+      case Some(table) if table != null =>
+        Iterator
+          .iterate[Class[_]](table.getClass)(_.getSuperclass)
+          .takeWhile(_ != null)
+          .exists(_.getName == "org.apache.iceberg.BaseMetadataTable")
+      case _ =>
+        val name = scanExec.table.name().toLowerCase(Locale.ROOT)
+        metadataTableSuffix.exists(suffix =>
+          name.endsWith("." + suffix) || name.endsWith("#" + suffix))
+    }
   }
 
   private def transformV1Scan(plan: SparkPlan, scanExec: FileSourceScanExec): SparkPlan = {
@@ -375,7 +399,9 @@ case class CometScanRule(session: SparkSession)
     Some(CometScanExec(scanExec, session))
   }
 
-  private def transformV2Scan(scanExec: BatchScanExec): SparkPlan = {
+  private def transformV2Scan(
+      scanExec: BatchScanExec,
+      runtimeFilterColumns: Set[String]): SparkPlan = {
 
     // Give any optional, out-of-tree scan contrib (e.g. Lance) first crack at this V2 scan. On a
     // default build no contrib is registered, so this returns None and we proceed with Comet's
@@ -619,7 +645,12 @@ case class CometScanRule(session: SparkSession)
                 .map(COMET_S3_COMPLIANT_SCHEMES_KEY -> _)
 
             val result = CometIcebergNativeScanMetadata
-              .extract(scanExec.scan, effectiveLocation, catalogProperties, icebergTasks)
+              .extract(
+                scanExec.scan,
+                effectiveLocation,
+                catalogProperties,
+                icebergTasks,
+                runtimeStatisticsColumns = runtimeFilterColumns)
 
             result
           } catch {
@@ -1180,6 +1211,131 @@ case class CometScanTypeChecker() extends DataTypeSupport with CometTypeShim {
 }
 
 object CometScanRule extends Logging {
+
+  /**
+   * Exact scan columns that can receive a runtime predicate from an eligible producer in the same
+   * native stage. This intentionally mirrors the reader-attachment shapes instead of walking
+   * every descendant below a producer: joins mark only their probe input, TopK requires a direct
+   * scan, and MIN/MAX / joins may cross deterministic filters.
+   *
+   * The native planner remains the final eligibility check. This pass only decides which Iceberg
+   * manifest columns are worth retaining on the driver for whole-file pruning.
+   */
+  def runtimeFilterColumns(
+      plan: SparkPlan,
+      conf: SQLConf): java.util.IdentityHashMap[SparkPlan, Set[String]] = {
+    import org.apache.spark.sql.catalyst.expressions.SortOrder
+    import org.apache.spark.sql.catalyst.expressions.aggregate.{Max, Min, Partial}
+    import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
+    import org.apache.spark.sql.catalyst.plans.{Inner, LeftSemi}
+    import org.apache.spark.sql.execution.{FilterExec, ProjectExec, TakeOrderedAndProjectExec}
+    import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
+    import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
+    import org.apache.spark.sql.execution.joins.HashJoin
+
+    val inputs = new java.util.IdentityHashMap[SparkPlan, Set[String]]()
+    val joins = COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get(conf)
+    val topK = COMET_EXEC_TOPK_FUSION_ENABLED.get(conf) &&
+      COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.get(conf)
+    val minMax = COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get(conf)
+    if (!joins && !topK && !minMax) return inputs
+
+    def directKeyAttribute(expression: Expression): Option[Attribute] = expression match {
+      case attr: Attribute if RuntimePruningKeyTypes.isFileStatsAttribute(attr) =>
+        Some(attr)
+      case _ => None
+    }
+
+    def directTopKKeyAttribute(expression: Expression): Option[Attribute] = expression match {
+      case attr: Attribute if RuntimePruningKeyTypes.isSupportedTopKKey(attr.dataType) =>
+        Some(attr)
+      case _ => None
+    }
+
+    def directMinMaxKeyAttribute(expression: Expression): Option[Attribute] = expression match {
+      case attr: Attribute if RuntimePruningKeyTypes.isSupportedMinMaxKey(attr.dataType) =>
+        Some(attr)
+      case _ => None
+    }
+
+    // The native Iceberg reader attaches through deterministic filters (a row the runtime
+    // predicate rejects never reaches the producer), so their scan inputs need statistics too.
+    def passableFilter(expression: Expression): Boolean = expression.deterministic
+
+    def record(scan: BatchScanExec, key: Attribute): Unit = {
+      scan.output
+        .find(attr => attr.exprId == key.exprId && attr.dataType == key.dataType)
+        .foreach { attr =>
+          val current = Option(inputs.get(scan)).getOrElse(Set.empty[String])
+          inputs.put(scan, current + attr.name)
+        }
+    }
+
+    def readerInput(node: SparkPlan, key: Attribute, allowFilters: Boolean): Unit =
+      node match {
+        case scan: BatchScanExec =>
+          record(scan, key)
+        case filter: FilterExec if allowFilters && passableFilter(filter.condition) =>
+          readerInput(filter.child, key, allowFilters = true)
+        // Column pruning puts a projection between the filter and the producer. The native
+        // reader follows the key through a column reference, so retain its statistics too.
+        case project: ProjectExec
+            if allowFilters && project.projectList.forall(_.deterministic) &&
+              project.projectList.exists {
+                case attr: Attribute => attr.exprId == key.exprId
+                case _ => false
+              } =>
+          readerInput(project.child, key, allowFilters = true)
+        case _ =>
+      }
+
+    def visit(node: SparkPlan): Unit = {
+      node match {
+        case join: HashJoin
+            if joins && (join.joinType == Inner || join.joinType == LeftSemi) &&
+              join.leftKeys.size == 1 && join.rightKeys.size == 1 &&
+              !hasCharPruningKey(join.left, join.leftKeys) &&
+              !hasCharPruningKey(join.right, join.rightKeys) &&
+              !RuntimePruningKeyTypes.isStringCollationType(join.leftKeys.head.dataType) &&
+              !RuntimePruningKeyTypes.isStringCollationType(join.rightKeys.head.dataType) =>
+          val probe = join.buildSide match {
+            case BuildLeft => Some((join.right, join.rightKeys.head))
+            case BuildRight => Some((join.left, join.leftKeys.head))
+            case _ => None
+          }
+          probe.foreach { case (input, expression) =>
+            directKeyAttribute(expression)
+              .foreach(key => readerInput(input, key, allowFilters = true))
+          }
+
+        case limit: TakeOrderedAndProjectExec
+            if topK && limit.limit > 0 && limit.sortOrder.nonEmpty &&
+              !SortOrder.orderingSatisfies(limit.child.outputOrdering, limit.sortOrder) &&
+              !hasCharPruningKey(limit.child, limit.sortOrder.map(_.child)) =>
+          directTopKKeyAttribute(limit.sortOrder.head.child)
+            .foreach(key => readerInput(limit.child, key, allowFilters = false))
+
+        case aggregate: BaseAggregateExec
+            if minMax && aggregate.groupingExpressions.isEmpty &&
+              aggregate.aggregateExpressions.size == 1 =>
+          val expression = aggregate.aggregateExpressions.head
+          val function = expression.aggregateFunction
+          if (expression.mode == Partial && !expression.isDistinct && expression.filter.isEmpty &&
+            (function.isInstanceOf[Min] || function.isInstanceOf[Max]) &&
+            !hasCharPruningKey(aggregate.child, function.children)) {
+            function.children.headOption
+              .flatMap(directMinMaxKeyAttribute)
+              .foreach(key => readerInput(aggregate.child, key, allowFilters = true))
+          }
+
+        case _ =>
+      }
+      node.children.foreach(visit)
+    }
+
+    visit(plan)
+    inputs
+  }
 
   /**
    * Whether any node in `plan` evaluates `input_file_name`, `input_file_block_start` or

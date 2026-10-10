@@ -21,7 +21,7 @@ use crate::parquet::parquet_exec::init_datasource_exec;
 use crate::parquet::parquet_support::ObjectStoreBackend;
 use arrow::array::{ArrayRef, Int32Array};
 use arrow::compute::{cast, SortOptions};
-use arrow::datatypes::{Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::memory::MemorySourceConfig;
@@ -35,6 +35,7 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 
 mod correctness;
 mod eligibility;
+mod iceberg;
 mod lifecycle;
 mod reader;
 mod schema;

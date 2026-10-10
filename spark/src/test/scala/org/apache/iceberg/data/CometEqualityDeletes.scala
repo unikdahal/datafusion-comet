@@ -61,4 +61,20 @@ object CometEqualityDeletes {
     }
     writer.toDeleteFile()
   }
+
+  def writePosition(table: Table, out: OutputFile, path: String, position: Long): DeleteFile = {
+    val factory = GenericFileWriterFactory.builderFor(table).build()
+    val writer = factory.newPositionDeleteWriter(
+      EncryptedFiles.encryptedOutput(out, EncryptionKeyMetadata.EMPTY),
+      table.spec(),
+      null)
+    try {
+      writer.write(
+        org.apache.iceberg.deletes.PositionDelete.create[Record]().set(path, position, null))
+    } finally {
+      writer.close()
+    }
+    writer.toDeleteFile()
+  }
+
 }

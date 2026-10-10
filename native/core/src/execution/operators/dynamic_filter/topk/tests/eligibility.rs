@@ -53,18 +53,35 @@ fn rejects_unsupported_sort_shapes_types_and_configuration() {
         Operator::Plus,
         lit(1i32),
     ));
-    for expressions in [
-        vec![PhysicalSortExpr::new_default(computed)],
-        vec![
-            PhysicalSortExpr::new_default(Arc::clone(&column)),
-            PhysicalSortExpr::new_default(Arc::new(Column::new("other", 1))),
-        ],
+    // A computed first key cannot bound a reader; further keys after a direct one may.
+    for (expressions, eligible) in [
+        (
+            vec![PhysicalSortExpr::new_default(Arc::clone(&computed))],
+            false,
+        ),
+        (
+            vec![
+                PhysicalSortExpr::new_default(computed),
+                PhysicalSortExpr::new_default(Arc::clone(&column)),
+            ],
+            false,
+        ),
+        (
+            vec![
+                PhysicalSortExpr::new_default(Arc::clone(&column)),
+                PhysicalSortExpr::new_default(Arc::new(Column::new("other", 1))),
+            ],
+            true,
+        ),
     ] {
         let plan = SortExec::new(LexOrdering::new(expressions).unwrap(), Arc::clone(&input))
             .with_fetch(Some(1));
-        assert!(TopKReaderFilterExec::try_new(&plan, &config)
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            TopKReaderFilterExec::try_new(&plan, &config)
+                .unwrap()
+                .is_some(),
+            eligible
+        );
     }
     for key_type in [
         DataType::UInt32,
