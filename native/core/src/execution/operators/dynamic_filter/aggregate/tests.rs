@@ -604,7 +604,9 @@ async fn repeated_execution_of_one_wrapper_aggregates_metrics() {
     for execution in 1..=3 {
         let before = registered(&plan);
         let baseline_before = registered(&baseline);
-        let output = collect(Arc::clone(&plan), session.task_ctx()).await.unwrap();
+        let output = collect(Arc::clone(&plan), session.task_ctx())
+            .await
+            .unwrap();
         assert_eq!(result_value(&output), ScalarValue::Int32(Some(9)));
         let expected = collect(Arc::clone(&baseline), session.task_ctx())
             .await
@@ -612,8 +614,15 @@ async fn repeated_execution_of_one_wrapper_aggregates_metrics() {
         assert_eq!(result_value(&expected), ScalarValue::Int32(Some(9)));
         let added = registered(&plan) - before;
         let baseline_added = registered(&baseline) - baseline_before;
-        assert!(added > 0 && added <= baseline_added + 1, "{added} vs {baseline_added}");
-        assert_eq!(*per_execution.get_or_insert(added), added, "execution {execution}");
+        assert!(
+            added > 0 && added <= baseline_added + 1,
+            "{added} vs {baseline_added}"
+        );
+        assert_eq!(
+            *per_execution.get_or_insert(added),
+            added,
+            "execution {execution}"
+        );
         assert_eq!(
             sum(&plan, "dynamic_filter_minmax_filters_attached"),
             execution

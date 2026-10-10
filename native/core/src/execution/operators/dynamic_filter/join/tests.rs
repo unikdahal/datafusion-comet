@@ -1926,10 +1926,9 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
             )),
         )))
         .unwrap();
-    let reattached =
-        super::super::iceberg_reader::attach_iceberg_join_filter(&reset, predicate)
-            .unwrap()
-            .unwrap();
+    let reattached = super::super::iceberg_reader::attach_iceberg_join_filter(&reset, predicate)
+        .unwrap()
+        .unwrap();
     let reset_output = collect(reattached, session.task_ctx()).await.unwrap();
     assert_eq!(row_count(&reset_output), 1);
     let batch = reset_output

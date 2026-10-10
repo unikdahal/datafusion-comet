@@ -21,7 +21,7 @@ package org.apache.comet.iceberg
 
 import java.lang.reflect.Method
 import java.util.concurrent.{ConcurrentHashMap, CountDownLatch, Semaphore, TimeUnit}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.LongAdder
 
 import scala.util.control.NonFatal
 
@@ -560,7 +560,7 @@ object IcebergReflection extends Logging {
   private val runtimeStatsCollection = new Semaphore(RuntimeStatsMaxConcurrentCollections)
   private val runtimeStatsInFlight = new ConcurrentHashMap[RuntimeStatsKey, CountDownLatch]()
   // Requests currently waiting for an identical in-flight collection (test observability).
-  private[iceberg] val runtimeStatsWaiters = new AtomicInteger()
+  private[iceberg] val runtimeStatsWaiters = new LongAdder()
   private val runtimeStatsCache =
     CacheBuilder
       .newBuilder()
@@ -840,10 +840,10 @@ object IcebergReflection extends Logging {
           }
         } else {
           count(RuntimeStatsMetrics.SharedWaits)
-          runtimeStatsWaiters.incrementAndGet()
+          runtimeStatsWaiters.increment()
           val completed =
             try inFlight.await(RuntimeStatsSharedWaitMillis, TimeUnit.MILLISECONDS)
-            finally runtimeStatsWaiters.decrementAndGet()
+            finally runtimeStatsWaiters.decrement()
           if (!completed) {
             count(RuntimeStatsMetrics.ContentionSkips)
             result(Map.empty)

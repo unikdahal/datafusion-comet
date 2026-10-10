@@ -475,7 +475,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
         val following = executor.submit(collectStatistics(follower, tasks, conf))
         // Release the leader only once the follower waits on its flight.
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-        while (IcebergReflection.runtimeStatsWaiters.get() == 0) {
+        while (IcebergReflection.runtimeStatsWaiters.sum() == 0L) {
           assert(System.nanoTime() < deadline, "the identical request never waited")
           Thread.`yield`()
         }
