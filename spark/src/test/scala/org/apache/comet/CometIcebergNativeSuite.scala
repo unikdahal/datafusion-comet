@@ -1245,6 +1245,23 @@ class CometIcebergNativeSuite
                     scans.foreach { scan =>
                       val common = OperatorOuterClass.IcebergScanCommon.parseFrom(scan.commonData)
                       assert(common.getFileMetricsPoolCount > 0)
+                      // Spark copies/clones plans on the driver; it does not Java-deserialize
+                      // their transient Iceberg metadata before producing task protobuf bytes.
+                      val statistics = scan.nativeIcebergScanMetadata.runtimeFileStatistics
+                      assert(statistics.nonEmpty)
+                      Seq(
+                        scan.copy(),
+                        scan.clone().asInstanceOf[CometIcebergNativeScanExec],
+                        scan.convertBlock()).foreach { copied =>
+                        assert(copied.nativeIcebergScanMetadata.runtimeFileStatistics eq statistics)
+                        val copiedCommon =
+                          OperatorOuterClass.IcebergScanCommon.parseFrom(copied.commonData)
+                        assert(copiedCommon.getFileMetricsPoolList == common.getFileMetricsPoolList)
+                      }
+                      assert(
+                        scan.canonicalized
+                          .asInstanceOf[CometIcebergNativeScanExec]
+                          .nativeIcebergScanMetadata == null)
                       common.getFileMetricsPoolList.asScala.foreach { metrics =>
                         val serializedFieldIds =
                           metrics.getValueCountsMap.keySet().asScala.map(_.intValue()).toSet ++
