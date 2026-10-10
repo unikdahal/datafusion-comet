@@ -46,6 +46,15 @@ def integer(value, minimum=0):
     return type(value) is int and value >= minimum
 
 
+def nonnegative_finite(value):
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -84,7 +93,7 @@ def validate_records(records, manifest):
     Never infer the experiment from the measurements: a wholly omitted query,
     round or variant must fail just like an omitted individual sample.
     """
-    if not isinstance(manifest, dict) or manifest.get("protocol_version") != 1:
+    if not isinstance(manifest, dict) or type(manifest.get("protocol_version")) is not int or manifest.get("protocol_version") != 1:
         raise ValidationError("expected protocol_version 1 manifest")
     if manifest.get("variants") != VARIANTS:
         raise ValidationError("expected variants main, off, on")
@@ -125,9 +134,11 @@ def validate_records(records, manifest):
             raise ValidationError(f"record {index}: unsuccessful sample")
         if not integer(record.get("rows")) or not hex_digest(record.get("checksum"), (16, 64)):
             raise ValidationError(f"record {index}: invalid or missing result")
+        if not isinstance(record.get("schema_json"), str) or not record["schema_json"]:
+            raise ValidationError(f"record {index}: missing result schema")
         for field in ("plan_ms", "exec_ms", "total_ms"):
             value = record.get(field)
-            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            if not nonnegative_finite(value):
                 raise ValidationError(f"record {index}: invalid {field}")
         if record["exec_ms"] <= 0 or not math.isclose(
             record["total_ms"], record["plan_ms"] + record["exec_ms"], rel_tol=1e-6, abs_tol=1e-6
@@ -137,6 +148,12 @@ def validate_records(records, manifest):
             value = record.get(field)
             if value is not None and not integer(value):
                 raise ValidationError(f"record {index}: invalid counter {field}")
+        scope = record.get("native_scan_metadata")
+        if scope is not None and (
+            not isinstance(scope, list) or any(not isinstance(location, str) or not location for location in scope)
+            or len(scope) != record.get("native_iceberg_scans")
+        ):
+            raise ValidationError(f"record {index}: invalid native scan scope")
         by_key[(query, variant)].append(record)
     expected_count = len(queries) * len(VARIANTS) * rounds * reps
     if len(seen) != expected_count:
@@ -148,15 +165,41 @@ def validate_records(records, manifest):
         raise ValidationError(f"incomplete matrix: {len(seen)}/{expected_count} samples; missing {missing}")
     for query in queries:
         runs = [record for variant in VARIANTS for record in by_key[(query, variant)]]
-        if len({r["checksum"] for r in runs}) != 1 or len({r["rows"] for r in runs}) != 1:
-            raise ValidationError(f"result mismatch: {query} (checksum or row count)")
+        if any(len({r[field] for r in runs}) != 1 for field in ("checksum", "rows", "schema_json")):
+            raise ValidationError(f"result mismatch: {query} (checksum, row count or schema)")
     return list(queries), by_key
+
+
+def validate_oracle(records, queries, by_key):
+    """Exactly one plain-Spark result per query, using the same SQL and snapshot."""
+    seen = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValidationError("invalid Spark oracle record")
+        query = record.get("query")
+        if not isinstance(query, str) or query not in queries or query in seen:
+            raise ValidationError("unexpected or duplicate Spark oracle query")
+        if record.get("variant") != "spark" or record.get("error") is not None or record.get("status", "ok") != "ok":
+            raise ValidationError(f"invalid Spark oracle sample: {query}")
+        if not integer(record.get("rows")) or not hex_digest(record.get("checksum"), (16, 64)):
+            raise ValidationError(f"invalid Spark oracle result: {query}")
+        reference = by_key[(query, "main")][0]
+        if any(record.get(field) != reference[field] for field in ("sql_sha256", "checksum", "rows", "schema_json")):
+            raise ValidationError(f"Spark oracle mismatch: {query}")
+        seen.add(query)
+    if seen != set(queries):
+        raise ValidationError("incomplete Spark oracle")
 
 
 def hex_digest(value, lengths):
     if isinstance(lengths, int):
         lengths = (lengths,)
     return isinstance(value, str) and len(value) in lengths and all(c in "0123456789abcdef" for c in value)
+
+
+def same_native_scope(baseline, candidate):
+    scopes = [r.get("native_scan_metadata") for r in baseline + candidate]
+    return bool(scopes) and bool(scopes[0]) and all(scope == scopes[0] for scope in scopes)
 
 
 SCAN_METRICS = (
@@ -185,6 +228,25 @@ def ratio_ci(baseline, candidate, rng, samples=2000):
     return quantile(ratios, 0.025), quantile(ratios, 0.975)
 
 
+def round_ratio_ci(baseline, candidate, rng, samples=2000):
+    """Diagnostic paired bootstrap of JVM-round medians, keeping reps clustered."""
+    def round_medians(records):
+        groups = defaultdict(list)
+        for record in records:
+            groups[record["round"]].append(record["exec_ms"])
+        return {key: statistics.median(values) for key, values in groups.items()}
+
+    base, cand = round_medians(baseline), round_medians(candidate)
+    if base.keys() != cand.keys() or len(base) < 2:
+        return None
+    rounds = sorted(base)
+    ratios = []
+    for _ in range(samples):
+        selected = rng.choices(rounds, k=len(rounds))
+        ratios.append(statistics.median(base[r] for r in selected) / statistics.median(cand[r] for r in selected))
+    return quantile(ratios, 0.025), quantile(ratios, 0.975)
+
+
 def mib(value):
     return f"{value / (1024 * 1024):,.1f}"
 
@@ -193,20 +255,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results")
     parser.add_argument("--manifest", required=True, help="experiment declared before collecting samples")
+    parser.add_argument("--oracle", required=True, help="plain Spark results from the same generated tables")
     args = parser.parse_args()
     try:
         manifest = read_json(Path(args.manifest).read_text(encoding="utf-8"))
         queries, by_key = validate_records(load_records(args.results), manifest)
+        validate_oracle(load_records(args.oracle), queries, by_key)
     except (ValidationError, OSError) as error:
         print(f"Benchmark validation failed: {error}", file=sys.stderr)
         return 1
     rng = random.Random(1)
 
     print("## Correctness\n")
-    print("| query | identical results across variants | rows |")
+    print("| query | identical results across variants and plain Spark | rows |")
     print("|---|---|---|")
     for query in queries:
-        checksums = {r["checksum"] for v in VARIANTS for r in by_key[(query, v)]}
         rows = {r["rows"] for v in VARIANTS for r in by_key[(query, v)]}
         print(f"| {query} | yes | {sorted(rows)} |")
 
@@ -230,9 +293,11 @@ def main():
             )
 
     print("\n## Speedup of branch with runtime filters on\n")
-    print("Ratio of median execution times with a bootstrap 95% interval; >1 is faster.\n")
-    print("| query | vs main | 95% CI | vs branch off | 95% CI |")
-    print("|---|---|---|---|---|")
+    print("Ratio of pooled median execution times; >1 is faster. The original independent")
+    print("sample bootstrap is retained. Paired JVM-round median intervals are exploratory")
+    print("diagnostics with repetitions kept in their round; few rounds limit inference.\n")
+    print("| query | vs main | independent 95% CI | paired round 95% CI | vs branch off | independent 95% CI | paired round 95% CI |")
+    print("|---|---|---|---|---|---|---|")
     for query in queries:
         on = [r["exec_ms"] for r in by_key[(query, "on")]]
         cells = []
@@ -242,36 +307,49 @@ def main():
                 cells += ["-", "-"]
                 continue
             low, high = ratio_ci(base, on, rng)
-            cells += [f"{statistics.median(base) / statistics.median(on):.2f}x", f"{low:.2f}-{high:.2f}"]
+            paired = round_ratio_ci(by_key[(query, baseline)], by_key[(query, "on")], random.Random(1))
+            interval = f"{paired[0]:.2f}-{paired[1]:.2f}" if paired else "n/a (<2 rounds)"
+            cells += [f"{statistics.median(base) / statistics.median(on):.2f}x", f"{low:.2f}-{high:.2f}", interval]
         print(f"| {query} | " + " | ".join(cells) + " |")
 
     print("\n## Reader I/O and pruning (median per query run)\n")
     print("`bytes_scanned` is the byte total of ranged reads issued by the native Iceberg reader,")
     print("including metadata and deletes. Live pruning can vary with scheduling.\n")
+    print("Counters cover native scans only; compare saved plans before attributing an I/O gain.")
+    print("Missing counters are n/a. Driver planning includes SQL analysis and physical planning,\n")
+    print("not an isolated measurement of manifest replanning or cache lookup.\n")
     print(
         "| query | variant | MiB read | vs main | file tasks | tasks with runtime predicate | "
-        "files pruned before open | row groups pruned (live) | refreshes |"
+        "files pruned before open | row groups pruned (live) | refreshes | decoder rebuilds |"
     )
-    print("|---|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for query in queries:
-        main_bytes = statistics.median(r["bytes_scanned"] for r in by_key[(query, "main")] or [{"bytes_scanned": 0}])
+        def med(variant, name):
+            values = [r.get(name) for r in by_key[(query, variant)]]
+            return None if any(value is None for value in values) else statistics.median(values)
+
+        def count(variant, name):
+            value = med(variant, name)
+            return "n/a" if value is None else f"{value:,.0f}"
+
+        main_bytes = med("main", "bytes_scanned")
         for variant in VARIANTS:
             runs = by_key[(query, variant)]
             if not runs:
                 continue
 
-            def med(name):
-                return statistics.median(r.get(name, 0) for r in runs)
-
-            read = med("bytes_scanned")
-            share = f"{read / main_bytes:.1%}" if main_bytes else "-"
+            read = med(variant, "bytes_scanned")
+            scope_matches = same_native_scope(by_key[(query, "main")], runs)
+            share = f"{read / main_bytes:.1%}" if main_bytes and read is not None and scope_matches else "n/a (scope/bytes)"
+            read_text = "n/a" if read is None else mib(read)
             print(
-                f"| {query} | {LABELS[variant]} | {mib(read)} | {share} | {med('num_splits'):,.0f} | "
-                f"{med('iceberg_runtime_predicate_tasks'):,.0f} | "
-                f"{med('iceberg_runtime_file_tasks_pruned'):,.0f} | "
-                f"{med('iceberg_runtime_row_groups_pruned'):,.0f} "
-                f"({med('iceberg_runtime_row_groups_pruned_live'):,.0f}) | "
-                f"{med('iceberg_runtime_predicate_refreshes'):,.0f} |"
+                f"| {query} | {LABELS[variant]} | {read_text} | {share} | {count(variant, 'num_splits')} | "
+                f"{count(variant, 'iceberg_runtime_predicate_tasks')} | "
+                f"{count(variant, 'iceberg_runtime_file_tasks_pruned')} | "
+                f"{count(variant, 'iceberg_runtime_row_groups_pruned')} "
+                f"({count(variant, 'iceberg_runtime_row_groups_pruned_live')}) | "
+                f"{count(variant, 'iceberg_runtime_predicate_refreshes')} | "
+                f"{count(variant, 'iceberg_runtime_decoder_rebuilds')} |"
             )
 
     return 0

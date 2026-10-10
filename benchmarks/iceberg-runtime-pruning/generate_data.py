@@ -30,6 +30,8 @@ from pyspark.sql import functions as F
 ROWS = int(os.environ.get("BENCH_ROWS", "16000000"))
 FILES = int(os.environ.get("BENCH_FILES", "16"))
 ROW_GROUP_BYTES = os.environ.get("BENCH_ROW_GROUP_BYTES", str(8 * 1024 * 1024))
+SPLIT_BYTES = os.environ.get("BENCH_SPLIT_BYTES", str(128 * 1024 * 1024))
+PROFILE = os.environ.get("BENCH_PROFILE", "smoke")
 DIM_START = ROWS * 3 // 5
 
 PROPERTIES = {
@@ -40,6 +42,7 @@ PROPERTIES = {
     "write.delete.mode": "merge-on-read",
     "write.update.mode": "merge-on-read",
     "write.merge.mode": "merge-on-read",
+    "read.split.target-size": SPLIT_BYTES,
 }
 
 
@@ -70,7 +73,16 @@ def main():
         spark.range(DIM_START, DIM_START + 256, 2).select(F.col("id").cast("int").alias("id")),
         "dim",
     )
-    for table in ["fact_sorted", "fact_pos_deletes", "fact_unsorted", "dim"]:
+    tables = ["fact_sorted", "fact_pos_deletes", "fact_unsorted", "dim"]
+    if PROFILE == "extended":
+        # A full-domain dimension exercises non-selective joins without a large broadcast.
+        write(spark.range(ROWS).select(F.col("id").cast("int").alias("id")).repartition(FILES), "dim_all")
+        # Old INT physical files coexist with newly written LONG files after promotion.
+        write(base.filter(F.col("id") < ROWS // 2).repartitionByRange(FILES, "id").sortWithinPartitions("id"), "fact_evolved")
+        spark.sql("ALTER TABLE bench.db.fact_evolved ALTER COLUMN id TYPE BIGINT")
+        base.filter(F.col("id") >= ROWS // 2).withColumn("id", F.col("id").cast("long")).repartitionByRange(FILES, "id").sortWithinPartitions("id").writeTo("bench.db.fact_evolved").append()
+        tables += ["dim_all", "fact_evolved"]
+    for table in tables:
         files = spark.sql(f"SELECT count(*), sum(file_size_in_bytes) FROM bench.db.{table}.files").first()
         deletes = spark.sql(f"SELECT count(*) FROM bench.db.{table}.delete_files").first()[0]
         print(f"TABLE {table} data_files={files[0]} bytes={files[1]} delete_files={deletes}")

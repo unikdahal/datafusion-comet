@@ -29,7 +29,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import summarize
-from workloads import experiment
+from workloads import EXTENDED_QUERIES, QUERIES, experiment
 
 
 def fixture():
@@ -39,6 +39,7 @@ def fixture():
             "query": query["query"], "sql_sha256": query["sql_sha256"],
             "variant": variant, "round": round_id, "rep": rep,
             "checksum": "a" * 16, "rows": 1,
+            "schema_json": '{"type":"struct","fields":[]}',
             "plan_ms": 1.0, "exec_ms": 10.0, "total_ms": 11.0,
             "bytes_scanned": 100,
         }
@@ -78,7 +79,7 @@ class CompletenessTests(unittest.TestCase):
         self.reject(self.records + [self.records[0]])
 
     def test_results_and_counts_must_agree(self):
-        for field, value in (("checksum", "b" * 16), ("rows", 2)):
+        for field, value in (("checksum", "b" * 16), ("rows", 2), ("schema_json", '{"type":"long"}')):
             with self.subTest(field=field):
                 records = copy.deepcopy(self.records)
                 records[0][field] = value
@@ -90,7 +91,8 @@ class CompletenessTests(unittest.TestCase):
             "round": [-1, 2, True, "0"], "rep": [-1, 2, False, 0.5],
             "checksum": ["", "z" * 16, 123], "rows": [-1, True, 1.5, "1"],
             "sql_sha256": ["b" * 64, None],
-            "plan_ms": [-1, True, "1", float("nan"), float("inf")],
+            "schema_json": [None, "", {}],
+            "plan_ms": [-1, True, "1", float("nan"), float("inf"), 10 ** 400],
             "exec_ms": [0, -1, False, "10", float("nan"), float("inf")],
             "total_ms": [-1, 12, True, "11", float("nan"), float("inf")],
             "bytes_scanned": [-1, True, 0.5, "100"],
@@ -143,7 +145,7 @@ class CompletenessTests(unittest.TestCase):
             for records in cases:
                 results.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
                 stdout, stderr = io.StringIO(), io.StringIO()
-                with patch("sys.argv", ["summarize.py", str(results), "--manifest", str(manifest)]), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                with patch("sys.argv", ["summarize.py", str(results), "--manifest", str(manifest), "--oracle", str(results)]), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     self.assertEqual(summarize.main(), 1)
                 self.assertEqual(stdout.getvalue(), "")
                 self.assertIn("validation failed", stderr.getvalue())
@@ -153,10 +155,61 @@ class CompletenessTests(unittest.TestCase):
             results, manifest = Path(directory) / "results.jsonl", Path(directory) / "manifest.json"
             results.write_text("".join(json.dumps(r) + "\n" for r in self.records), encoding="utf-8")
             manifest.write_text(json.dumps(self.manifest), encoding="utf-8")
+            oracle = Path(directory) / "oracle.jsonl"
+            oracle.write_text("".join(json.dumps(r) + "\n" for r in self.oracle()), encoding="utf-8")
             stdout = io.StringIO()
-            with patch("sys.argv", ["summarize.py", str(results), "--manifest", str(manifest)]), contextlib.redirect_stdout(stdout):
+            with patch("sys.argv", ["summarize.py", str(results), "--manifest", str(manifest), "--oracle", str(oracle)]), contextlib.redirect_stdout(stdout):
                 self.assertEqual(summarize.main(), 0)
             self.assertIn("Speedup", stdout.getvalue())
+            self.assertIn("n/a", stdout.getvalue())
+
+    def oracle(self):
+        return [dict(r, variant="spark") for r in self.records if r["variant"] == "main" and r["round"] == 0 and r["rep"] == 0]
+
+    def test_oracle_missing_duplicate_mismatch_and_invalid_records(self):
+        queries, groups = summarize.validate_records(self.records, self.manifest)
+        oracle = self.oracle()
+        summarize.validate_oracle(oracle, queries, groups)
+        for records in ([], oracle[:-1], oracle + [oracle[0]], [None] + oracle[1:]):
+            with self.assertRaises(summarize.ValidationError):
+                summarize.validate_oracle(records, queries, groups)
+        for field, value in (("checksum", "b" * 16), ("rows", 2), ("schema_json", "different"), ("variant", "main"), ("query", "unknown"), ("error", "failed")):
+            records = copy.deepcopy(oracle)
+            records[0][field] = value
+            with self.subTest(field=field), self.assertRaises(summarize.ValidationError):
+                summarize.validate_oracle(records, queries, groups)
+
+
+class RoundBootstrapTests(unittest.TestCase):
+    def test_profiles_have_unique_names_and_retain_legacy_workloads(self):
+        self.assertEqual(len(QUERIES), 9)
+        self.assertEqual(len(EXTENDED_QUERIES), 18)
+        names = [name for name, _ in EXTENDED_QUERIES]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(EXTENDED_QUERIES[:9], QUERIES)
+
+    def test_scope_requires_matching_nonempty_metadata_with_multiplicity(self):
+        scope = [{"native_scan_metadata": ["fact", "dim"]}]
+        self.assertTrue(summarize.same_native_scope(scope, scope))
+        for other in ([{}], [{"native_scan_metadata": []}], [{"native_scan_metadata": ["dim"]}], [{"native_scan_metadata": ["fact", "dim", "dim"]}]):
+            self.assertFalse(summarize.same_native_scope(scope, other))
+
+    def test_shared_round_noise_is_paired_and_repetitions_are_clustered(self):
+        import random
+
+        base = [{"round": r, "exec_ms": value} for r, value in enumerate((10, 100, 1000)) for _ in range(3)]
+        candidate = [dict(record, exec_ms=record["exec_ms"] / 2) for record in base]
+        self.assertEqual(summarize.round_ratio_ci(base, candidate, random.Random(1)), (2.0, 2.0))
+        low, high = summarize.ratio_ci([r["exec_ms"] for r in base], [r["exec_ms"] for r in candidate], random.Random(1))
+        self.assertLess(low, 2.0)
+        self.assertGreater(high, 2.0)
+
+    def test_one_round_or_mismatched_rounds_has_no_paired_interval(self):
+        import random
+
+        records = [{"round": 0, "exec_ms": 1}]
+        self.assertIsNone(summarize.round_ratio_ci(records, records, random.Random(1)))
+        self.assertIsNone(summarize.round_ratio_ci(records, [{"round": 1, "exec_ms": 1}], random.Random(1)))
 
 
 if __name__ == "__main__":
