@@ -99,15 +99,15 @@ reduced reader output, in addition to exact join results.
 
 ## Component boundaries and incremental support
 
-| Component | Responsibility |
-| --- | --- |
-| `join.rs`, `topk.rs`, `aggregate.rs` | Producer eligibility and execution-local publication lifecycle |
-| `safety.rs` | Whether bypassing an expression preserves values, nulls and errors; independent of the storage backend |
-| `iceberg_reader.rs` | Traverse permitted plan nodes and map the producer column to a consistent Iceberg field identity |
-| `iceberg_reader/predicate.rs` | Conservatively translate the published producer expression; unfamiliar shapes fail open |
-| `consumer.rs` | Expose the reader's consumer identity to DataFusion; delegate batches without evaluation |
-| `batch_filter.rs` | Evaluate membership on decoded batches for non-Iceberg join inputs |
-| iceberg-rust runtime reader | Bind publications, validate physical schemas, and prune files, groups, pages and rows |
+| Component                            | Responsibility                                                                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `join.rs`, `topk.rs`, `aggregate.rs` | Producer eligibility and execution-local publication lifecycle                                         |
+| `safety.rs`                          | Whether bypassing an expression preserves values, nulls and errors; independent of the storage backend |
+| `iceberg_reader.rs`                  | Traverse permitted plan nodes and map the producer column to a consistent Iceberg field identity       |
+| `iceberg_reader/predicate.rs`        | Conservatively translate the published producer expression; unfamiliar shapes fail open                |
+| `consumer.rs`                        | Expose the reader's consumer identity to DataFusion; delegate batches without evaluation               |
+| `batch_filter.rs`                    | Evaluate membership on decoded batches for non-Iceberg join inputs                                     |
+| iceberg-rust runtime reader          | Bind publications, validate physical schemas, and prune files, groups, pages and rows                  |
 
 `try_attach_iceberg_join_filter` connects the reader provider and the discoverable
 consumer together. A caller cannot accidentally retain only the provider. The
@@ -142,17 +142,17 @@ and [iceberg_scan.rs](../native/core/src/execution/operators/iceberg_scan.rs).
 
 ## Optimization rationale
 
-| Change | Work avoided |
-| --- | --- |
-| File rejection before opening data or loading deletes | Footer, data and delete-file I/O for provably irrelevant tasks |
-| Shared read lock for an unchanged bound predicate | Serializing parallel tasks merely to reuse a binding |
-| Generation checks at row-group boundaries | Rebinding and rebuilding on every batch; a changed publication makes one pass over remaining groups and one decoder rebuild |
-| Combined planned/runtime Arrow predicate | Decoding shared predicate columns twice |
-| Whole-file proof that every row matches | Re-evaluating a redundant runtime row filter |
-| Shared tasks, lazy task cloning and in-place ordering permutation | Eager copies of all tasks during ordinary execution and additional complete task copies during sorting |
-| Best-first files and descending row groups for MAX/descending TopK | Reading worse candidates before a useful bound exists; unknown bounds retain conservative handling |
-| Original join verifies surviving Iceberg rows directly | A second decoded-batch membership lookup and payload-array filtering |
-| Compact single-column equality-delete sets above eight entries | Building one expression per delete row; supported larger sets compile membership once and use hash lookup per data row |
+| Change                                                             | Work avoided                                                                                                                |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| File rejection before opening data or loading deletes              | Footer, data and delete-file I/O for provably irrelevant tasks                                                              |
+| Shared read lock for an unchanged bound predicate                  | Serializing parallel tasks merely to reuse a binding                                                                        |
+| Generation checks at row-group boundaries                          | Rebinding and rebuilding on every batch; a changed publication makes one pass over remaining groups and one decoder rebuild |
+| Combined planned/runtime Arrow predicate                           | Decoding shared predicate columns twice                                                                                     |
+| Whole-file proof that every row matches                            | Re-evaluating a redundant runtime row filter                                                                                |
+| Shared tasks, lazy task cloning and in-place ordering permutation  | Eager copies of all tasks during ordinary execution and additional complete task copies during sorting                      |
+| Best-first files and descending row groups for MAX/descending TopK | Reading worse candidates before a useful bound exists; unknown bounds retain conservative handling                          |
+| Original join verifies surviving Iceberg rows directly             | A second decoded-batch membership lookup and payload-array filtering                                                        |
+| Compact single-column equality-delete sets above eight entries     | Building one expression per delete row; supported larger sets compile membership once and use hash lookup per data row      |
 
 These changes reduce specific work; they do not establish a wall-clock speedup.
 See [runtime_stream.rs](https://github.com/unikdahal/iceberg-rust/blob/adaptive-ci/runtime-pruning-rewrite-20261006/crates/iceberg/src/arrow/reader/runtime_stream.rs),

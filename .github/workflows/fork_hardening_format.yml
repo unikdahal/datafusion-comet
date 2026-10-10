@@ -19,7 +19,7 @@ name: Fork Hardening Format Artifacts
 
 on:
   push:
-    branches: ['adaptive-ci/runtime-pruning-final']
+    branches: ["adaptive-ci/runtime-pruning-final"]
   workflow_dispatch:
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
           components: rustfmt
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: "24"
       - name: Record formatting patch
         run: |
           cd native && cargo fmt --all
