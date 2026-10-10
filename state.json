@@ -413,5 +413,52 @@
  "last_campaign": {
   "run": 37943700291,
   "result": "candidate 0 validation failures; baseline strjoin wrong results (known main bug #42); fuzz suite did NOT run: harness bug in fuzz extension (b87833475) referencing non-existent column `raw` in data generation \u2014 fix before next campaign"
- }
+ },
+ "phase": "UPSTREAMABILITY (user 2026-10-10). Loop stopped; no schedule.",
+ "final_prs": {
+  "iceberg-rust": "fork PR #27 adaptive-ci/runtime-pruning-final @ 5aefebcb1 (on synced main b2e90754b); CI blocked: Actions paused on iceberg fork",
+  "datafusion-comet": "fork PR #43 adaptive-ci/runtime-pruning-final @ 4515c036c (on synced main bfacc43a5; pins iceberg 5aefebcb1); full CI run 38027242023"
+ },
+ "closed_fork_prs": {
+  "iceberg-rust": [
+   5,
+   6,
+   7,
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   16,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24,
+   25,
+   26
+  ],
+  "datafusion-comet": [
+   26,
+   27,
+   28,
+   29,
+   30,
+   32,
+   33,
+   34,
+   37,
+   38,
+   39
+  ]
+ },
+ "plan_files_local_only": [
+  "rp-work/reports/upstream-plan.md",
+  "rp-work/reports/epic-drafts.md (contain upstream numbers; not pushed)"
+ ]
 }
