@@ -360,7 +360,7 @@ class UtilsSuite extends CometTestBase {
         }
         original.setValueCount(rows.size)
         slicedValues.loadFieldBuffers(
-          new ArrowFieldNode(originalValues.getValueCount, originalValues.getNullCount),
+          new ArrowFieldNode(originalValues.getValueCount.toLong, originalValues.getNullCount.toLong),
           originalValues.getFieldBuffers)
         sliced.loadFieldBuffers(
           new ArrowFieldNode(8, 2),

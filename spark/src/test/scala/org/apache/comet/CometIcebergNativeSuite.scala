@@ -1496,9 +1496,7 @@ class CometIcebergNativeSuite
                       .filter(_.getPath.toDotString == "id")
                       .flatMap(_.getEncodings.asScala)
                   }
-                  val usesDictionary = encodings.exists(encoding =>
-                    encoding == org.apache.parquet.column.Encoding.RLE_DICTIONARY ||
-                      encoding == org.apache.parquet.column.Encoding.PLAIN_DICTIONARY)
+                  val usesDictionary = encodings.exists(_.usesDictionary())
                   assert(usesDictionary == dictionary, s"Unexpected string encodings: $encodings")
                 } finally {
                   reader.close()
@@ -2050,9 +2048,7 @@ class CometIcebergNativeSuite
                     .filter(column => Set("hi", "lo").contains(column.getPath.toDotString))
                     .flatMap(_.getEncodings.asScala)
                 }
-                val usesDictionary = encodings.exists(encoding =>
-                  encoding == org.apache.parquet.column.Encoding.RLE_DICTIONARY ||
-                    encoding == org.apache.parquet.column.Encoding.PLAIN_DICTIONARY)
+                val usesDictionary = encodings.exists(_.usesDictionary())
                 assert(usesDictionary == dictionary, s"Unexpected string encodings: $encodings")
               } finally {
                 reader.close()
