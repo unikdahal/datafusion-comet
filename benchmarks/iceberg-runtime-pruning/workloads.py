@@ -45,6 +45,29 @@ QUERIES = [
     ),
 ]
 
+EXTENDED_QUERIES = QUERIES + [
+    ("max_sorted", "SELECT max(id) FROM bench.db.fact_sorted"),
+    ("max_unsorted", "SELECT max(id) FROM bench.db.fact_unsorted"),
+    ("topk_desc_sorted", "SELECT id, value, payload FROM bench.db.fact_sorted ORDER BY id DESC LIMIT 10"),
+    ("join_evolved", JOIN.format(table="fact_evolved")),
+    ("topk_evolved", TOPK.format(table="fact_evolved")),
+    ("min_evolved", MIN.format(table="fact_evolved")),
+    ("scan_evolved_control", "SELECT count(*), sum(value) FROM bench.db.fact_evolved"),
+] + [
+    (
+        f"join_nonselective_{layout}",
+        "SELECT /*+ SHUFFLE_HASH(d) */ count(*), sum(f.value), sum(length(f.payload)) "
+        f"FROM bench.db.fact_{layout} f JOIN bench.db.dim_all d ON f.id = d.id",
+    )
+    for layout in ("sorted", "unsorted")
+]
+
+PROFILE = os.environ.get("BENCH_PROFILE", "smoke")
+if PROFILE == "extended":
+    QUERIES = EXTENDED_QUERIES
+elif PROFILE != "smoke":
+    raise ValueError(f"unknown benchmark profile: {PROFILE}")
+
 
 def sql_digest(sql):
     return hashlib.sha256(sql.encode("utf-8")).hexdigest()
@@ -55,6 +78,7 @@ def experiment(rounds, reps):
         raise ValueError("rounds and reps must be positive integers")
     return {
         "protocol_version": 1,
+        "profile": PROFILE,
         "variants": ["main", "off", "on"],
         "rounds": rounds,
         "reps": reps,

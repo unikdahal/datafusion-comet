@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import time
+from pathlib import Path
 
 from pyspark.sql import SparkSession
 from workloads import QUERIES, sql_digest
@@ -46,6 +47,7 @@ SCAN_METRICS = [
     "iceberg_runtime_row_groups_pruned",
     "iceberg_runtime_row_groups_pruned_live",
     "iceberg_runtime_predicate_refreshes",
+    "iceberg_runtime_decoder_rebuilds",
 ]
 
 
@@ -58,27 +60,44 @@ def plan_nodes(node):
 
 def scan_metrics(plan):
     totals = {name: 0 for name in SCAN_METRICS}
+    missing = set()
     scans = 0
+    locations = []
     for node in plan_nodes(plan):
         if node.getClass().getSimpleName() != "CometIcebergNativeScanExec":
             continue
         scans += 1
+        try:
+            locations.append(str(node.metadataLocation()))
+        except Exception:
+            # Older/newer baseline APIs may omit the accessor. Unknown scope
+            # must never become an apparent reader-I/O improvement.
+            locations.append(None)
         metrics = node.metrics()
         for name in SCAN_METRICS:
             if metrics.contains(name):
                 totals[name] += metrics.apply(name).value()
+            else:
+                missing.add(name)
+    for name in SCAN_METRICS:
+        if scans == 0 or name in missing:
+            totals[name] = None
     totals["native_iceberg_scans"] = scans
+    totals["native_scan_metadata"] = sorted(locations) if all(locations) else None
     return totals
 
 
-def run(spark, name, sql):
-    df = spark.sql(sql)
+def run(spark, name, sql, identity):
     started = time.perf_counter()
+    df = spark.sql(sql)
     plan = df._jdf.queryExecution().executedPlan()
     planned = time.perf_counter()
     rows = df.collect()
     finished = time.perf_counter()
     result = repr([tuple(row) for row in rows])
+    plans = Path(os.environ.get("BENCH_PLAN_DIR", "plans"))
+    plans.mkdir(parents=True, exist_ok=True)
+    (plans / f"{VARIANT}-{ROUND}-{identity}-{name}.txt").write_text(plan.toString(), encoding="utf-8")
     return {
         "query": name,
         "sql_sha256": sql_digest(sql),
@@ -87,19 +106,25 @@ def run(spark, name, sql):
         "total_ms": (finished - started) * 1000.0,
         "rows": len(rows),
         "checksum": hashlib.sha256(result.encode()).hexdigest()[:16],
+        "schema_json": df.schema.json(),
         **scan_metrics(plan),
     }
 
 
 def main():
     spark = SparkSession.builder.appName(f"iceberg-runtime-pruning-{VARIANT}").getOrCreate()
+    plans = Path(os.environ.get("BENCH_PLAN_DIR", "plans"))
+    plans.mkdir(parents=True, exist_ok=True)
+    settings = {key: value for key, value in spark.sparkContext.getConf().getAll()
+                if key.startswith(("spark.comet.", "spark.sql.", "spark.memory.", "spark.shuffle.", "spark.plugins"))}
+    (plans / f"{VARIANT}-{ROUND}-settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
     with open(OUTPUT, "a", encoding="utf-8") as out:
         for name, sql in QUERIES:
-            run(spark, name, sql)
+            run(spark, name, sql, "warmup")
         for rep in range(REPS):
             shift = (ROUND * REPS + rep) % len(QUERIES)
             for name, sql in QUERIES[shift:] + QUERIES[:shift]:
-                record = run(spark, name, sql)
+                record = run(spark, name, sql, f"rep-{rep}")
                 record.update({"variant": VARIANT, "round": ROUND, "rep": rep})
                 out.write(json.dumps(record) + "\n")
                 out.flush()
