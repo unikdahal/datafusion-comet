@@ -97,7 +97,8 @@ eligibility and reader restrictions.
 | -------------------------------------- | ----------------------------------------------------------------- |
 | `dynamic_filter_join_rows_evaluated`   | Probe rows evaluated by the runtime filter.                       |
 | `dynamic_filter_join_rows_pruned`      | Probe rows rejected by that filter before the hash probe.         |
-| `dynamic_filter_join_rows_bypassed`    | Probe rows passed through while the runtime filter is inactive.   |
+| `dynamic_filter_join_rows_bypassed`    | Probe rows bypassing runtime filter evaluation, including adaptive bypass. |
+| `dynamic_filter_join_bypass_switches`  | Transitions into adaptive bypass when decoded filtering rejects too few rows. |
 | `dynamic_filter_join_eval_time`        | Time evaluating the runtime filter.                               |
 | `dynamic_filter_join_filters_attached` | Executions that attach their runtime filter to a native reader.   |
 | `dynamic_filter_join_filters_skipped`  | Executions whose probe input is ineligible for reader attachment. |
@@ -133,7 +134,8 @@ This feature adds no separate decoded-batch filter or evaluated/pruned row count
 
 ### Native Iceberg Scans
 
-With a join, TopK or MIN/MAX runtime filter attached, native Iceberg scans also report:
+Every native Iceberg scan registers these metrics. They remain zero when the corresponding
+runtime pruning activity is absent:
 
 | Metric                                   | Description                                                           |
 | ---------------------------------------- | --------------------------------------------------------------------- |
@@ -142,6 +144,7 @@ With a join, TopK or MIN/MAX runtime filter attached, native Iceberg scans also 
 | `iceberg_runtime_row_groups_pruned`      | Row groups skipped by runtime predicate statistics.                   |
 | `iceberg_runtime_row_groups_pruned_live` | The part of those row groups skipped after a refresh during a file.   |
 | `iceberg_runtime_predicate_refreshes`    | Newer runtime predicates picked up at row-group boundaries.           |
+| `iceberg_runtime_decoder_rebuilds`      | Decoder rebuilds needed to adopt refreshed runtime predicates.        |
 
 Compare `bytes_scanned` with the runtime filters disabled to assess the reader savings.
 

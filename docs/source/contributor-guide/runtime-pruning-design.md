@@ -69,11 +69,10 @@ Spark / Iceberg Java tasks
   splits continue through the existing Iceberg reader path.
 
 The attachment and expression rules are in
-[iceberg_reader.rs](../native/core/src/execution/operators/dynamic_filter/iceberg_reader.rs).
+[iceberg_reader.rs](../../../native/core/src/execution/operators/dynamic_filter/iceberg_reader.rs).
 The reader contracts and schema checks are in
-[runtime_predicate.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_predicate.rs),
-[pipeline.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/pipeline.rs)
-and [page_index_evaluator.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/expr/visitors/page_index_evaluator.rs).
+`iceberg::arrow::reader::runtime_predicate`, `iceberg::arrow::reader::pipeline`
+and `iceberg::expr::visitors::page_index_evaluator`.
 
 ## Attachment and lifecycle
 
@@ -151,10 +150,10 @@ and TopK thresholds do not survive into the next execution. EOF, error and
 cancellation release stream-owned state. Reset detaches a scan's old provider
 and ordering. Native Iceberg scans reject nonzero partition indices.
 
-See [join.rs](../native/core/src/execution/operators/dynamic_filter/join.rs),
-[topk.rs](../native/core/src/execution/operators/dynamic_filter/topk.rs),
-[aggregate.rs](../native/core/src/execution/operators/dynamic_filter/aggregate.rs)
-and [iceberg_scan.rs](../native/core/src/execution/operators/iceberg_scan.rs).
+See [join.rs](../../../native/core/src/execution/operators/dynamic_filter/join.rs),
+[topk.rs](../../../native/core/src/execution/operators/dynamic_filter/topk.rs),
+[aggregate.rs](../../../native/core/src/execution/operators/dynamic_filter/aggregate.rs)
+and [iceberg_scan.rs](../../../native/core/src/execution/operators/iceberg_scan.rs).
 
 ## Optimization rationale
 
@@ -178,11 +177,11 @@ file may be visited in reverse for descending bounds. Unknown bounds retain
 task order. Execution with runtime ordering still clones the task list before
 applying the lightweight ranking and in-place permutation. No allocation or
 scheduling benefit beyond these source-level properties has been established.
-See [runtime_stream.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_stream.rs),
-[predicate_visitor.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/predicate_visitor.rs)
-and [caching_delete_file_loader.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/caching_delete_file_loader.rs).
+The Iceberg implementations are in `iceberg::arrow::reader::runtime_stream`,
+`iceberg::arrow::reader::predicate_visitor` and
+`iceberg::arrow::caching_delete_file_loader`.
 
-## Metrics and comparison
+## Metrics
 
 `bytes_scanned` counts ranged reader I/O, including metadata and deletes; it is
 not a measure of physical disk traffic after operating-system caching. Spark
@@ -195,62 +194,22 @@ subset of the total. Scan compute time measures active polling/adaptation;
 producer metrics measure their own operators. Poll, error and drop paths report
 available metric deltas without retaining producer state.
 
-The committed harness captures decoder rebuilds along with the existing scan
-counters. Missing counters are reported as unavailable, and reader-byte ratios
-require the same nonempty native scan metadata locations, including repeated
-tables. Saved plans are still needed to inspect projection and fallback scope.
-Driver planning time includes SQL analysis and physical planning. It does not
-isolate manifest-statistics collection, cache hit/miss cost, retained heap, time
-to first bound or files in flight at publication. Those measurements remain
-required before changing statistics gates, binding caches or concurrency.
-
-Compare the existing and rewritten runtime implementations with the
-[historical detailed benchmark harness](https://github.com/unikdahal/datafusion-comet/blob/a591c3700e2fa4094500eee53ecc8f40ad3e8cce/benchmarks/iceberg-runtime-pruning-detailed/README.md). Its revision defines
-shared generated fixtures, a plain Spark correctness oracle, four balanced rounds
-in fresh JVMs, paired timing intervals, separate planning/execution timings and
-reader counters. Six suites cover sorted selective queries, unsorted/control
-queries, position/equality deletes, schema evolution, TPC-H and deterministic fuzz
-cases, with pinned build revisions and identical settings. Wall-clock distributions,
-reader bytes and decoder rebuilds must be considered together; local CI timings
-do not establish object-store latency improvements.
-
-This historical campaign is distinct from the committed
-[matched smoke and extended harness](../benchmarks/iceberg-runtime-pruning/README.md).
-Preserve original campaign artifacts, query catalogs, seeds, data hashes,
-resolved implementations, oracle records and raw samples when citing results.
-For example, [run 37865998293](https://github.com/unikdahal/datafusion-comet/actions/runs/37865998293)
-passed a targeted 15-query campaign for candidate
-`007080ae028edddf3ca2e360c3d38cf17504edbd` against Apache main
-`412468e2817207eff0c1907d1c4aac8c3f06680d`. It does not validate this revision.
-The later [full campaign 37943700291](https://github.com/unikdahal/datafusion-comet/actions/runs/37943700291)
-failed validation and cannot serve as a complete correctness or performance
-verdict. Query/test totals and speedups require revision-associated raw evidence;
-neither a prior campaign nor a smaller new run proves a final-branch total.
-
 ## Limits and regression coverage
 
 Comet's attachment is task-local; it does not share domains across Spark
 exchanges. Floating keys, general computed keys and fallible expressions receive
 no reader attachment. Iceberg membership translation accepts at most 1,024
-plain literals; larger unsupported shapes fail open. Existing rows, pages and
+plain literals. The join producer separately limits distinct keys to 1,024 and
+source arrays to 16 KiB; duplicate keys can produce more than 1,024 literals.
+The adapter declines oversized membership clauses while retaining usable bounds.
+Larger unsupported shapes fail open. Existing rows, pages and
 groups are never recovered after pruning. Refresh depends on row-group filtering
 being enabled. `TableScan::to_arrow()` does not accept a runtime provider; Comet
-supplies one directly to `ArrowReaderBuilder`. The live decoder currently uses
-the pinned Parquet 59 backport.
+supplies one directly to `ArrowReaderBuilder`.
 
 Regression suites cover nulls, NaNs, signed zeros, schema evolution, dictionary
 columns, missing field IDs, splits, deletes, page selections, concurrent
 publications, failing expressions, resets and stream cancellation. Tests live in
-[Comet's dynamic-filter suite](../native/core/src/execution/operators/dynamic_filter/)
-and [Iceberg's reader suite](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_predicate_tests.rs).
+[Comet's dynamic-filter suite](../../../native/core/src/execution/operators/dynamic_filter/)
+and `iceberg::arrow::reader::runtime_predicate_tests`.
 
-Validation is layered: JVM/native eligibility, predicate translation, physical
-schema binding, reader pruning, exact Spark comparisons, execution lifecycle,
-concurrency/resource behavior and end-to-end performance have separate verdicts.
-The fast synthetic harness workflow checks benchmark evidence completeness
-without Spark; it does not replace reader, native or Spark integration suites.
-All build, test, formatting and benchmark validation for this hardening work runs
-in GitHub Actions. [Base-revision run 38027288909](https://github.com/unikdahal/datafusion-comet/actions/runs/38027288909)
-failed Preflight and skipped the build/integration jobs. Those skipped jobs are
-unvalidated. Every final report must identify its exact revisions, run URLs and
-passed, failed, skipped or unexecuted jobs rather than carrying forward totals.

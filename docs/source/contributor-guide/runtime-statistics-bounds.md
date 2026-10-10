@@ -23,30 +23,27 @@ File statistics are advisory. If collection exceeds a limit, cannot run concurre
 or fails, native Iceberg keeps row-group, page and row runtime pruning. Spark's tasks,
 splits, residuals and delete associations remain authoritative.
 
-The driver owns one stable Guava cache with a **64 MiB estimated weight ceiling**.
+`spark.comet.scan.icebergNative.runtimeStats.enabled` controls both collection and caching.
+When disabled, Comet skips advisory driver file statistics and retains reader runtime pruning.
+The only public resource limit is `spark.comet.scan.icebergNative.runtimeStats.maxFiles`.
+
+The driver owns one stable Guava cache with an internal **64 MiB estimated weight ceiling**.
 Its keys contain immutable metadata location, pinned snapshot ID, sorted field IDs,
-and the requesting configuration's entry and collection limits. They retain no
+and the requesting configuration's selected-file limit. They retain no
 session or SQLConf objects. Equal policies may share immutable statistics; changing
 a session's policy never replaces another policy's cache. Policies compete for the
 same process budget, so their useful entries can still be evicted.
 
-`spark.comet.scan.icebergNative.runtimeStatsCache.maxEntries` remains an upper bound
-on entries for each policy. Each entry is charged at least the process budget divided
-by that limit, rounded up. Actual estimated weight takes precedence. This conservative
-floor enforces entry count without a second cache or eviction registry; small entries
-may use less actual heap than their charged weight.
-
-Collection has two additional session limits, applied with caching enabled or disabled:
+Collection applies a public file limit and an internal byte limit:
 
 - `spark.comet.scan.icebergNative.runtimeStats.maxFiles`: 4096 distinct selected files
   by default. Multiple splits of one file count once. An oversized selection stops
   before manifest replanning, so repeated calls do not repeat that planning work.
-- `spark.comet.scan.icebergNative.runtimeStats.maxBytes`: 8 MiB estimated bytes by
-  default, configurable up to the shared 64 MiB ceiling. Collection stops at the
+- An internal 8 MiB estimated byte budget per collection. Collection stops at the
   first file that would exceed the budget, closes the plan, and returns no partial
   statistics. A bounded rejection entry avoids replanning that snapshot/field-ID/policy
   combination until eviction. This deliberately also declines smaller selections of
-  that combination; changing collection limits uses an independent policy.
+  that combination; changing the selected-file limit uses an independent policy.
 
 These are conservative resource defaults, not performance thresholds derived from
 benchmarks: 64 MiB allows eight entries at the default 8 MiB limit; 4096 files at
@@ -61,8 +58,8 @@ Only one manifest-statistics collection is admitted per driver at a time. Anothe
 miss declines advisory file statistics without waiting. Cache hits do not need the
 collection permit. Selected-path sets and returned query metadata are bounded per
 call; live query metadata and independent Iceberg planning allocations are owned by
-the queries, not included in cache retention. Disabling caching bypasses positive
-and rejection entries, but keeps the collection limits and admission rule.
+the queries, not included in cache retention. Disabling runtime statistics skips
+collection and cache lookups entirely.
 
 Cache hits check coverage and build the result using only selected-path lookups.
 Incomplete cached coverage triggers replanning; an incomplete new plan is never
@@ -85,7 +82,4 @@ comma remains accepted.
 
 `IcebergReflectionSuite` covers selected-file gates, byte rejection, cleanup,
 retained-weight accounting, concurrent misses, alternating policies, eviction and
-direct subset lookup. Its many-file test prints observed planning time and charged
-cache retention in GitHub Actions. These observations are diagnostics, not heap
-profiling or an end-to-end speedup benchmark. The fork adaptive validation workflow
-also runs the serde, runtime-key type and scan-rule regressions on Spark 3.5 and 4.1.
+direct subset lookup.

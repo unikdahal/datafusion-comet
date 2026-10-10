@@ -42,9 +42,14 @@ limit, or to a non-positive value to convert every eligible join regardless of s
 ### Join Runtime Filters
 
 Set `spark.comet.exec.join.dynamicFilter.enabled=true` to try experimental native hash join runtime
-filtering. It is disabled by default. Eligible joins are inner and semi joins with one direct signed
-integer key (`TINYINT`, `SMALLINT`, `INT`, or `BIGINT`; native Iceberg probe sides also accept `DATE`)
-and one native partition per input within each task. Anti and outer joins keep their existing path,
+filtering. It is disabled by default. Eligible joins are inner and semi joins with one direct key
+and one native partition per input within each task. Native Parquet reader attachment supports
+signed integer keys (`TINYINT`, `SMALLINT`, `INT`, or `BIGINT`). Native Iceberg reader attachment
+supports `INT`, `BIGINT`, `DATE`, `TIMESTAMP`, `TIMESTAMP_NTZ`, `DECIMAL` and `UTF8_BINARY` strings.
+Join keys must have matching types, including the same precision and scale for `DECIMAL`.
+Decimal decoded-batch filtering is also available when reader attachment is unavailable.
+Fixed `CHAR`, padding, non-default collations and computed key lineage prevent Iceberg attachment.
+Anti and outer joins keep their existing path,
 because their probe rows without a match still reach the output.
 Both broadcast and shuffled hash joins support either Spark build side. Unsupported joins keep
 their existing execution path.
@@ -57,9 +62,17 @@ probe column through the task field ID before creating the runtime predicate. Th
 checks and residual runtime filter remain in place.
 The original join still verifies matches, including any hash collisions admitted by the filter.
 Limits prevent reader attachment. Parquet readers attach only through direct-column `IS NOT NULL`
-checks and no projections; native Iceberg readers also attach through other deterministic filters
-and through deterministic projections that pass the key column through, because a row the runtime
-predicate rejects can never reach the join's output.
+checks and no projections; native Iceberg readers also attach through filters and projections
+that are row-local and cannot raise errors, with projections passing the key column through.
+Determinism alone is insufficient: casts, division and other fallible expressions prevent
+attachment. See the [expression safety contract](
+../../../contributor-guide/runtime-pruning-design.md#safety-contract).
+
+Decoded-batch filtering adapts to observed selectivity. If it rejects too few rows, it bypasses
+evaluation for most batches and periodically samples again. A new predicate generation resets
+that feedback. Bypassed rows still reach the original join, which verifies every match; reader
+pruning remains independent. The `dynamic_filter_join_rows_bypassed` and
+`dynamic_filter_join_bypass_switches` metrics show this behavior.
 
 For native Parquet, schema-conversion safeguards still apply: runtime reader pruning is disabled
 for each file whose projected or statically filtered columns require schema adaptations beyond
@@ -115,10 +128,13 @@ accumulators and modes.
 ## Local TopK Fusion
 
 Set `spark.comet.exec.topK.fusion.enabled=true` to run an eligible local TopK in the same native
-execution as its Parquet scan. This experimental optimization is disabled by default. It currently
-supports a direct native Parquet scan ordered by one signed integer column (`TINYINT`, `SMALLINT`,
-`INT`, or `BIGINT`). Both sort directions and null orderings are supported. Other inputs use the
-existing TopK execution path.
+execution as its Parquet or Iceberg scan. This experimental optimization is disabled by default.
+It supports a direct native Parquet scan ordered by one signed integer column (`TINYINT`, `SMALLINT`,
+`INT`, or `BIGINT`). Native Iceberg scans also support `DATE`, `TIMESTAMP`, `TIMESTAMP_NTZ` and
+`UTF8_BINARY` strings as the first sort key, with further direct sort keys allowed. Both sort
+directions are supported. Integer, date and timestamp keys support either null ordering;
+string reader pruning supports only `NULLS LAST`. Fixed `CHAR`, padding, non-default collations
+and computed string lineage prevent reader attachment. Other inputs use the existing TopK path.
 
 Each scan partition keeps enough candidates for both `LIMIT` and `OFFSET`. With multiple partitions,
 Comet shuffles those candidates and performs the final TopK. With one partition, it reuses the local
@@ -173,16 +189,29 @@ rejected rows. Positional and equality deletes keep their original semantics. A 
 be applied to a file, for example after schema evolution, is ignored for that file.
 
 To prune files before opening them, Comet re-plans only the eligible Iceberg reader input on the
-driver and retains statistics only for the exact direct `INT`, `BIGINT` or `DATE` runtime-filter
-key.
+driver and retains statistics only for the exact direct runtime-filter key: `INT`, `BIGINT`,
+`DATE`, `TIMESTAMP`, `TIMESTAMP_NTZ`, `DECIMAL` or `UTF8_BINARY` string. Decimal joins require
+matching precision and scale. Decimal statistics support does not enable decimal TopK or MIN/MAX
+pruning. Fixed `CHAR`, padding and non-default collations are excluded. String TopK reader
+pruning requires `NULLS LAST`.
 For joins this is the probe side only. If the linked Iceberg version cannot request selected column
 statistics, Comet skips whole-file pruning and keeps row-group runtime pruning instead of loading
 statistics for every column.
 
+`spark.comet.scan.icebergNative.runtimeStats.enabled` controls advisory driver statistics
+collection and caching. Disabling it keeps row-group, page and row runtime pruning.
+`spark.comet.scan.icebergNative.runtimeStats.maxFiles` limits collection to 4096 distinct
+selected files by default. Internal byte budgets and one collection at a time per driver bound
+resource use; oversized scans and concurrent cache misses keep reader pruning without file
+statistics. See [driver resource bounds](
+../../../contributor-guide/runtime-statistics-bounds.md).
+
 Iceberg scans add three behaviors:
 
-- A build side with at most 1024 distinct keys is applied as an exact `IN` predicate as well as a
-  range, so keys spread across the key range can still prune row groups and pages.
+- Join membership publication admits at most 1024 distinct keys and a 16 KiB source array.
+  The Iceberg adapter separately accepts at most 1024 literals. Duplicate keys can exceed that
+  literal limit; the adapter then declines membership pruning, while usable range bounds remain.
+  An accepted `IN` predicate can prune keys spread across the range.
 - A local TopK may order by further direct columns after an eligible first key; only the first key
   bounds the reader.
 - A scan feeding a TopK or MIN/MAX reads its files best-first for that bound: lowest lower bound
@@ -194,8 +223,11 @@ Iceberg scans add three behaviors:
 
 Set `spark.comet.exec.aggregate.dynamicFilter.enabled=true` to pass the improving bound of a
 partial `MIN` or `MAX` aggregate to its native Iceberg reader. This option is experimental and
-disabled by default. It supports one direct `INT`, `BIGINT` or `DATE` argument, no `GROUP BY`, no
-aggregate filter, and one native input partition. Each execution creates a fresh bound. Rows that
+disabled by default. It supports one direct `INT`, `BIGINT`, `DATE`, `TIMESTAMP`, `TIMESTAMP_NTZ`
+or `UTF8_BINARY` string argument, no `GROUP BY`, `DISTINCT`, aggregate filter or aggregate
+ordering, and one native input partition. Fixed `CHAR`, padding, non-default collations and
+computed string lineage prevent reader attachment. Decimal arguments do not support this pruning.
+Each execution creates a fresh bound. Rows that
 cannot improve the current minimum or maximum are skipped by the reader; the aggregate still
 computes the result. Disable Iceberg aggregate pushdown
 (`spark.sql.iceberg.aggregate-push-down.enabled=false`) when comparing, because Iceberg can answer
