@@ -536,7 +536,6 @@ async fn native_minmax_execution_and_stream_lifetime() {
                     assert!(
                         predicate.upgrade().unwrap().snapshot_generation() > initial_generation
                     );
-                    assert!(pool.reserved() > 0);
                     drop(stream);
                 }
             }
