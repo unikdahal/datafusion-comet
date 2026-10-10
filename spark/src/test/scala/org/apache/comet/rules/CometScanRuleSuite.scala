@@ -22,7 +22,10 @@ package org.apache.comet.rules
 import scala.collection.mutable.ListBuffer
 import scala.util.Random
 
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.comet._
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive.QueryStageExec
@@ -70,7 +73,7 @@ class CometScanRuleSuite extends CometTestBase {
     import org.apache.spark.sql.catalyst.expressions._
     import org.apache.comet.serde.QueryPlanSerde.hasCharPruningKey
     val directChar = AttributeReference("char", CharType(8))()
-    val directInput = LocalTableScanExec(Seq(directChar), Nil)
+    val directInput = OutputOnlyLeafExec(Seq(directChar))
     assert(hasCharPruningKey(directInput, Seq(directChar)))
     assert(!CometScanRule.isSafeRuntimeStatsExpression(EqualTo(directChar, directChar)))
 
@@ -78,13 +81,13 @@ class CometScanRuleSuite extends CometTestBase {
       .putString("__CHAR_VARCHAR_TYPE_STRING", "char(8)")
       .build()
     val padded = AttributeReference("padded", StringType, metadata = metadata)()
-    val input = LocalTableScanExec(Seq(padded), Nil)
+    val input = OutputOnlyLeafExec(Seq(padded))
     val alias = Alias(padded, "renamed")(explicitMetadata = Some(Metadata.empty))
     val project = ProjectExec(Seq(alias), input)
     assert(hasCharPruningKey(project, Seq(alias.toAttribute)))
 
     val binary = AttributeReference("binary", StringType)()
-    assert(!hasCharPruningKey(LocalTableScanExec(Seq(binary), Nil), Seq(binary)))
+    assert(!hasCharPruningKey(OutputOnlyLeafExec(Seq(binary)), Seq(binary)))
     assert(CometScanRule.isSafeRuntimeStatsExpression(EqualTo(binary, binary)))
   }
 
@@ -311,4 +314,10 @@ class CometScanRuleSuite extends CometTestBase {
     assert(!DataTypeSupport.hasCaseInsensitiveDuplicateFieldNames(distinct))
   }
 
+}
+
+/** A planning-only leaf with a fixed output, constructible on every supported Spark version. */
+private case class OutputOnlyLeafExec(output: Seq[Attribute]) extends LeafExecNode {
+  override protected def doExecute(): RDD[InternalRow] =
+    throw new UnsupportedOperationException("planning-only test node")
 }
