@@ -23,7 +23,7 @@ use crate::map_funcs::{spark_map_sort, SparkMapFromArrays};
 use crate::math_funcs::abs::abs;
 use crate::math_funcs::checked_arithmetic::{checked_add, checked_div, checked_mul, checked_sub};
 use crate::math_funcs::log::spark_log;
-use crate::math_funcs::modulo_expr::spark_modulo;
+use crate::math_funcs::modulo_expr::create_spark_modulo_udf;
 use crate::math_funcs::pow::spark_pow;
 use crate::math_funcs::signum::spark_signum;
 use crate::math_funcs::sqrt::spark_sqrt;
@@ -212,8 +212,7 @@ pub fn create_comet_physical_fun_with_eval_mode(
             make_comet_scalar_udf!("isnan", func, without data_type)
         }
         "spark_modulo" => {
-            let func = Arc::new(spark_modulo);
-            make_comet_scalar_udf!("spark_modulo", func, without data_type, fail_on_error)
+            Ok(create_spark_modulo_udf(data_type, fail_on_error))
         }
         "abs" => {
             let func = Arc::new(abs);
