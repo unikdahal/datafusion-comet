@@ -69,7 +69,6 @@ jobs:
         with:
           workspaces: "native -> target"
           prefix-key: "fast-rust"
-          cache-all-targets: "true"
 
       - name: Cache Maven dependencies
         uses: actions/cache/restore@v6
