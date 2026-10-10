@@ -46,7 +46,7 @@ jobs:
           cargo update --workspace
           cargo fmt --all
           cd ..
-          npx --yes prettier --write docs/runtime-pruning-design.md benchmarks/iceberg-runtime-pruning/README.md .github/workflows/fork_hardening_format.yml
+          npx --yes prettier --write docs/runtime*.md benchmarks/iceberg-runtime-pruning/README.md .github/workflows/fork_hardening_format.yml
           git diff > hardening-format.patch
       - uses: actions/upload-artifact@v7
         with:
@@ -54,3 +54,26 @@ jobs:
           path: hardening-format.patch
       - name: Require formatted sources
         run: test ! -s hardening-format.patch
+
+  scala-format:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Record Scala formatting patch
+        run: |
+          ./mvnw -B spotless:apply -Pspark-3.5
+          git diff -- spark common > hardening-scala-format.patch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hardening-scala-format
+          path: hardening-scala-format.patch
+      - name: Require formatted Scala sources
+        run: test ! -s hardening-scala-format.patch
