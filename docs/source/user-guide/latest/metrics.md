@@ -116,21 +116,22 @@ fusion option and reader restrictions.
 
 | Metric                                 | Description                                                                  |
 | -------------------------------------- | ---------------------------------------------------------------------------- |
-| `dynamic_filter_topk_filters_attached` | Executions that attach their live TopK threshold to a native Parquet reader. |
+| `dynamic_filter_topk_filters_attached` | Live TopK threshold attachments to native Parquet or Iceberg readers.         |
 | `dynamic_filter_topk_filters_skipped`  | Eligible TopK executions whose input cannot accept reader attachment.        |
 
 These counters belong to the local TopK. An attached predicate may prune nothing, and a file's
-schema adaptation can disable it to preserve conversion errors. Reader work remains on the scan:
+schema adaptation can disable it to preserve conversion errors. For Parquet, reader work remains on the scan:
 `output_rows` counts rows emitted by the scan, `bytes_scanned` measures requested data/Bloom-filter
 ranges (excluding footer and page-index reads), and page and decoder filtering use the existing
 `page_index_rows_pruned` and `pushdown_rows_pruned` counters.
 
-Row groups skipped by runtime pruning within a file increment `row_groups_pruned_dynamic_filter`.
+For Parquet, row groups skipped by runtime pruning within a file increment `row_groups_pruned_dynamic_filter`.
 When later files open, the reader can prune using the TopK threshold already available; those groups
 increment `row_groups_pruned_statistics`. With one row group per file, the dynamic counter can remain
 zero even when TopK skips most later groups. The statistics counter also includes pruning by other
 predicates, so compare both counters and `bytes_scanned` with filtering disabled to assess TopK savings.
 This feature adds no separate decoded-batch filter or evaluated/pruned row counters to the TopK.
+For Iceberg reader counters and I/O accounting, see [Native Iceberg Scans](#native-iceberg-scans).
 
 ### Native Iceberg Scans
 
@@ -146,7 +147,9 @@ runtime pruning activity is absent:
 | `iceberg_runtime_predicate_refreshes`    | Newer runtime predicates picked up at row-group boundaries.           |
 | `iceberg_runtime_decoder_rebuilds`       | Decoder rebuilds needed to adopt refreshed runtime predicates.        |
 
-Compare `bytes_scanned` with the runtime filters disabled to assess the reader savings.
+Iceberg's `bytes_scanned` counts ranged reader I/O, including metadata and delete files. It does
+not measure physical disk traffic after operating-system caching. Compare it with runtime filters
+disabled to assess the reader savings.
 
 ### Exchange
 

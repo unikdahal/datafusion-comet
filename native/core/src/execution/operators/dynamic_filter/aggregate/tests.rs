@@ -26,6 +26,7 @@ use datafusion::physical_expr::aggregate::AggregateExprBuilder;
 use datafusion::physical_expr::expressions::Literal;
 use datafusion::physical_expr::expressions::{BinaryExpr, CastExpr};
 use datafusion::physical_plan::aggregates::PhysicalGroupBy;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::physical_plan::empty::EmptyExec;
 use iceberg::scan::FileScanTask;
 use iceberg::spec::{DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type};
@@ -320,7 +321,10 @@ fn annotated_string_columns_fail_closed() {
 }
 
 fn produced_filter(aggregate: &AggregateExec) -> Arc<DynamicFilterPhysicalExpr> {
-    Arc::clone(aggregate.dynamic_filter_expr().unwrap())
+    let mut expressions = aggregate.dynamic_expressions_produced();
+    assert_eq!(expressions.len(), 1);
+    let expression: Arc<dyn std::any::Any + Send + Sync> = expressions.pop().unwrap();
+    expression.downcast::<DynamicFilterPhysicalExpr>().unwrap()
 }
 
 fn result_value(batches: &[arrow::record_batch::RecordBatch]) -> ScalarValue {
@@ -374,7 +378,12 @@ async fn native_minmax_execution_matches_disabled_pruning_and_reexecutes() {
             }
             let (_replacement_file, replacement) =
                 super::super::test_utils::iceberg_input(vec![Some(101), Some(109)]);
-            let replaced = plan.with_new_children(vec![replacement]).unwrap();
+            let replaced = plan
+                .replace_children(
+                    vec![replacement],
+                    ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                )
+                .unwrap();
             assert!(replaced.is::<IcebergMinMaxFilterExec>());
             let actual = collect(replaced, session.task_ctx()).await.unwrap();
             assert_eq!(
@@ -550,7 +559,12 @@ async fn native_minmax_execution_and_stream_lifetime() {
             drop(fresh);
             let (_replacement_file, replacement) =
                 super::super::test_utils::iceberg_input(vec![Some(101), Some(109)]);
-            let replaced = plan.with_new_children(vec![replacement]).unwrap();
+            let replaced = plan
+                .replace_children(
+                    vec![replacement],
+                    ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                )
+                .unwrap();
             let actual = collect(replaced, session.task_ctx()).await.unwrap();
             assert_eq!(
                 result_value(&actual),

@@ -35,10 +35,11 @@ import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePart
 import org.apache.spark.sql.comet.{CometBaseAggregateExec, CometFilterExec, CometHashAggregateExec, CometNativeExec, CometProjectExec, CometSortAggregateExec, CometSortExec}
 import org.apache.spark.sql.comet.{CometLocalTopKExec, CometWindowExec}
 import org.apache.spark.sql.comet.execution.shuffle.CometShuffleExchangeExec
-import org.apache.spark.sql.execution.{LocalTableScanExec, SQLExecution, WindowExec}
+import org.apache.spark.sql.execution.{LocalTableScanExec, SQLExecution}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.aggregate.{BaseAggregateExec, ObjectHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExchangeExec}
+import org.apache.spark.sql.execution.window.WindowExec
 import org.apache.spark.sql.functions.{avg, col, collect_list, collect_set, count_distinct, expr, sort_array, sum}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{ArrayType, DataTypes, StructField, StructType}
