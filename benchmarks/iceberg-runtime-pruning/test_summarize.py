@@ -29,7 +29,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import summarize
-from workloads import EXTENDED_QUERIES, QUERIES, experiment
+from workloads import EXTENDED_QUERIES, PLANNING_QUERIES, QUERIES, experiment
 
 
 def fixture():
@@ -40,7 +40,7 @@ def fixture():
             "variant": variant, "round": round_id, "rep": rep,
             "checksum": "a" * 16, "rows": 1,
             "schema_json": '{"type":"struct","fields":[]}',
-            "plan_ms": 1.0, "exec_ms": 10.0, "total_ms": 11.0,
+            "planning_ms": 1.0, "execution_ms": 10.0, "total_ms": 11.0,
             "bytes_scanned": 100,
         }
         for query in manifest["queries"]
@@ -92,8 +92,8 @@ class CompletenessTests(unittest.TestCase):
             "checksum": ["", "z" * 16, 123], "rows": [-1, True, 1.5, "1"],
             "sql_sha256": ["b" * 64, None],
             "schema_json": [None, "", {}],
-            "plan_ms": [-1, True, "1", float("nan"), float("inf"), 10 ** 400],
-            "exec_ms": [0, -1, False, "10", float("nan"), float("inf")],
+            "planning_ms": [-1, True, "1", float("nan"), float("inf"), 10 ** 400],
+            "execution_ms": [0, -1, False, "10", float("nan"), float("inf")],
             "total_ms": [-1, 12, True, "11", float("nan"), float("inf")],
             "bytes_scanned": [-1, True, 0.5, "100"],
             "error": ["failed"], "status": ["failed", None],
@@ -104,7 +104,7 @@ class CompletenessTests(unittest.TestCase):
                     records = copy.deepcopy(self.records)
                     records[0][field] = value
                     self.reject(records)
-        for field in ("query", "variant", "round", "rep", "checksum", "rows", "sql_sha256", "plan_ms", "exec_ms", "total_ms"):
+        for field in ("query", "variant", "round", "rep", "checksum", "rows", "sql_sha256", "planning_ms", "execution_ms", "total_ms"):
             with self.subTest(missing=field):
                 records = copy.deepcopy(self.records)
                 del records[0][field]
@@ -125,7 +125,7 @@ class CompletenessTests(unittest.TestCase):
             summarize.validate_records(self.records, manifest)
 
     def test_jsonl_rejects_invalid_json_and_duplicate_keys(self):
-        for text in ('{', '{"round": 0, "round": 1}', '{"exec_ms": NaN}', '{"exec_ms": Infinity}'):
+        for text in ('{', '{"round": 0, "round": 1}', '{"execution_ms": NaN}', '{"execution_ms": Infinity}'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "results.jsonl"
                 path.write_text(text + "\n", encoding="utf-8")
@@ -161,7 +161,40 @@ class CompletenessTests(unittest.TestCase):
             with patch("sys.argv", ["summarize.py", str(results), "--manifest", str(manifest), "--oracle", str(oracle)]), contextlib.redirect_stdout(stdout):
                 self.assertEqual(summarize.main(), 0)
             self.assertIn("Speedup", stdout.getvalue())
+            self.assertIn("planning_ms | execution_ms | total_ms", stdout.getvalue())
+            self.assertIn("| total_ms |", stdout.getvalue())
             self.assertIn("n/a", stdout.getvalue())
+
+    def test_cold_matrix_is_required_and_validated_against_warm(self):
+        manifest = dict(self.manifest, phases=["cold", "warm"])
+        cold = [dict(r, phase="cold") for r in self.records if r["rep"] == 0]
+        summarize.validate_records(self.records + cold, manifest)
+        for invalid in (self.records, self.records + cold[:-1], self.records + cold + [cold[0]]):
+            with self.assertRaises(summarize.ValidationError):
+                summarize.validate_records(invalid, manifest)
+        for field, value in (("phase", "other"), ("rep", 1), ("checksum", "b" * 16),
+                             ("planning_ms", -1), ("total_ms", 99)):
+            changed = copy.deepcopy(cold)
+            changed[0][field] = value
+            with self.subTest(field=field), self.assertRaises(summarize.ValidationError):
+                summarize.validate_records(self.records + changed, manifest)
+
+    def test_total_speedup_can_reverse_execution_speedup(self):
+        records = copy.deepcopy(self.records)
+        for record in records:
+            record["planning_ms"] = 30 if record["variant"] == "on" else 1
+            record["execution_ms"] = 5 if record["variant"] == "on" else 10
+            record["total_ms"] = record["planning_ms"] + record["execution_ms"]
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("results.jsonl", "manifest.json", "oracle.jsonl")]
+            paths[0].write_text("".join(json.dumps(r) + "\n" for r in records))
+            paths[1].write_text(json.dumps(self.manifest))
+            paths[2].write_text("".join(json.dumps(r) + "\n" for r in self.oracle()))
+            stdout = io.StringIO()
+            with patch("sys.argv", ["summarize.py", str(paths[0]), "--manifest", str(paths[1]), "--oracle", str(paths[2])]), contextlib.redirect_stdout(stdout):
+                self.assertEqual(summarize.main(), 0)
+            self.assertIn("| execution_ms | 2.00x", stdout.getvalue())
+            self.assertIn("| total_ms | 0.31x", stdout.getvalue())
 
     def oracle(self):
         return [dict(r, variant="spark") for r in self.records if r["variant"] == "main" and r["round"] == 0 and r["rep"] == 0]
@@ -184,6 +217,9 @@ class RoundBootstrapTests(unittest.TestCase):
     def test_profiles_have_unique_names_and_retain_legacy_workloads(self):
         self.assertEqual(len(QUERIES), 9)
         self.assertEqual(len(EXTENDED_QUERIES), 18)
+        self.assertEqual(len(PLANNING_QUERIES), 10)
+        self.assertEqual(len({name for name, _ in PLANNING_QUERIES}), 10)
+        self.assertTrue(all("bucket < 4" in sql for name, sql in PLANNING_QUERIES if "inventory" not in name))
         names = [name for name, _ in EXTENDED_QUERIES]
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(EXTENDED_QUERIES[:9], QUERIES)
@@ -197,19 +233,19 @@ class RoundBootstrapTests(unittest.TestCase):
     def test_shared_round_noise_is_paired_and_repetitions_are_clustered(self):
         import random
 
-        base = [{"round": r, "exec_ms": value} for r, value in enumerate((10, 100, 1000)) for _ in range(3)]
-        candidate = [dict(record, exec_ms=record["exec_ms"] / 2) for record in base]
+        base = [{"round": r, "execution_ms": value} for r, value in enumerate((10, 100, 1000)) for _ in range(3)]
+        candidate = [dict(record, execution_ms=record["execution_ms"] / 2) for record in base]
         self.assertEqual(summarize.round_ratio_ci(base, candidate, random.Random(1)), (2.0, 2.0))
-        low, high = summarize.ratio_ci([r["exec_ms"] for r in base], [r["exec_ms"] for r in candidate], random.Random(1))
+        low, high = summarize.ratio_ci([r["execution_ms"] for r in base], [r["execution_ms"] for r in candidate], random.Random(1))
         self.assertLess(low, 2.0)
         self.assertGreater(high, 2.0)
 
     def test_one_round_or_mismatched_rounds_has_no_paired_interval(self):
         import random
 
-        records = [{"round": 0, "exec_ms": 1}]
+        records = [{"round": 0, "execution_ms": 1}]
         self.assertIsNone(summarize.round_ratio_ci(records, records, random.Random(1)))
-        self.assertIsNone(summarize.round_ratio_ci(records, [{"round": 1, "exec_ms": 1}], random.Random(1)))
+        self.assertIsNone(summarize.round_ratio_ci(records, [{"round": 1, "execution_ms": 1}], random.Random(1)))
 
 
 if __name__ == "__main__":

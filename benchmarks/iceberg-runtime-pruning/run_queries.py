@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 
 from pyspark.sql import SparkSession
-from workloads import QUERIES, sql_digest
+from workloads import PROFILE, QUERIES, sql_digest
 
 VARIANT = os.environ["BENCH_VARIANT"]
 ROUND = int(os.environ["BENCH_ROUND"])
@@ -101,8 +101,8 @@ def run(spark, name, sql, identity):
     return {
         "query": name,
         "sql_sha256": sql_digest(sql),
-        "plan_ms": (planned - started) * 1000.0,
-        "exec_ms": (finished - planned) * 1000.0,
+        "planning_ms": (planned - started) * 1000.0,
+        "execution_ms": (finished - planned) * 1000.0,
         "total_ms": (finished - started) * 1000.0,
         "rows": len(rows),
         "checksum": hashlib.sha256(result.encode()).hexdigest(),
@@ -118,14 +118,26 @@ def main():
     settings = {key: value for key, value in spark.sparkContext.getConf().getAll()
                 if key.startswith(("spark.comet.", "spark.sql.", "spark.memory.", "spark.shuffle.", "spark.plugins"))}
     (plans / f"{VARIANT}-{ROUND}-settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    queries = QUERIES
+    selected = os.environ.get("BENCH_QUERY")
+    if selected:
+        queries = [(name, sql) for name, sql in queries if name == selected]
+        if not queries:
+            raise ValueError(f"unknown selected query: {selected}")
+    if PROFILE == "planning" and VARIANT != "spark" and len(queries) != 1:
+        raise ValueError("planning profile requires a fresh JVM per BENCH_QUERY")
     with open(OUTPUT, "a", encoding="utf-8") as out:
-        for name, sql in QUERIES:
-            run(spark, name, sql, "warmup")
+        for name, sql in queries:
+            record = run(spark, name, sql, "cold")
+            if PROFILE == "planning" and VARIANT != "spark":
+                record.update({"variant": VARIANT, "round": ROUND, "rep": 0, "phase": "cold"})
+                out.write(json.dumps(record) + "\n")
+                out.flush()
         for rep in range(REPS):
-            shift = (ROUND * REPS + rep) % len(QUERIES)
-            for name, sql in QUERIES[shift:] + QUERIES[:shift]:
+            shift = (ROUND * REPS + rep) % len(queries)
+            for name, sql in queries[shift:] + queries[:shift]:
                 record = run(spark, name, sql, f"rep-{rep}")
-                record.update({"variant": VARIANT, "round": ROUND, "rep": rep})
+                record.update({"variant": VARIANT, "round": ROUND, "rep": rep, "phase": "warm"})
                 out.write(json.dumps(record) + "\n")
                 out.flush()
     spark.stop()

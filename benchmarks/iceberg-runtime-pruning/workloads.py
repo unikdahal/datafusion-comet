@@ -62,9 +62,25 @@ EXTENDED_QUERIES = QUERIES + [
     for layout in ("sorted", "unsorted")
 ]
 
+PLANNING_QUERIES = [
+    (f"{family}_{files}", sql)
+    for files in (1000, 10000)
+    for family, sql in (
+        ("join_selective", "SELECT /*+ BROADCAST(d) */ count(*), sum(f.value) "
+         f"FROM bench.db.inventory_{files} f JOIN bench.db.inventory_dim d ON f.id = d.id "
+         "WHERE f.bucket < 4"),
+        ("topk_selective", f"SELECT id FROM bench.db.inventory_{files} WHERE bucket < 4 ORDER BY id LIMIT 10"),
+        ("min_selective", f"SELECT min(id) FROM bench.db.inventory_{files} WHERE bucket < 4"),
+        ("scan_selective_control", f"SELECT sum(value) FROM bench.db.inventory_{files} WHERE bucket < 4"),
+        ("topk_inventory", f"SELECT id FROM bench.db.inventory_{files} ORDER BY id DESC LIMIT 10"),
+    )
+]
+
 PROFILE = os.environ.get("BENCH_PROFILE", "smoke")
 if PROFILE == "extended":
     QUERIES = EXTENDED_QUERIES
+elif PROFILE == "planning":
+    QUERIES = PLANNING_QUERIES
 elif PROFILE != "smoke":
     raise ValueError(f"unknown benchmark profile: {PROFILE}")
 
@@ -79,6 +95,7 @@ def experiment(rounds, reps):
     return {
         "protocol_version": 1,
         "profile": PROFILE,
+        "phases": ["cold", "warm"] if PROFILE == "planning" else ["warm"],
         "variants": ["main", "off", "on"],
         "rounds": rounds,
         "reps": reps,

@@ -100,6 +100,9 @@ def validate_records(records, manifest):
     rounds, reps = manifest.get("rounds"), manifest.get("reps")
     if not integer(rounds, 1) or not integer(reps, 1):
         raise ValidationError("rounds and reps must be positive integers")
+    phases = manifest.get("phases", ["warm"])
+    if phases not in (["warm"], ["cold", "warm"]):
+        raise ValidationError("invalid measurement phases")
     catalog = manifest.get("queries")
     if not isinstance(catalog, list) or not catalog:
         raise ValidationError("expected a nonempty query catalog")
@@ -124,9 +127,13 @@ def validate_records(records, manifest):
         if record.get("sql_sha256") != queries[query]:
             raise ValidationError(f"record {index}: SQL differs from declared catalog")
         round_id, rep = record.get("round"), record.get("rep")
-        if not integer(round_id) or round_id >= rounds or not integer(rep) or rep >= reps:
+        phase = record.get("phase", "warm")
+        if phase not in phases:
+            raise ValidationError(f"record {index}: unexpected phase")
+        phase_reps = 1 if phase == "cold" else reps
+        if not integer(round_id) or round_id >= rounds or not integer(rep) or rep >= phase_reps:
             raise ValidationError(f"record {index}: invalid round or repetition")
-        identity = (query, variant, round_id, rep)
+        identity = (query, variant, round_id, rep, phase)
         if identity in seen:
             raise ValidationError(f"duplicate sample: {identity}")
         seen.add(identity)
@@ -136,12 +143,12 @@ def validate_records(records, manifest):
             raise ValidationError(f"record {index}: invalid or missing result")
         if not isinstance(record.get("schema_json"), str) or not record["schema_json"]:
             raise ValidationError(f"record {index}: missing result schema")
-        for field in ("plan_ms", "exec_ms", "total_ms"):
+        for field in ("planning_ms", "execution_ms", "total_ms"):
             value = record.get(field)
             if not nonnegative_finite(value):
                 raise ValidationError(f"record {index}: invalid {field}")
-        if record["exec_ms"] <= 0 or not math.isclose(
-            record["total_ms"], record["plan_ms"] + record["exec_ms"], rel_tol=1e-6, abs_tol=1e-6
+        if record["execution_ms"] <= 0 or not math.isclose(
+            record["total_ms"], record["planning_ms"] + record["execution_ms"], rel_tol=1e-6, abs_tol=1e-6
         ):
             raise ValidationError(f"record {index}: inconsistent timing fields")
         for field in SCAN_METRICS:
@@ -155,12 +162,13 @@ def validate_records(records, manifest):
         ):
             raise ValidationError(f"record {index}: invalid native scan scope")
         by_key[(query, variant)].append(record)
-    expected_count = len(queries) * len(VARIANTS) * rounds * reps
+    expected_count = len(queries) * len(VARIANTS) * rounds * (reps + ("cold" in phases))
     if len(seen) != expected_count:
         missing = next(
-            (q, v, r, p)
-            for q in queries for v in VARIANTS for r in range(rounds) for p in range(reps)
-            if (q, v, r, p) not in seen
+            (q, v, r, p, phase)
+            for q in queries for v in VARIANTS for r in range(rounds)
+            for phase in phases for p in range(1 if phase == "cold" else reps)
+            if (q, v, r, p, phase) not in seen
         )
         raise ValidationError(f"incomplete matrix: {len(seen)}/{expected_count} samples; missing {missing}")
     for query in queries:
@@ -228,12 +236,12 @@ def ratio_ci(baseline, candidate, rng, samples=2000):
     return quantile(ratios, 0.025), quantile(ratios, 0.975)
 
 
-def round_ratio_ci(baseline, candidate, rng, samples=2000):
+def round_ratio_ci(baseline, candidate, rng, samples=2000, field="execution_ms"):
     """Diagnostic paired bootstrap of JVM-round medians, keeping reps clustered."""
     def round_medians(records):
         groups = defaultdict(list)
         for record in records:
-            groups[record["round"]].append(record["exec_ms"])
+            groups[record["round"]].append(record[field])
         return {key: statistics.median(values) for key, values in groups.items()}
 
     base, cand = round_medians(baseline), round_medians(candidate)
@@ -273,44 +281,40 @@ def main():
         rows = {r["rows"] for v in VARIANTS for r in by_key[(query, v)]}
         print(f"| {query} | yes | {sorted(rows)} |")
 
-    print("\n## Execution time (ms, warm)\n")
-    print("Median of all timed runs; IQR is p25-p75; CV is stdev/mean.\n")
-    print("| query | variant | n | median | IQR | min | CV | median planning |")
-    print("|---|---|---|---|---|---|---|---|")
-    for query in queries:
-        for variant in VARIANTS:
-            runs = by_key[(query, variant)]
-            if not runs:
-                continue
-            ms = [r["exec_ms"] for r in runs]
-            plan = statistics.median(r["plan_ms"] for r in runs)
-            cv = statistics.pstdev(ms) / statistics.mean(ms)
-            flag = " (noisy)" if cv > 0.15 else ""
-            print(
-                f"| {query} | {LABELS[variant]} | {len(ms)} | {statistics.median(ms):,.0f} | "
-                f"{quantile(ms, 0.25):,.0f}-{quantile(ms, 0.75):,.0f} | {min(ms):,.0f} | "
-                f"{cv:.1%}{flag} | {plan:,.0f} |"
-            )
+    for phase in manifest.get("phases", ["warm"]):
+        print(f"\n## Query latency (ms, {phase})\n")
+        print("Pooled medians; total is the median of per-sample planning + execution.\n")
+        print("| query | variant | n | planning_ms | execution_ms | total_ms | execution IQR | execution CV |")
+        print("|---|---|---|---|---|---|---|---|")
+        groups = {key: [r for r in runs if r.get("phase", "warm") == phase] for key, runs in by_key.items()}
+        for query in queries:
+            for variant in VARIANTS:
+                runs = groups[(query, variant)]
+                ms = [r["execution_ms"] for r in runs]
+                timings = " | ".join(f"{statistics.median(r[field] for r in runs):,.2f}"
+                                     for field in ("planning_ms", "execution_ms", "total_ms"))
+                cv = statistics.pstdev(ms) / statistics.mean(ms)
+                print(f"| {query} | {LABELS[variant]} | {len(runs)} | {timings} | "
+                      f"{quantile(ms, 0.25):,.2f}-{quantile(ms, 0.75):,.2f} | {cv:.1%} |")
+        print(f"\n## Speedup of branch with runtime filters on ({phase})\n")
+        print("Ratio of pooled medians; >1 is faster. Bootstrap intervals are exploratory;\n"
+              "paired intervals keep repetitions clustered in their JVM round.\n")
+        print("| query | timing | vs main | independent 95% CI | paired round 95% CI | vs branch off | independent 95% CI | paired round 95% CI |")
+        print("|---|---|---|---|---|---|---|---|")
+        for query in queries:
+            for field in ("execution_ms", "total_ms"):
+                on = [r[field] for r in groups[(query, "on")]]
+                cells = []
+                for baseline in ("main", "off"):
+                    base = [r[field] for r in groups[(query, baseline)]]
+                    low, high = ratio_ci(base, on, rng)
+                    paired = round_ratio_ci(groups[(query, baseline)], groups[(query, "on")], random.Random(1), field=field)
+                    interval = f"{paired[0]:.2f}-{paired[1]:.2f}" if paired else "n/a (<2 rounds)"
+                    cells += [f"{statistics.median(base) / statistics.median(on):.2f}x", f"{low:.2f}-{high:.2f}", interval]
+                print(f"| {query} | {field} | " + " | ".join(cells) + " |")
 
-    print("\n## Speedup of branch with runtime filters on\n")
-    print("Ratio of pooled median execution times; >1 is faster. The original independent")
-    print("sample bootstrap is retained. Paired JVM-round median intervals are exploratory")
-    print("diagnostics with repetitions kept in their round; few rounds limit inference.\n")
-    print("| query | vs main | independent 95% CI | paired round 95% CI | vs branch off | independent 95% CI | paired round 95% CI |")
-    print("|---|---|---|---|---|---|---|")
-    for query in queries:
-        on = [r["exec_ms"] for r in by_key[(query, "on")]]
-        cells = []
-        for baseline in ["main", "off"]:
-            base = [r["exec_ms"] for r in by_key[(query, baseline)]]
-            if not on or not base:
-                cells += ["-", "-"]
-                continue
-            low, high = ratio_ci(base, on, rng)
-            paired = round_ratio_ci(by_key[(query, baseline)], by_key[(query, "on")], random.Random(1))
-            interval = f"{paired[0]:.2f}-{paired[1]:.2f}" if paired else "n/a (<2 rounds)"
-            cells += [f"{statistics.median(base) / statistics.median(on):.2f}x", f"{low:.2f}-{high:.2f}", interval]
-        print(f"| {query} | " + " | ".join(cells) + " |")
+    # Reader metrics describe warm samples; cold samples remain in latency tables.
+    by_key = {key: [r for r in runs if r.get("phase", "warm") == "warm"] for key, runs in by_key.items()}
 
     print("\n## Reader I/O and pruning (median per query run)\n")
     print("`bytes_scanned` is the byte total of ranged reads issued by the native Iceberg reader,")

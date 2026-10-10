@@ -73,7 +73,7 @@ a promise of exactly that many physical files or scan splits. The unsorted
 ordering seed is 7; range partitioning can sample when generating layouts, so
 retain the snapshot hashes rather than assuming regenerated files are identical.
 
-Both profiles generate:
+`smoke` and `extended` generate:
 
 - `fact_sorted`: integer IDs, bigint values and SHA-256 string payloads, range
   partitioned and sorted by ID.
@@ -109,23 +109,59 @@ This smaller harness does not replace that corpus or validate its totals. Retain
 its exact harness revision, query catalog, seeds, data artifacts, resolved builds,
 oracle and raw timing/warmup records when rerunning a targeted selection.
 
+## Many-manifest planning and ordering profile
+
+`planning` generates separate 1,000-file and 10,000-file tables, ten rows per
+file, partitioned by an integer bucket. Appends contain 100 distinct buckets;
+manifest merging is disabled. Generation asserts the file counts, at least
+10/100 manifests, and four files selected by `bucket < 4`. `inventory.json`
+records actual file counts, manifest counts, manifest bytes and selected files.
+The small selected row count emphasizes driver planning over reader work.
+
+The ten queries cover selective join, Top-K, MIN and an ordinary SUM control
+at both inventories, plus full-inventory descending Top-K. Every query/variant/
+round starts its own JVM. Its first execution is recorded as `cold`; two or the
+requested number of subsequent executions are recorded as `warm`. Cold means
+fresh JVM/catalog/runtime-statistics state, not cold OS or local-disk caches.
+Both phases must pass the complete comparison matrix and the plain-Spark oracle.
+The same query is used on main, branch-off and branch-on. Planning differences
+include normal Spark/Iceberg analysis and planning, and are not a direct timer
+of only the extra `planFiles()` pass. Controls help bound the combined overhead;
+they do not identify transient planner heap or concurrent cold-miss behavior.
+
+The branch release build also runs an ignored native timing test at 1k, 10k and
+100k tasks for permuted, overlapping and missing bounds. It calls the actual
+production ordering function, separately times the eager task clone and ordering
+(including conversion back to an immutable task array), and reports 21 warmed
+repetitions in `ordering.log`. The workflow registers the new test file only in
+its CI checkout after building the release jar; production source is unchanged
+in the committed patch. These synthetic CPU measurements exclude I/O, scheduling,
+first-bound publication, concurrent readers and delete-heavy task payloads.
+The full-inventory Top-K queries measure net query latency under default guards,
+including the 4,096-selected-file statistics cap; inspect adoption counters.
+
 ## Measurement and retained evidence
 
-Each round starts a separate JVM for each variant in rotated order. Each JVM
-warms every query once, then rotates query order for timed repetitions. Multiples
-of three rounds balance variant positions. `plan_ms` includes SQL construction,
-analysis and physical planning; `exec_ms` measures collection; `total_ms` is their
+For `smoke` and `extended`, each round starts a separate JVM for each variant
+in rotated order. Each JVM warms every query once, then rotates query order for
+timed repetitions. `planning` uses the fresh-JVM-per-query protocol above. Multiples
+of three rounds balance variant positions. `planning_ms` includes SQL construction,
+analysis and physical planning; `execution_ms` measures collection; `total_ms` is their
 sum. The planning timer does not isolate manifest replanning, cache hit/miss
 latency or executor task serialization. Cold JVMs do not imply cold storage caches.
 
 `experiment.json` declares the SQL and SHA-256 digest for every expected query,
 variant, round and repetition. The summary requires the full Cartesian matrix,
 exact result counts/checksums/schemas, matching Spark oracle and finite consistent
-timings. Warmups abort on errors but are not retained correctness samples.
+timings. Smoke/extended warmups abort on errors but are not retained correctness
+samples; planning cold executions are retained and validated.
 Correctness uses exact ordered results for these aggregates and unique-ID Top-K
 queries; it is not a generic floating-point/multiset oracle for arbitrary SQL.
 
-The summary retains pooled medians, IQR, CV and the original independent bootstrap
+The summary reports `planning_ms`, `execution_ms` and `total_ms` medians, plus
+execution and end-to-end speedups versus main and branch-off for each phase.
+Total speedup uses the median of per-sample totals, not the sum of separate
+medians. It retains pooled medians, IQR, CV and the original independent bootstrap
 95% intervals. It adds paired JVM-round median bootstrap intervals as exploratory
 diagnostics, keeping repetitions clustered. This evaluates sensitivity to shared
 round noise without changing the published point estimator. Few rounds, fixed
@@ -154,7 +190,9 @@ time to first bound, files in flight at publication and binding failure/cache
 counts are not isolated by this harness. Do not substitute query planning time,
 requested bytes or decoder rebuilds for those measurements.
 
-These are warm local-disk measurements on shared hosted runners. They do not
+Performance conclusions apply only to the recorded Spark 3.5.9, Iceberg 1.8.1,
+Java 17, local-disk fixtures, reader concurrency and shared hosted-runner hardware.
+Warm and fresh-JVM measurements both use the same local disk. They do not
 establish cold S3/GCS/Azure latency, request charges, retry/cancellation behavior or
 production throughput. No object-store credentials are provisioned here. Such
 validation needs a separately configured Actions environment, isolated fixtures,

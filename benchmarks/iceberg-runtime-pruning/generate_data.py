@@ -22,7 +22,9 @@ Run once with plain Spark and the Iceberg runtime (no Comet), so every
 variant reads byte-identical files.
 """
 
+import json
 import os
+from pathlib import Path
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -53,9 +55,42 @@ def write(df, table):
     writer.create()
 
 
+def generate_inventory(spark):
+    # 100 disjoint partitions per append, four writers: about 40/400 manifests.
+    # Disable merging so subsequent commits retain the inventory of manifests.
+    inventory = []
+    for files in (1000, 10000):
+        table = f"bench.db.inventory_{files}"
+        props = dict(PROPERTIES, **{"commit.manifest-merge.enabled": "false"})
+        spark.sql(f"CREATE TABLE {table} (id INT, value BIGINT, bucket INT) "
+                  "USING iceberg PARTITIONED BY (bucket) TBLPROPERTIES (" +
+                  ", ".join(f"'{k}'='{v}'" for k, v in props.items()) + ")")
+        for start in range(0, files, 100):
+            spark.range(start * 10, (start + 100) * 10).select(
+                F.col("id").cast("int").alias("id"),
+                (F.col("id") * 3).alias("value"),
+                (F.col("id") / 10).cast("int").alias("bucket"),
+            ).repartition(4, "bucket").writeTo(table).append()
+        data = spark.sql(f"SELECT count(*), sum(file_size_in_bytes) FROM {table}.data_files").first()
+        manifests = spark.sql(f"SELECT count(*), sum(length) FROM {table}.manifests").first()
+        selected = spark.sql(f"SELECT count(*) FROM {table}.files WHERE partition.bucket < 4").first()[0]
+        assert data[0] == files and selected == 4, (table, data, selected)
+        assert manifests[0] >= files // 100, (table, manifests)
+        record = {"table": table, "data_files": data[0], "data_bytes": data[1],
+                  "manifests": manifests[0], "manifest_bytes": manifests[1], "selected_files": selected}
+        inventory.append(record)
+        print("TABLE " + json.dumps(record))
+    write(spark.range(0, 40, 2).select(F.col("id").cast("int").alias("id")), "inventory_dim")
+    Path("inventory.json").write_text(json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
+
+
 def main():
     spark = SparkSession.builder.appName("iceberg-runtime-pruning-data").getOrCreate()
     spark.sql("CREATE NAMESPACE IF NOT EXISTS bench.db")
+    if PROFILE == "planning":
+        generate_inventory(spark)
+        spark.stop()
+        return
     base = spark.range(ROWS).select(
         F.col("id").cast("int").alias("id"),
         (F.col("id") * 3).alias("value"),

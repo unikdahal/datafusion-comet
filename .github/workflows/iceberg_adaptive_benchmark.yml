@@ -31,7 +31,7 @@ on:
       profile:
         description: Workload coverage (smoke retains the original nine queries)
         type: choice
-        options: [smoke, extended]
+        options: [smoke, extended, planning]
         default: smoke
       baseline_repository:
         description: Baseline repository (use unikdahal/datafusion-comet for before/final)
@@ -162,6 +162,19 @@ jobs:
             echo "RUSTFLAGS=$RUSTFLAGS"
             sha256sum dist/comet.jar native/target/release/libcomet.so native/Cargo.lock
           } > dist/build-provenance.txt
+      - name: Measure production task ordering in a release timing test
+        if: matrix.side == 'branch' && inputs.profile == 'planning'
+        run: |
+          # Test-only registration in the CI checkout; no production source edit is committed.
+          cat >> native/core/src/execution/operators/iceberg_scan.rs <<'RS'
+
+          #[cfg(test)]
+          #[path = "iceberg_scan_order_timing_tests.rs"]
+          mod runtime_task_order_timing_tests;
+          RS
+          rustfmt --edition 2021 native/core/src/execution/operators/iceberg_scan_order_timing_tests.rs
+          cd native
+          cargo test --release --locked -p datafusion-comet --lib runtime_task_order_timing -- --ignored --nocapture --test-threads=1 | tee ../dist/ordering.log
       - uses: actions/upload-artifact@v7
         with:
           name: comet-${{ matrix.side }}
@@ -279,6 +292,13 @@ jobs:
                 on) jar=jars/comet-branch/comet.jar; enabled=true ;;
               esac
               echo "round $round variant $variant"
+              queries=(all)
+              if [ "$BENCH_PROFILE" = planning ]; then
+                mapfile -t queries < <(python3 -c 'import json; print("\n".join(q["query"] for q in json.load(open("experiment.json"))["queries"]))')
+              fi
+              for query in "${queries[@]}"; do
+                export BENCH_QUERY=""
+                if [ "$query" != all ]; then export BENCH_QUERY="$query"; fi
               BENCH_VARIANT="$variant" BENCH_ROUND="$round" \
               spark-submit --master 'local[4]' --driver-memory 8g \
                 --jars "jars/iceberg.jar,$jar" \
@@ -301,8 +321,9 @@ jobs:
                 --conf spark.sql.iceberg.aggregate-push-down.enabled=false \
                 --conf spark.ui.enabled=false \
                 $(filters "$enabled") \
-                benchmarks/iceberg-runtime-pruning/run_queries.py > "run-$round-$variant.log" 2>&1 \
-                || { tail -100 "run-$round-$variant.log"; exit 1; }
+                benchmarks/iceberg-runtime-pruning/run_queries.py > "run-$round-$variant-$query.log" 2>&1 \
+                || { tail -100 "run-$round-$variant-$query.log"; exit 1; }
+              done
             done
           done
       - name: Require unchanged data and metadata bytes
@@ -343,4 +364,6 @@ jobs:
             jars/*/comet-commit.txt
             plans/
             generate.log
+            inventory.json
+            jars/comet-branch/ordering.log
             run-*.log
