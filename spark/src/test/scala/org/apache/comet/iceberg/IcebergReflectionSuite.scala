@@ -55,7 +55,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
   /** Wrap real immutable Iceberg scans, counting only Comet's second planning pass. */
   class CountingRuntimeScan(source: TableScan) {
     var planningCalls = 0
-    var requestedColumns = Seq.empty[String]
+    var requestedColumns: Seq[String] = Nil
     var beforePlanning: () => Unit = () => ()
     var closedPlans = 0
     var visitedFiles = 0

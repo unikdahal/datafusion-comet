@@ -209,7 +209,7 @@ jobs:
         run: |
           export SPARK_HOME="$GITHUB_WORKSPACE"
           ./mvnw -B -Prelease -Pspark-$SPARK_PROFILE test -Dtest=none \
-            '-Dsuites=org.apache.comet.CometFuzzIcebergSuite,org.apache.comet.CometIcebergNativeSuite,org.apache.comet.CometIcebergResidualPushdownSuite,org.apache.comet.CometIcebergRewriteActionSuite,org.apache.comet.CometIcebergSystemFunctionExtensionsSuite,org.apache.comet.CometIcebergSystemFunctionSuite,org.apache.comet.CometIcebergWriteActionSuite,org.apache.comet.CometIcebergWriteDetectionSuite,org.apache.comet.exec.CometJoinSuite,org.apache.comet.exec.CometTopKSuite,org.apache.comet.iceberg.IcebergReflectionSuite,org.apache.comet.serde.operator.CometIcebergNativeScanSuite,org.apache.comet.serde.operator.IcebergWriteProtoTranslationSuite,org.apache.spark.sql.comet.util.UtilsSuite'
+            '-Dsuites=org.apache.comet.CometFuzzIcebergSuite,org.apache.comet.CometIcebergNativeSuite,org.apache.comet.CometIcebergResidualPushdownSuite,org.apache.comet.CometIcebergRewriteActionSuite,org.apache.comet.CometIcebergSystemFunctionExtensionsSuite,org.apache.comet.CometIcebergSystemFunctionSuite,org.apache.comet.CometIcebergWriteActionSuite,org.apache.comet.CometIcebergWriteDetectionSuite,org.apache.comet.exec.CometJoinSuite,org.apache.comet.exec.CometTopKSuite,org.apache.comet.iceberg.IcebergReflectionSuite,org.apache.comet.serde.operator.CometIcebergNativeScanSuite,org.apache.comet.serde.operator.IcebergWriteProtoTranslationSuite,org.apache.spark.sql.comet.PlanDataInjectorSuite,org.apache.spark.sql.comet.util.UtilsSuite'
 
       # Spotless truncates its error diff. Print the complete CI-generated diff so fixes can
       # be applied manually without running a formatter locally. The validation still fails.
