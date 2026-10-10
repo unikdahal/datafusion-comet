@@ -156,24 +156,21 @@ class UtilsSuite extends CometTestBase {
     val allocator = new RootAllocator(Long.MaxValue)
     val first = new VarCharVector("first", allocator)
     val transferError = new IOException("injected partial transfer failure")
-    val second = new ListVector(
-      "second",
-      allocator,
-      FieldType.nullable(ArrowType.List.INSTANCE),
-      null) {
-      override def getTransferPair(targetAllocator: BufferAllocator): TransferPair = {
-        val pair = super.getTransferPair(targetAllocator)
-        new TransferPair {
-          override def getTo: ValueVector = pair.getTo
-          override def transfer(): Unit = pair.transfer()
-          override def copyValueSafe(from: Int, to: Int): Unit = pair.copyValueSafe(from, to)
-          override def splitAndTransfer(start: Int, length: Int): Unit = {
-            pair.splitAndTransfer(start, length)
-            throw transferError
+    val second =
+      new ListVector("second", allocator, FieldType.nullable(ArrowType.List.INSTANCE), null) {
+        override def getTransferPair(targetAllocator: BufferAllocator): TransferPair = {
+          val pair = super.getTransferPair(targetAllocator)
+          new TransferPair {
+            override def getTo: ValueVector = pair.getTo
+            override def transfer(): Unit = pair.transfer()
+            override def copyValueSafe(from: Int, to: Int): Unit = pair.copyValueSafe(from, to)
+            override def splitAndTransfer(start: Int, length: Int): Unit = {
+              pair.splitAndTransfer(start, length)
+              throw transferError
+            }
           }
         }
       }
-    }
     val secondValues = second
       .addOrGetVector[IntVector](FieldType.nullable(new ArrowType.Int(32, true)))
       .getVector
