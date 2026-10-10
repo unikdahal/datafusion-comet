@@ -71,14 +71,21 @@ Spark / Iceberg Java tasks
 The attachment and expression rules are in
 [iceberg_reader.rs](../native/core/src/execution/operators/dynamic_filter/iceberg_reader.rs).
 The reader contracts and schema checks are in
-[runtime_predicate.rs](https://github.com/unikdahal/iceberg-rust/blob/adaptive-ci/runtime-pruning-rewrite-20261006/crates/iceberg/src/arrow/reader/runtime_predicate.rs),
-[pipeline.rs](https://github.com/unikdahal/iceberg-rust/blob/adaptive-ci/runtime-pruning-rewrite-20261006/crates/iceberg/src/arrow/reader/pipeline.rs)
-and [page_index_evaluator.rs](https://github.com/unikdahal/iceberg-rust/blob/adaptive-ci/runtime-pruning-rewrite-20261006/crates/iceberg/src/expr/visitors/page_index_evaluator.rs).
+[runtime_predicate.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_predicate.rs),
+[pipeline.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/pipeline.rs)
+and [page_index_evaluator.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/expr/visitors/page_index_evaluator.rs).
 
 ## Attachment and lifecycle
 
-Join pruning supports a single direct, matching signed-integer key; dates and
-microsecond timestamps additionally reach native Iceberg readers. Eligible
+Join pruning supports a single direct key with exactly matching native types:
+signed integers, dates, microsecond timestamps, Decimal128 and binary strings.
+Decimal keys must have matching precision and scale and unmodified column
+lineage. Decimal decoded-batch filtering is available across probe backends;
+native Parquet reader attachment supports signed integers only. Dates,
+microsecond timestamps and strings require native Iceberg probes. Strings must
+use binary collation; fixed CHAR, padding, collation annotations and computed
+decimal/string lineage prevent attachment. Dictionary strings compare by their
+values, never dictionary indices. Eligible
 inner and semi joins use null-unequal semantics and one native partition per
 input. Outer/anti joins, computed keys and unsupported types retain their
 ordinary execution. Join residuals still run on exact key matches.
@@ -88,6 +95,15 @@ one ungrouped partial aggregate with a direct supported argument, without
 distinct, aggregate filters or aggregate ordering. Safe projections and filters
 can be traversed while preserving the key's column mapping. Parquet attachment
 keeps its separate schema-adapter and statistics safety checks.
+
+String TopK supports ASC and DESC with NULLS LAST on native Iceberg readers.
+String NULLS FIRST conservatively retains ordinary execution without reader
+pruning. Integer, date and timestamp TopK can support either null ordering;
+eligibility still depends on the reader and every sort expression. Decimal
+join and file-statistics support does not imply Decimal TopK or MIN/MAX support.
+String MIN/MAX requires direct binary string lineage. JVM file-statistics
+eligibility and native per-consumer eligibility are separate contracts, with
+agreement tests for the shared cases.
 
 Join reader attachment also retains a pass-through `ReaderFilterConsumerExec` exposing
 the predicate through the physical-plan expression visitor. DataFusion checks
@@ -155,9 +171,16 @@ and [iceberg_scan.rs](../native/core/src/execution/operators/iceberg_scan.rs).
 | Compact single-column equality-delete sets above eight entries     | Building one expression per delete row; supported larger sets compile membership once and use hash lookup per data row      |
 
 These changes reduce specific work; they do not establish a wall-clock speedup.
-See [runtime_stream.rs](https://github.com/unikdahal/iceberg-rust/blob/adaptive-ci/runtime-pruning-rewrite-20261006/crates/iceberg/src/arrow/reader/runtime_stream.rs),
-[predicate_visitor.rs](https://github.com/unikdahal/iceberg-rust/blob/adaptive-ci/runtime-pruning-rewrite-20261006/crates/iceberg/src/arrow/reader/predicate_visitor.rs)
-and [caching_delete_file_loader.rs](https://github.com/unikdahal/iceberg-rust/blob/adaptive-ci/runtime-pruning-rewrite-20261006/crates/iceberg/src/arrow/caching_delete_file_loader.rs).
+Best-first task ordering is a preferred scheduling order. Concurrent file reads
+can finish in a different order, and a useful bound can arrive after other files
+are already in flight. Equal bounds retain file order; known splits within a
+file may be visited in reverse for descending bounds. Unknown bounds retain
+task order. Execution with runtime ordering still clones the task list before
+applying the lightweight ranking and in-place permutation. No allocation or
+scheduling benefit beyond these source-level properties has been established.
+See [runtime_stream.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_stream.rs),
+[predicate_visitor.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/predicate_visitor.rs)
+and [caching_delete_file_loader.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/caching_delete_file_loader.rs).
 
 ## Metrics and comparison
 
@@ -172,8 +195,17 @@ subset of the total. Scan compute time measures active polling/adaptation;
 producer metrics measure their own operators. Poll, error and drop paths report
 available metric deltas without retaining producer state.
 
+The committed harness captures decoder rebuilds along with the existing scan
+counters. Missing counters are reported as unavailable, and reader-byte ratios
+require the same nonempty native scan metadata locations, including repeated
+tables. Saved plans are still needed to inspect projection and fallback scope.
+Driver planning time includes SQL analysis and physical planning. It does not
+isolate manifest-statistics collection, cache hit/miss cost, retained heap, time
+to first bound or files in flight at publication. Those measurements remain
+required before changing statistics gates, binding caches or concurrency.
+
 Compare the existing and rewritten runtime implementations with the
-[benchmark harness](https://github.com/unikdahal/datafusion-comet/blob/adaptive-bench/rewrite-20261007-transport-fixed/benchmarks/iceberg-runtime-pruning-detailed/README.md). It provides
+[historical detailed benchmark harness](https://github.com/unikdahal/datafusion-comet/blob/a591c3700e2fa4094500eee53ecc8f40ad3e8cce/benchmarks/iceberg-runtime-pruning-detailed/README.md). Its revision defines
 shared generated fixtures, a plain Spark correctness oracle, four balanced rounds
 in fresh JVMs, paired timing intervals, separate planning/execution timings and
 reader counters. Six suites cover sorted selective queries, unsorted/control
@@ -181,6 +213,19 @@ queries, position/equality deletes, schema evolution, TPC-H and deterministic fu
 cases, with pinned build revisions and identical settings. Wall-clock distributions,
 reader bytes and decoder rebuilds must be considered together; local CI timings
 do not establish object-store latency improvements.
+
+This historical campaign is distinct from the committed
+[matched smoke and extended harness](../benchmarks/iceberg-runtime-pruning/README.md).
+Preserve original campaign artifacts, query catalogs, seeds, data hashes,
+resolved implementations, oracle records and raw samples when citing results.
+For example, [run 37865998293](https://github.com/unikdahal/datafusion-comet/actions/runs/37865998293)
+passed a targeted 15-query campaign for candidate
+`007080ae028edddf3ca2e360c3d38cf17504edbd` against Apache main
+`412468e2817207eff0c1907d1c4aac8c3f06680d`. It does not validate this revision.
+The later [full campaign 37943700291](https://github.com/unikdahal/datafusion-comet/actions/runs/37943700291)
+failed validation and cannot serve as a complete correctness or performance
+verdict. Query/test totals and speedups require revision-associated raw evidence;
+neither a prior campaign nor a smaller new run proves a final-branch total.
 
 ## Limits and regression coverage
 
@@ -197,15 +242,15 @@ Regression suites cover nulls, NaNs, signed zeros, schema evolution, dictionary
 columns, missing field IDs, splits, deletes, page selections, concurrent
 publications, failing expressions, resets and stream cancellation. Tests live in
 [Comet's dynamic-filter suite](../native/core/src/execution/operators/dynamic_filter/)
-and [Iceberg's reader suite](https://github.com/unikdahal/iceberg-rust/blob/adaptive-ci/runtime-pruning-rewrite-20261006/crates/iceberg/src/arrow/reader/runtime_predicate_tests.rs).
+and [Iceberg's reader suite](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_predicate_tests.rs).
 
-Local validation of this revision passed 1,909 Iceberg library tests and 689
-Comet library tests with default features and the locked, published Iceberg
-dependency. Five existing Comet tests were ignored: four require an HDFS cluster
-and one is a manual buffer benchmark. The no-default-features run passed 692
-tests with one ignored. Comet workspace Clippy checked all targets with warnings
-denied; Iceberg library/test Clippy used its configured nightly toolchain with
-warnings denied. Rust formatting, Scala formatting and whitespace checks passed.
-Integration validation passed on Spark 3.5 and 4.1, with 196 tests per version:
-123 native Iceberg tests, 65 join tests and eight broadcast transport tests.
-The matched benchmark has a separate correctness and performance verdict.
+Validation is layered: JVM/native eligibility, predicate translation, physical
+schema binding, reader pruning, exact Spark comparisons, execution lifecycle,
+concurrency/resource behavior and end-to-end performance have separate verdicts.
+The fast synthetic harness workflow checks benchmark evidence completeness
+without Spark; it does not replace reader, native or Spark integration suites.
+All build, test, formatting and benchmark validation for this hardening work runs
+in GitHub Actions. [Base-revision run 38027288909](https://github.com/unikdahal/datafusion-comet/actions/runs/38027288909)
+failed Preflight and skipped the build/integration jobs. Those skipped jobs are
+unvalidated. Every final report must identify its exact revisions, run URLs and
+passed, failed, skipped or unexecuted jobs rather than carrying forward totals.
