@@ -1383,3 +1383,75 @@ fn filter_through_attaches_for_safe_deterministic_predicate() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn attachment_refusals_report_low_cardinality_reasons() {
+    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::filter::FilterExec;
+    use datafusion_comet_spark_expr::RandExpr;
+
+    let (_file, scan) = super::super::test_utils::iceberg_input(vec![Some(1), Some(2)]);
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+    let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(
+        vec![Arc::clone(&key)],
+        lit(true),
+    ));
+    let refusal = |input: &Arc<dyn ExecutionPlan>, predicate: Arc<DynamicFilterPhysicalExpr>| {
+        attach_iceberg_reader_filter(input, predicate, None)
+            .unwrap()
+            .err()
+    };
+
+    assert_eq!(refusal(&scan, Arc::clone(&dynamic)), None);
+    let rand: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::new(RandExpr::new(42)),
+        Operator::Lt,
+        lit(0.5_f64),
+    ));
+    let unsafe_filter: Arc<dyn ExecutionPlan> =
+        Arc::new(FilterExec::try_new(rand, Arc::clone(&scan)).unwrap());
+    assert_eq!(
+        refusal(&unsafe_filter, Arc::clone(&dynamic)),
+        Some(ReaderRefusal::UnsafeOperator)
+    );
+    let is_null = FilterExec::try_new(
+        Arc::new(IsNullExpr::new(Arc::clone(&key))),
+        Arc::clone(&scan),
+    )
+    .unwrap();
+    let limited = ExecutionPlan::with_fetch(&is_null, Some(1)).unwrap();
+    assert_eq!(
+        refusal(&limited, Arc::clone(&dynamic)),
+        Some(ReaderRefusal::UnsafeOperator)
+    );
+    let computed = Arc::new(DynamicFilterPhysicalExpr::new(
+        vec![Arc::new(BinaryExpr::new(
+            Arc::clone(&key),
+            Operator::Plus,
+            lit(1_i32),
+        )) as Arc<dyn PhysicalExpr>],
+        lit(true),
+    ));
+    assert_eq!(
+        refusal(&scan, computed),
+        Some(ReaderRefusal::UnsupportedKey)
+    );
+    let other: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(scan.schema()));
+    assert_eq!(
+        refusal(&other, Arc::clone(&dynamic)),
+        Some(ReaderRefusal::NoReader)
+    );
+    // Reasons share one name per operator prefix and class.
+    assert_eq!(
+        ReaderRefusal::UnsafeOperator.metric_name("dynamic_filter_join"),
+        "dynamic_filter_join_skipped_unsafe_operator"
+    );
+    assert_eq!(
+        ReaderRefusal::UnsupportedKey.metric_name("dynamic_filter_topk"),
+        "dynamic_filter_topk_skipped_unsupported_key"
+    );
+    assert_eq!(
+        ReaderRefusal::NoReader.metric_name("dynamic_filter_join"),
+        "dynamic_filter_join_skipped_no_reader"
+    );
+}

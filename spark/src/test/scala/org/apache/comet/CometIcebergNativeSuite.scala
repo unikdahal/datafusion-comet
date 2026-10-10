@@ -1227,6 +1227,7 @@ class CometIcebergNativeSuite
           assert(expected == Seq(Row(expectedRows * 64L)))
           // Exercise disabled statistics, cold-cache and warm-cache execution with both kinds
           // of deletes. Only retained file statistics can reject tasks before footer I/O.
+          var statisticsReadings = 0
           val readings =
             Seq((false, false), (true, false), (true, true), (true, true)).map {
               case (enabled, statsEnabled) =>
@@ -1241,6 +1242,7 @@ class CometIcebergNativeSuite
                   bytes = scans.map(_.metrics("bytes_scanned").value).sum
                   val pruned = scans.map(_.metrics("iceberg_runtime_file_tasks_pruned").value).sum
                   if (enabled && statsEnabled) {
+                    statisticsReadings += 1
                     assert(
                       pruned >= fileCount - 2,
                       s"too few tasks rejected before footer I/O: $pruned; " +
@@ -1254,6 +1256,22 @@ class CometIcebergNativeSuite
                       // their transient Iceberg metadata before producing task protobuf bytes.
                       val statistics = scan.nativeIcebergScanMetadata.runtimeFileStatistics
                       assert(statistics.nonEmpty)
+                      // Each scan reports exactly one driver statistics outcome; the repeated
+                      // reading of the same snapshot and policy is served from the cache.
+                      val outcome = IcebergReflection.RuntimeStatsMetrics.counters
+                        .map(name => name -> scan.metrics(name).value)
+                        .filter(_._2 != 0L)
+                        .toMap
+                      val hit = Map(IcebergReflection.RuntimeStatsMetrics.CacheHits -> 1L)
+                      val miss = Map(IcebergReflection.RuntimeStatsMetrics.CacheMisses -> 1L)
+                      assert(outcome == hit || outcome == miss, s"outcome=$outcome")
+                      if (outcome == miss) {
+                        assert(
+                          scan
+                            .metrics(IcebergReflection.RuntimeStatsMetrics.CollectionTime)
+                            .value > 0L)
+                      }
+                      if (statisticsReadings == 2) assert(outcome == hit, s"outcome=$outcome")
                       Seq(
                         scan.copy(),
                         scan.clone().asInstanceOf[CometIcebergNativeScanExec],
@@ -1295,6 +1313,9 @@ class CometIcebergNativeSuite
                     scans.foreach { scan =>
                       val common = OperatorOuterClass.IcebergScanCommon.parseFrom(scan.commonData)
                       assert(common.getFileMetricsPoolCount == 0)
+                      assert(IcebergReflection.RuntimeStatsMetrics.counters.forall { name =>
+                        scan.metrics(name).value == 0L
+                      })
                     }
                   }
                 }

@@ -573,3 +573,51 @@ async fn native_minmax_execution_and_stream_lifetime() {
         }
     }
 }
+
+/// Executing one wrapper instance repeatedly sums its counters across executions. Each
+/// execution registers a fixed number of metrics, at most the plain aggregate's own
+/// per-execution registrations plus the attachment counter: DataFusion's `MetricBuilder`
+/// registers a new metric per call, so a plain operator grows the same way.
+#[tokio::test]
+async fn repeated_execution_of_one_wrapper_aggregates_metrics() {
+    use datafusion::physical_plan::collect;
+    use datafusion::prelude::SessionContext;
+
+    let session = SessionContext::new();
+    let (_file, scan) =
+        super::super::test_utils::iceberg_input(vec![Some(5), None, Some(9), Some(-3)]);
+    let plain = aggregate(scan, true, false, false);
+    let plan: Arc<dyn ExecutionPlan> = Arc::new(
+        IcebergMinMaxFilterExec::try_new(&plain, &ConfigOptions::default())
+            .unwrap()
+            .unwrap(),
+    );
+    let baseline: Arc<dyn ExecutionPlan> = Arc::new(plain);
+    let registered =
+        |plan: &Arc<dyn ExecutionPlan>| plan.metrics().map_or(0, |set| set.iter().count());
+    let sum = |plan: &Arc<dyn ExecutionPlan>, name: &str| {
+        plan.metrics()
+            .and_then(|set| set.sum_by_name(name))
+            .map_or(0, |value| value.as_usize())
+    };
+    let mut per_execution = None;
+    for execution in 1..=3 {
+        let before = registered(&plan);
+        let baseline_before = registered(&baseline);
+        let output = collect(Arc::clone(&plan), session.task_ctx()).await.unwrap();
+        assert_eq!(result_value(&output), ScalarValue::Int32(Some(9)));
+        let expected = collect(Arc::clone(&baseline), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(result_value(&expected), ScalarValue::Int32(Some(9)));
+        let added = registered(&plan) - before;
+        let baseline_added = registered(&baseline) - baseline_before;
+        assert!(added > 0 && added <= baseline_added + 1, "{added} vs {baseline_added}");
+        assert_eq!(*per_execution.get_or_insert(added), added, "execution {execution}");
+        assert_eq!(
+            sum(&plan, "dynamic_filter_minmax_filters_attached"),
+            execution
+        );
+        assert_eq!(sum(&plan, "output_rows"), execution);
+    }
+}

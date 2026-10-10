@@ -19,7 +19,7 @@ under the License.
 
 # Driver runtime-statistics resource bounds
 
-File statistics are advisory. If collection exceeds a limit, cannot run concurrently,
+File statistics are advisory. If collection exceeds a limit, exceeds the concurrency bound,
 or fails, native Iceberg keeps row-group, page and row runtime pruning. Spark's tasks,
 splits, residuals and delete associations remain authoritative.
 
@@ -41,9 +41,14 @@ Collection applies a public file limit and an internal byte limit:
   before manifest replanning, so repeated calls do not repeat that planning work.
 - An internal 8 MiB estimated byte budget per collection. Collection stops at the
   first file that would exceed the budget, closes the plan, and returns no partial
-  statistics. A bounded rejection entry avoids replanning that snapshot/field-ID/policy
-  combination until eviction. This deliberately also declines smaller selections of
-  that combination; changing the selected-file limit uses an independent policy.
+  statistics. The cache entry for that snapshot/field-ID/policy combination records
+  the rejected selection's distinct file count. Until eviction, a selection at least
+  that large is declined without replanning, while a strictly smaller selection may
+  still collect. A smaller selection that is also rejected lowers the recorded count,
+  so each repeated rejection re-plans at most once per smaller selection size.
+  Statistics already cached for the combination are retained alongside the rejection,
+  and cached coverage is checked first. Changing the selected-file limit uses an
+  independent policy.
 
 These are conservative resource defaults, not performance thresholds derived from
 benchmarks: 64 MiB allows eight entries at the default 8 MiB limit; 4096 files at
@@ -54,9 +59,14 @@ shared schemas and the Iceberg planner's internal manifest buffers are not measu
 by it, so this is **not a hard JVM heap or RSS limit**. A current file can already
 have been allocated by Iceberg before Comet rejects it.
 
-Only one manifest-statistics collection is admitted per driver at a time. Another
-miss declines advisory file statistics without waiting. Cache hits do not need the
-collection permit. Selected-path sets and returned query metadata are bounded per
+At most four manifest-statistics collections run per driver at a time, each for a
+distinct cache key. Collection is single-flight per key: a concurrent miss for the
+same key waits, bounded at 30 seconds, for the in-flight collection and then checks
+coverage for its own selection. If that does not cover it, it leads at most one
+further collection itself. A miss for a fifth distinct key declines advisory file
+statistics without waiting. Cache hits do not need a collection permit. Transient
+collection memory is therefore bounded by four times the per-collection budget,
+plus Iceberg's own planning allocations. Selected-path sets and returned query metadata are bounded per
 call; live query metadata and independent Iceberg planning allocations are owned by
 the queries, not included in cache retention. Disabling runtime statistics skips
 collection and cache lookups entirely.
@@ -80,6 +90,10 @@ receive distinct pool indices. Decimal schema strings must have precision 1 thro
 38 and scale 0 through precision; valid Iceberg formatting with a space after the
 comma remains accepted.
 
-`IcebergReflectionSuite` covers selected-file gates, byte rejection, cleanup,
-retained-weight accounting, concurrent misses, alternating policies, eviction and
-direct subset lookup.
+Each native Iceberg scan reports the outcome as `iceberg_runtime_stats_*` driver
+metrics (cache hit, miss, negative hit, shared wait, contention, over budget, failure
+and collection time); see the user guide's metrics page.
+
+`IcebergReflectionSuite` covers selected-file gates, byte rejection, broad-then-selective
+negative caching, cleanup, retained-weight accounting, shared and bounded concurrent
+misses, alternating policies, eviction and direct subset lookup.

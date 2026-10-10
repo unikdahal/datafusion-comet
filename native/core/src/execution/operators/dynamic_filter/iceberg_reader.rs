@@ -154,6 +154,35 @@ fn is_passable_projection(projection: &ProjectionExec) -> bool {
     })
 }
 
+/// Low-cardinality reason a runtime predicate did not attach to a native reader, reported by
+/// the producing operator's `dynamic_filter_*_skipped_*` metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReaderRefusal {
+    /// A limit, or a filter or projection that is not row-local and infallible, lies between
+    /// the producer and the scan.
+    UnsafeOperator,
+    /// The key is computed rather than a direct column, or the scan column is not an eligible
+    /// runtime pruning key.
+    UnsupportedKey,
+    /// The input does not end at a reader that accepts this runtime predicate.
+    NoReader,
+}
+
+impl ReaderRefusal {
+    /// The metric counting this refusal for the operator whose metrics use `prefix`.
+    pub(super) fn metric_name(self, prefix: &str) -> String {
+        let reason = match self {
+            Self::UnsafeOperator => "unsafe_operator",
+            Self::UnsupportedKey => "unsupported_key",
+            Self::NoReader => "no_reader",
+        };
+        format!("{prefix}_skipped_{reason}")
+    }
+}
+
+/// An attached reader plan, or the reason attachment was refused.
+pub(super) type ReaderAttachment = std::result::Result<Arc<dyn ExecutionPlan>, ReaderRefusal>;
+
 /// Attaches `predicate` to the Iceberg scan below `input`. With `order`, the scan also reads
 /// its file tasks best-first for that direction (see `order_tasks_for_runtime_bound`).
 pub(super) fn try_attach_iceberg_reader_filter(
@@ -161,13 +190,22 @@ pub(super) fn try_attach_iceberg_reader_filter(
     predicate: Arc<DynamicFilterPhysicalExpr>,
     order: Option<RuntimeScanOrder>,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    Ok(attach_iceberg_reader_filter(input, predicate, order)?.ok())
+}
+
+/// [`try_attach_iceberg_reader_filter`], reporting why attachment was refused.
+pub(super) fn attach_iceberg_reader_filter(
+    input: &Arc<dyn ExecutionPlan>,
+    predicate: Arc<DynamicFilterPhysicalExpr>,
+    order: Option<RuntimeScanOrder>,
+) -> Result<ReaderAttachment> {
     // A multi-key TopK filter lists every sort key; only the first one bounds the scan.
     let children = predicate.children();
     let Some(column) = children
         .first()
         .and_then(|child| child.downcast_ref::<Column>())
     else {
-        return Ok(None);
+        return Ok(Err(ReaderRefusal::UnsupportedKey));
     };
     let probe = ProbeColumn {
         predicate_index: column.index(),
@@ -180,12 +218,12 @@ pub(super) fn try_attach_iceberg_reader_filter(
 /// Connect a join producer and its reader as one attachment. The consumer is
 /// visible at the original probe schema, before any projection mapping, while
 /// the provider translates the same publication into the reader field identity.
-pub(super) fn try_attach_iceberg_join_filter(
+pub(super) fn attach_iceberg_join_filter(
     input: &Arc<dyn ExecutionPlan>,
     predicate: Arc<DynamicFilterPhysicalExpr>,
-) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+) -> Result<ReaderAttachment> {
     Ok(
-        try_attach_iceberg_reader_filter(input, Arc::clone(&predicate), None)?.map(|reader| {
+        attach_iceberg_reader_filter(input, Arc::clone(&predicate), None)?.map(|reader| {
             Arc::new(ReaderFilterConsumerExec::new(reader, predicate)) as Arc<dyn ExecutionPlan>
         }),
     )
@@ -204,25 +242,26 @@ fn attach_below(
     predicate: &Arc<DynamicFilterPhysicalExpr>,
     order: Option<RuntimeScanOrder>,
     probe: ProbeColumn,
-) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+) -> Result<ReaderAttachment> {
     if input.fetch().is_some() {
-        return Ok(None);
+        return Ok(Err(ReaderRefusal::UnsafeOperator));
     }
 
     if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
         if filter.has_projection()
             || !is_safe_to_prune_before(filter.predicate(), filter.input().schema().as_ref())
         {
-            return Ok(None);
+            return Ok(Err(ReaderRefusal::UnsafeOperator));
         }
-        let Some(reader) = attach_below(filter.input(), predicate, order, probe)? else {
-            return Ok(None);
+        let reader = match attach_below(filter.input(), predicate, order, probe)? {
+            Ok(reader) => reader,
+            refused => return Ok(refused),
         };
         return match filter.with_execution_input(reader) {
-            Ok(updated) => Ok(Some(updated)),
+            Ok(updated) => Ok(Ok(updated)),
             Err(error) => {
                 log::debug!("Iceberg runtime predicate attachment skipped: {error}");
-                Ok(None)
+                Ok(Err(ReaderRefusal::UnsafeOperator))
             }
         };
     }
@@ -231,7 +270,7 @@ fn attach_below(
     // converted to CometFilterExec.
     if let Some(filter) = input.downcast_ref::<FilterExec>() {
         if !is_safe_to_prune_before(filter.predicate(), filter.input().schema().as_ref()) {
-            return Ok(None);
+            return Ok(Err(ReaderRefusal::UnsafeOperator));
         }
         // A projection over a filter is folded into the filter's own output projection;
         // follow the key through it to its column in the filter's input.
@@ -239,7 +278,7 @@ fn attach_below(
             None => probe,
             Some(projection) => {
                 let Some(&index) = projection.get(probe.index) else {
-                    return Ok(None);
+                    return Ok(Err(ReaderRefusal::UnsupportedKey));
                 };
                 ProbeColumn {
                     predicate_index: probe.predicate_index,
@@ -248,10 +287,11 @@ fn attach_below(
                 }
             }
         };
-        let Some(reader) = attach_below(filter.input(), predicate, order, below)? else {
-            return Ok(None);
+        let reader = match attach_below(filter.input(), predicate, order, below)? {
+            Ok(reader) => reader,
+            refused => return Ok(refused),
         };
-        return Ok(Some(Arc::clone(input).replace_children(
+        return Ok(Ok(Arc::clone(input).replace_children(
             vec![reader],
             ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
         )?));
@@ -264,27 +304,28 @@ fn attach_below(
             .get(probe.index)
             .and_then(|projected| projected.expr.downcast_ref::<Column>())
         else {
-            return Ok(None);
+            return Ok(Err(ReaderRefusal::UnsupportedKey));
         };
         if !is_passable_projection(projection) {
-            return Ok(None);
+            return Ok(Err(ReaderRefusal::UnsafeOperator));
         }
         let below = ProbeColumn {
             predicate_index: probe.predicate_index,
             index: source.index(),
             name: source.name().to_string(),
         };
-        let Some(reader) = attach_below(projection.input(), predicate, order, below)? else {
-            return Ok(None);
+        let reader = match attach_below(projection.input(), predicate, order, below)? {
+            Ok(reader) => reader,
+            refused => return Ok(refused),
         };
-        return Ok(Some(Arc::clone(input).replace_children(
+        return Ok(Ok(Arc::clone(input).replace_children(
             vec![reader],
             ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
         )?));
     }
 
     let Some(scan) = input.downcast_ref::<IcebergScanExec>() else {
-        return Ok(None);
+        return Ok(Err(ReaderRefusal::NoReader));
     };
     if scan
         .schema()
@@ -292,11 +333,11 @@ fn attach_below(
         .get(probe.index)
         .is_none_or(|field| field.name() != &probe.name)
     {
-        return Ok(None);
+        return Ok(Err(ReaderRefusal::UnsupportedKey));
     }
     let Some((iceberg_field_id, iceberg_field_name)) = scan.runtime_predicate_field(probe.index)
     else {
-        return Ok(None);
+        return Ok(Err(ReaderRefusal::UnsupportedKey));
     };
     let provider: Arc<dyn RuntimePredicateProvider> = Arc::new(
         IcebergRuntimePredicateProvider::new(
@@ -306,7 +347,7 @@ fn attach_below(
         )
         .with_largest_first(matches!(order, Some(RuntimeScanOrder::Descending { .. }))),
     );
-    Ok(Some(Arc::new(scan.with_runtime_predicate_provider(
+    Ok(Ok(Arc::new(scan.with_runtime_predicate_provider(
         provider,
         order.map(|order| (iceberg_field_id, order)),
     ))))

@@ -959,6 +959,10 @@ async fn reader_filter_does_not_cross_fetch_limits() {
             outputs.push(row_count(&output));
             if enabled {
                 assert_eq!(metric(&plan, "dynamic_filter_join_filters_skipped"), 1);
+                assert_eq!(
+                    metric(&plan, "dynamic_filter_join_skipped_unsafe_operator"),
+                    1
+                );
             }
         }
         assert_eq!(outputs, vec![0, 0]);
@@ -1042,6 +1046,10 @@ async fn reader_filter_does_not_cross_seeded_rand_probe_filter() {
             };
             assert_eq!(dynamic_metric("dynamic_filter_join_filters_attached"), 0);
             assert_eq!(dynamic_metric("dynamic_filter_join_filters_skipped"), 1);
+            assert_eq!(
+                dynamic_metric("dynamic_filter_join_skipped_unsafe_operator"),
+                1
+            );
             assert_eq!(dynamic_metric("dynamic_filter_join_rows_evaluated"), 1);
             assert_eq!(dynamic_metric("dynamic_filter_join_rows_pruned"), 0);
             assert_eq!(pruning_metric(&scan, "row_groups_pruned_statistics"), 0);
@@ -1919,7 +1927,7 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
         )))
         .unwrap();
     let reattached =
-        super::super::iceberg_reader::try_attach_iceberg_join_filter(&reset, predicate)
+        super::super::iceberg_reader::attach_iceberg_join_filter(&reset, predicate)
             .unwrap()
             .unwrap();
     let reset_output = collect(reattached, session.task_ctx()).await.unwrap();

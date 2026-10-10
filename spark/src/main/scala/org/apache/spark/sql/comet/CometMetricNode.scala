@@ -528,7 +528,13 @@ object CometMetricNode {
       "dynamic_filter_join_filters_attached" ->
         SQLMetrics.createMetric(sc, "Join runtime filters attached to native readers"),
       "dynamic_filter_join_filters_skipped" ->
-        SQLMetrics.createMetric(sc, "Join runtime filters not eligible for native readers"))
+        SQLMetrics.createMetric(sc, "Join runtime filters not eligible for native readers"),
+      "dynamic_filter_join_skipped_unsafe_operator" ->
+        SQLMetrics.createMetric(sc, "Join runtime filters skipped: limit or unsafe operator"),
+      "dynamic_filter_join_skipped_unsupported_key" ->
+        SQLMetrics.createMetric(sc, "Join runtime filters skipped: unsupported key"),
+      "dynamic_filter_join_skipped_no_reader" ->
+        SQLMetrics.createMetric(sc, "Join runtime filters skipped: no eligible reader"))
   }
 
   /**

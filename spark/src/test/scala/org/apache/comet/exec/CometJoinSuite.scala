@@ -780,6 +780,10 @@ class CometJoinSuite extends CometTestBase {
                 if (enabled) {
                   assert(joins.head.metrics("dynamic_filter_join_filters_attached").value == 0L)
                   assert(joins.head.metrics("dynamic_filter_join_filters_skipped").value == 1L)
+                  assert(
+                    joins.head
+                      .metrics("dynamic_filter_join_skipped_unsafe_operator")
+                      .value == 1L)
                   assert(joins.head.metrics("dynamic_filter_join_rows_evaluated").value == 1L)
                   assert(joins.head.metrics("dynamic_filter_join_rows_pruned").value == 0L)
                 }

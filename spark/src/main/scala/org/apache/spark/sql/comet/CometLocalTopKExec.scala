@@ -141,5 +141,13 @@ case class CometLocalTopKExec(
       "dynamic_filter_topk_filters_attached" ->
         SQLMetrics.createMetric(sparkContext, "TopK reader filters attached"),
       "dynamic_filter_topk_filters_skipped" ->
-        SQLMetrics.createMetric(sparkContext, "TopK reader filters skipped"))
+        SQLMetrics.createMetric(sparkContext, "TopK reader filters skipped"),
+      "dynamic_filter_topk_skipped_unsafe_operator" ->
+        SQLMetrics.createMetric(
+          sparkContext,
+          "TopK reader filters skipped: limit or unsafe operator"),
+      "dynamic_filter_topk_skipped_unsupported_key" ->
+        SQLMetrics.createMetric(sparkContext, "TopK reader filters skipped: unsupported key"),
+      "dynamic_filter_topk_skipped_no_reader" ->
+        SQLMetrics.createMetric(sparkContext, "TopK reader filters skipped: no eligible reader"))
 }

@@ -40,10 +40,10 @@ use futures::StreamExt;
 
 mod reader;
 
-use super::iceberg_reader::reaches_iceberg_reader;
+use super::iceberg_reader::{reaches_iceberg_reader, ReaderRefusal};
 use super::join::is_direct_pruning_key;
 use super::safety::is_safe_to_prune_before;
-use reader::try_attach_topk_reader_filter;
+use reader::attach_topk_reader_filter;
 
 use crate::execution::operators::RuntimeScanOrder;
 
@@ -60,6 +60,8 @@ pub(crate) struct TopKReaderFilterExec {
 struct RuntimeTopK {
     sort: SortExec,
     reader_filter_attached: bool,
+    /// Why the threshold did not reach a native reader, when it did not.
+    reader_refusal: Option<ReaderRefusal>,
 }
 
 impl TopKReaderFilterExec {
@@ -138,18 +140,20 @@ impl TopKReaderFilterExec {
                 nulls_first: first.nulls_first,
             }
         };
-        let reader = try_attach_topk_reader_filter(
+        let reader = attach_topk_reader_filter(
             self.template.input(),
             Arc::clone(&predicate),
             &self.config,
             order,
         )?;
-        let reader_filter_attached = reader.is_some();
-        let input = reader.unwrap_or_else(|| Arc::clone(self.template.input()));
+        let reader_refusal = reader.as_ref().err().copied();
+        let reader_filter_attached = reader_refusal.is_none();
+        let input = reader.unwrap_or_else(|_| Arc::clone(self.template.input()));
         let sort = Self::fresh_sort(&self.template, input).with_dynamic_filter_expr(predicate)?;
         Ok(RuntimeTopK {
             sort,
             reader_filter_attached,
+            reader_refusal,
         })
     }
 
@@ -262,6 +266,11 @@ impl ExecutionPlan for TopKReaderFilterExec {
         } else {
             "dynamic_filter_topk_filters_skipped"
         };
+        if let Some(reason) = runtime.reader_refusal {
+            MetricBuilder::new(&self.metrics)
+                .counter(reason.metric_name("dynamic_filter_topk"), partition)
+                .add(1);
+        }
         MetricBuilder::new(&self.metrics)
             .counter(attachment_metric, partition)
             .add(1);

@@ -93,15 +93,18 @@ With `spark.comet.exec.join.dynamicFilter.enabled=true`, native broadcast and sh
 report these additional metric keys. See [Join Runtime Filters](tuning/operators.md#join-runtime-filters) for
 eligibility and reader restrictions.
 
-| Metric                                 | Description                                                                   |
-| -------------------------------------- | ----------------------------------------------------------------------------- |
-| `dynamic_filter_join_rows_evaluated`   | Probe rows evaluated by the runtime filter.                                   |
-| `dynamic_filter_join_rows_pruned`      | Probe rows rejected by that filter before the hash probe.                     |
-| `dynamic_filter_join_rows_bypassed`    | Probe rows bypassing runtime filter evaluation, including adaptive bypass.    |
-| `dynamic_filter_join_bypass_switches`  | Transitions into adaptive bypass when decoded filtering rejects too few rows. |
-| `dynamic_filter_join_eval_time`        | Time evaluating the runtime filter.                                           |
-| `dynamic_filter_join_filters_attached` | Executions that attach their runtime filter to a native reader.               |
-| `dynamic_filter_join_filters_skipped`  | Executions whose probe input is ineligible for reader attachment.             |
+| Metric                                        | Description                                                                   |
+| --------------------------------------------- | ----------------------------------------------------------------------------- |
+| `dynamic_filter_join_rows_evaluated`          | Probe rows evaluated by the runtime filter.                                   |
+| `dynamic_filter_join_rows_pruned`             | Probe rows rejected by that filter before the hash probe.                     |
+| `dynamic_filter_join_rows_bypassed`           | Probe rows bypassing runtime filter evaluation, including adaptive bypass.    |
+| `dynamic_filter_join_bypass_switches`         | Transitions into adaptive bypass when decoded filtering rejects too few rows. |
+| `dynamic_filter_join_eval_time`               | Time evaluating the runtime filter.                                           |
+| `dynamic_filter_join_filters_attached`        | Executions that attach their runtime filter to a native reader.               |
+| `dynamic_filter_join_filters_skipped`         | Executions whose probe input is ineligible for reader attachment.             |
+| `dynamic_filter_join_skipped_unsafe_operator` | Skipped because a limit, or a fallible or non-row-local operator, intervenes. |
+| `dynamic_filter_join_skipped_unsupported_key` | Skipped because the key is computed or not an eligible scan column.           |
+| `dynamic_filter_join_skipped_no_reader`       | Skipped because the probe does not end at an eligible native reader.          |
 
 The row counters measure residual filtering of decoded probe batches. They exclude rows skipped
 by the reader. An attached filter does not guarantee that any row groups are pruned: compare the
@@ -114,10 +117,17 @@ With `spark.comet.exec.topK.dynamicFilter.enabled=true`, eligible fused local To
 these counters. See [TopK Reader Pruning](tuning/operators.md#topk-reader-pruning) for the required
 fusion option and reader restrictions.
 
-| Metric                                 | Description                                                           |
-| -------------------------------------- | --------------------------------------------------------------------- |
-| `dynamic_filter_topk_filters_attached` | Live TopK threshold attachments to native Parquet or Iceberg readers. |
-| `dynamic_filter_topk_filters_skipped`  | Eligible TopK executions whose input cannot accept reader attachment. |
+| Metric                                        | Description                                                                   |
+| --------------------------------------------- | ----------------------------------------------------------------------------- |
+| `dynamic_filter_topk_filters_attached`        | Live TopK threshold attachments to native Parquet or Iceberg readers.         |
+| `dynamic_filter_topk_filters_skipped`         | Eligible TopK executions whose input cannot accept reader attachment.         |
+| `dynamic_filter_topk_skipped_unsafe_operator` | Skipped because a limit, or a fallible or non-row-local operator, intervenes. |
+| `dynamic_filter_topk_skipped_unsupported_key` | Skipped because the key is computed or not an eligible scan column.           |
+| `dynamic_filter_topk_skipped_no_reader`       | Skipped because the input does not end at an eligible native reader.          |
+
+Each skipped execution increments `dynamic_filter_topk_filters_skipped` and exactly one reason
+counter. The join reasons follow the same rule. A native Parquet scan the Parquet path declines
+(for example, because of a static predicate or an unsupported key type) reports `no_reader`.
 
 These counters belong to the local TopK. An attached predicate may prune nothing, and a file's
 schema adaptation can disable it to preserve conversion errors. For Parquet, reader work remains on the scan:
@@ -149,7 +159,29 @@ runtime pruning activity is absent:
 
 Iceberg's `bytes_scanned` counts ranged reader I/O, including metadata and delete files. It does
 not measure physical disk traffic after operating-system caching. Compare it with runtime filters
-disabled to assess the reader savings.
+disabled to assess the reader savings. A runtime predicate that attached but was not selective
+shows `iceberg_runtime_predicate_tasks` above zero with both pruning counters at zero.
+
+Native Iceberg scans also report the outcome of the driver's advisory file-statistics collection
+(see [Native Iceberg Readers](tuning/operators.md#native-iceberg-readers)). Comet collects these
+statistics on the driver while planning the scan, and posts them as driver metrics. They remain
+zero when the scan has no runtime-filter key, has at most one task, or statistics are disabled:
+
+| Metric                                      | Description                                                                  |
+| ------------------------------------------- | ---------------------------------------------------------------------------- |
+| `iceberg_runtime_stats_cache_hits`          | Statistics served from the driver cache, including after a shared wait.      |
+| `iceberg_runtime_stats_cache_misses`        | Collections that re-planned the scan's manifests.                            |
+| `iceberg_runtime_stats_negative_cache_hits` | Selections declined by an earlier rejection of an equal or larger selection. |
+| `iceberg_runtime_stats_shared_waits`        | Waits for an identical in-flight collection instead of planning again.       |
+| `iceberg_runtime_stats_contention_skips`    | Collections declined by the concurrent bound or after an unproductive wait.  |
+| `iceberg_runtime_stats_over_budget`         | Selections or collections over the file-count or estimated byte budget.      |
+| `iceberg_runtime_stats_failures`            | Collections that failed or could not request selected column statistics.     |
+| `iceberg_runtime_stats_collection_time`     | Driver time spent re-planning manifests for statistics.                      |
+
+A scan reports at most one of the hit, miss, negative-hit and contention outcomes. It also reports
+`over_budget` or `failures` when collection stopped for that reason, before or after re-planning.
+Every outcome other than a hit keeps row-group, page and row runtime pruning; only pruning of whole
+files before they are opened is lost.
 
 ### Exchange
 

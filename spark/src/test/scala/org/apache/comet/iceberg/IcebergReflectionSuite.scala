@@ -49,6 +49,7 @@ import org.apache.iceberg.types.Types
 import org.apache.spark.sql.internal.SQLConf
 
 import org.apache.comet.CometConf
+import org.apache.comet.iceberg.IcebergReflection.{RuntimeStatsMetrics, RuntimeStatsResult}
 
 class IcebergReflectionSuite extends AnyFunSuite {
 
@@ -390,7 +391,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
     }
   }
 
-  test("concurrent cache misses limit collection and preserve configuration isolation") {
+  test("concurrent misses for distinct keys proceed and preserve configuration isolation") {
     withRuntimeStatsTable { table =>
       val source = table.newScan()
       val tasks = runtimeTasks(source)
@@ -411,13 +412,14 @@ class IcebergReflectionSuite extends AnyFunSuite {
           }
         })
         assert(started.await(30, TimeUnit.SECONDS))
+        // A different field and policy is a distinct key: it collects while the first is held.
         val other = new CountingRuntimeScan(source)
         val otherConf = new SQLConf
         otherConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, "16")
         SQLConf.withExistingConf(otherConf) {
-          assert(IcebergReflection.runtimeFileStatistics(other, tasks, Seq("extra")).isEmpty)
+          assert(IcebergReflection.runtimeFileStatistics(other, tasks, Seq("extra")).size == 3)
         }
-        assert(other.planningCalls == 0)
+        assert(other.planningCalls == 1)
         release.countDown()
         assert(collecting.get(30, TimeUnit.SECONDS).size == 3)
         SQLConf.withExistingConf(collectingConf) {
@@ -440,6 +442,157 @@ class IcebergReflectionSuite extends AnyFunSuite {
         release.countDown()
         executor.shutdownNow()
       }
+    }
+  }
+
+  private def collectStatistics(
+      scan: CountingRuntimeScan,
+      tasks: java.util.List[FileScanTask],
+      conf: SQLConf): java.util.concurrent.Callable[RuntimeStatsResult] =
+    new java.util.concurrent.Callable[RuntimeStatsResult] {
+      override def call(): RuntimeStatsResult = SQLConf.withExistingConf(conf) {
+        IcebergReflection.collectRuntimeFileStatistics(scan, tasks, Seq("id"))
+      }
+    }
+
+  test("identical concurrent misses share one in-flight collection") {
+    withRuntimeStatsTable { table =>
+      val source = table.newScan()
+      val tasks = runtimeTasks(source)
+      val started = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      val leader = new CountingRuntimeScan(source)
+      leader.beforePlanning = () => {
+        started.countDown()
+        assert(release.await(30, TimeUnit.SECONDS))
+      }
+      val follower = new CountingRuntimeScan(source)
+      val conf = SQLConf.get
+      val executor = Executors.newFixedThreadPool(2)
+      try {
+        val leading = executor.submit(collectStatistics(leader, tasks, conf))
+        assert(started.await(30, TimeUnit.SECONDS))
+        val following = executor.submit(collectStatistics(follower, tasks, conf))
+        // Release the leader only once the follower waits on its flight.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+        while (IcebergReflection.runtimeStatsWaiters.get() == 0) {
+          assert(System.nanoTime() < deadline, "the identical request never waited")
+          Thread.`yield`()
+        }
+        release.countDown()
+        val led = leading.get(30, TimeUnit.SECONDS)
+        val shared = following.get(30, TimeUnit.SECONDS)
+        assert(led.statistics.size == 3)
+        assert(led.metrics(RuntimeStatsMetrics.CacheMisses) == 1L)
+        assert(led.metrics.contains(RuntimeStatsMetrics.CollectionTime))
+        assert(shared.statistics == led.statistics)
+        assert(
+          shared.metrics == Map(
+            RuntimeStatsMetrics.SharedWaits -> 1L,
+            RuntimeStatsMetrics.CacheHits -> 1L))
+        assert(leader.planningCalls == 1)
+        assert(follower.planningCalls == 0)
+      } finally {
+        release.countDown()
+        executor.shutdownNow()
+      }
+    }
+  }
+
+  test("distinct concurrent misses are bounded and excess misses fail open") {
+    withRuntimeStatsTable { table =>
+      val source = table.newScan()
+      val tasks = runtimeTasks(source)
+      val limit = IcebergReflection.RuntimeStatsMaxConcurrentCollections
+      val started = new CountDownLatch(limit)
+      val release = new CountDownLatch(1)
+      val executor = Executors.newFixedThreadPool(limit)
+      try {
+        // Each selected-file limit is a distinct key for the same snapshot and field.
+        val collecting = (1 to limit).map { index =>
+          val scan = new CountingRuntimeScan(source)
+          scan.beforePlanning = () => {
+            started.countDown()
+            assert(release.await(30, TimeUnit.SECONDS))
+          }
+          val conf = new SQLConf
+          conf.setConfString(
+            CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key,
+            (8 * index).toString)
+          executor.submit(collectStatistics(scan, tasks, conf))
+        }
+        assert(started.await(30, TimeUnit.SECONDS))
+        val excess = new CountingRuntimeScan(source)
+        val excessConf = new SQLConf
+        excessConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, "1000")
+        val declined = collectStatistics(excess, tasks, excessConf).call()
+        assert(declined.statistics.isEmpty)
+        assert(declined.metrics == Map(RuntimeStatsMetrics.ContentionSkips -> 1L))
+        assert(excess.planningCalls == 0)
+        release.countDown()
+        collecting.foreach(f => assert(f.get(30, TimeUnit.SECONDS).statistics.size == 3))
+        // Contention caches no rejection: the declined key collects once permits are free.
+        val retried = collectStatistics(excess, tasks, excessConf).call()
+        assert(retried.statistics.size == 3)
+        assert(excess.planningCalls == 1)
+      } finally {
+        release.countDown()
+        executor.shutdownNow()
+      }
+    }
+  }
+
+  test("a byte-budget rejection declines equal or larger selections but not smaller ones") {
+    withRuntimeStatsTable { table =>
+      // Files 3 to 999 have long paths, so the full selection exceeds the 8 MiB budget, while
+      // the files 0 to 2 form a small, selective query on the same snapshot, field and policy.
+      appendRuntimeStatsFiles(table, 3, 1000, pathPadding = 2000)
+      val conf = SQLConf.get
+      val source = table.newScan()
+      val broad = new CountingRuntimeScan(source)
+      val tasks = runtimeTasks(source)
+      val selectiveSource = source.filter(Expressions.lessThan("id", Int.box(3)))
+      val selective = new CountingRuntimeScan(selectiveSource)
+      val selectiveTasks = runtimeTasks(selectiveSource)
+      assert(selectiveTasks.size() == 3)
+      val negativeHit = Map(RuntimeStatsMetrics.NegativeCacheHits -> 1L)
+
+      val rejected = collectStatistics(broad, tasks, conf).call()
+      assert(rejected.statistics.isEmpty)
+      assert(rejected.metrics(RuntimeStatsMetrics.CacheMisses) == 1L)
+      assert(rejected.metrics(RuntimeStatsMetrics.OverBudget) == 1L)
+      assert(broad.planningCalls == 1)
+      // An equal selection is declined without replanning.
+      assert(collectStatistics(broad, tasks, conf).call().metrics == negativeHit)
+      assert(broad.planningCalls == 1)
+
+      // A strictly smaller selection bypasses the rejection and collects its statistics.
+      val collected = collectStatistics(selective, selectiveTasks, conf).call()
+      assert(collected.statistics.size == 3)
+      assert(collected.metrics(RuntimeStatsMetrics.CacheMisses) == 1L)
+      assert(selective.planningCalls == 1)
+      // Neither result displaces the other: the broad selection is still declined and the
+      // selective one is now a cache hit, both without replanning.
+      assert(collectStatistics(broad, tasks, conf).call().metrics == negativeHit)
+      val hit = collectStatistics(selective, selectiveTasks, conf).call()
+      assert(hit.statistics == collected.statistics)
+      assert(hit.metrics == Map(RuntimeStatsMetrics.CacheHits -> 1L))
+      assert(broad.planningCalls == 1)
+      assert(selective.planningCalls == 1)
+
+      // A smaller selection that is also too large lowers the threshold and keeps the cached
+      // selective statistics.
+      val nearlyBroad = tasks.subList(0, tasks.size() - 1)
+      val lowered = collectStatistics(broad, nearlyBroad, conf).call()
+      assert(lowered.statistics.isEmpty)
+      assert(lowered.metrics(RuntimeStatsMetrics.OverBudget) == 1L)
+      assert(broad.planningCalls == 2)
+      assert(collectStatistics(broad, nearlyBroad, conf).call().metrics == negativeHit)
+      assert(broad.planningCalls == 2)
+      assert(
+        collectStatistics(selective, selectiveTasks, conf).call().metrics ==
+          Map(RuntimeStatsMetrics.CacheHits -> 1L))
+      assert(selective.planningCalls == 1)
     }
   }
 

@@ -47,7 +47,7 @@ use datafusion::physical_plan::{
 use datafusion_comet_operators::CometFilterExec;
 use futures::StreamExt;
 
-use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_join_filter};
+use super::iceberg_reader::{attach_iceberg_join_filter, reaches_iceberg_reader, ReaderRefusal};
 use super::parquet_reader::{is_parquet_reader_key, try_attach_parquet_reader_filter};
 use super::{DynamicFilterExec, MAX_IN_LIST_LITERALS};
 
@@ -67,6 +67,8 @@ pub(crate) struct DynamicFilterJoinExec {
 struct RuntimeDynamicFilterJoin {
     join: HashJoinExec,
     reader_filter_attached: bool,
+    /// Why the filter did not reach a native reader, when it did not.
+    reader_refusal: Option<ReaderRefusal>,
 }
 
 impl DynamicFilterJoinExec {
@@ -103,16 +105,17 @@ impl DynamicFilterJoinExec {
             None
         };
         let (reader, iceberg_reader) = match parquet_reader {
-            Some(reader) => (Some(reader), false),
+            Some(reader) => (Ok(reader), false),
             None => {
                 let reader =
-                    try_attach_iceberg_join_filter(self.template.right(), Arc::clone(&predicate))?;
-                let attached = reader.is_some();
+                    attach_iceberg_join_filter(self.template.right(), Arc::clone(&predicate))?;
+                let attached = reader.is_ok();
                 (reader, attached)
             }
         };
-        let reader_filter_attached = reader.is_some();
-        let input = reader.unwrap_or_else(|| Arc::clone(self.template.right()));
+        let reader_refusal = reader.as_ref().err().copied();
+        let reader_filter_attached = reader_refusal.is_none();
+        let input = reader.unwrap_or_else(|_| Arc::clone(self.template.right()));
         let consumer: Arc<dyn ExecutionPlan> = if iceberg_reader {
             // The reader rejects files, row groups and pages before decoding.
             // HashJoinExec then verifies the surviving rows exactly. A second
@@ -139,6 +142,7 @@ impl DynamicFilterJoinExec {
         Ok(RuntimeDynamicFilterJoin {
             join,
             reader_filter_attached,
+            reader_refusal,
         })
     }
 
@@ -271,6 +275,11 @@ impl ExecutionPlan for DynamicFilterJoinExec {
         } else {
             "dynamic_filter_join_filters_skipped"
         };
+        if let Some(reason) = runtime.reader_refusal {
+            MetricBuilder::new(&self.metrics)
+                .counter(reason.metric_name("dynamic_filter_join"), partition)
+                .add(1);
+        }
         MetricBuilder::new(&self.metrics)
             .counter(attachment_metric, partition)
             .add(1);

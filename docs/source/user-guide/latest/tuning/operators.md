@@ -132,8 +132,11 @@ execution as its Parquet or Iceberg scan. This experimental optimization is disa
 It supports a direct native Parquet scan ordered by one signed integer column (`TINYINT`, `SMALLINT`,
 `INT`, or `BIGINT`). Native Iceberg scans also support `DATE`, `TIMESTAMP`, `TIMESTAMP_NTZ` and
 `UTF8_BINARY` strings as the first sort key, with further direct sort keys allowed. Both sort
-directions are supported. Integer, date and timestamp keys support either null ordering;
-string reader pruning supports only `NULLS LAST`. Fixed `CHAR`, padding, non-default collations
+directions are supported. Integer, date and timestamp keys support either null ordering.
+A string first key is eligible only with `NULLS LAST`. Spark's default for `ASC` is `NULLS FIRST`,
+so `ORDER BY name` and `ORDER BY name ASC` keep the existing TopK path; write
+`ORDER BY name ASC NULLS LAST` to make the key eligible. `DESC` defaults to `NULLS LAST` and is
+eligible, while `DESC NULLS FIRST` is not. Fixed `CHAR`, padding, non-default collations
 and computed string lineage prevent reader attachment. Other inputs use the existing TopK path.
 
 Each scan partition keeps enough candidates for both `LIMIT` and `OFFSET`. With multiple partitions,
@@ -193,7 +196,8 @@ driver and retains statistics only for the exact direct runtime-filter key: `INT
 `DATE`, `TIMESTAMP`, `TIMESTAMP_NTZ`, `DECIMAL` or `UTF8_BINARY` string. Decimal joins require
 matching precision and scale. Decimal statistics support does not enable decimal TopK or MIN/MAX
 pruning. Fixed `CHAR`, padding and non-default collations are excluded. String TopK reader
-pruning requires `NULLS LAST`.
+pruning requires `NULLS LAST`, so a plain ascending `ORDER BY`, which defaults to `NULLS FIRST`,
+is not eligible.
 For joins this is the probe side only. If the linked Iceberg version cannot request selected column
 statistics, Comet skips whole-file pruning and keeps row-group runtime pruning instead of loading
 statistics for every column.
@@ -201,9 +205,12 @@ statistics for every column.
 `spark.comet.scan.icebergNative.runtimeStats.enabled` controls advisory driver statistics
 collection and caching. Disabling it keeps row-group, page and row runtime pruning.
 `spark.comet.scan.icebergNative.runtimeStats.maxFiles` limits collection to 4096 distinct
-selected files by default. Internal byte budgets and one collection at a time per driver bound
-resource use; oversized scans and concurrent cache misses keep reader pruning without file
-statistics. See [driver resource bounds](../../../contributor-guide/runtime-statistics-bounds.md).
+selected files by default. Internal byte budgets and at most four concurrent collections per
+driver bound resource use. Identical concurrent cache misses share one collection. Oversized
+selections and misses beyond the concurrency bound keep reader pruning without file statistics;
+an oversized rejection does not decline a strictly smaller selection of the same snapshot. The
+`iceberg_runtime_stats_*` scan metrics report each outcome. See
+[driver resource bounds](../../../contributor-guide/runtime-statistics-bounds.md).
 
 Iceberg scans add three behaviors:
 

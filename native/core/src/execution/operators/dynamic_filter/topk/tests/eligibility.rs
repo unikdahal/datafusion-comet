@@ -156,4 +156,8 @@ async fn supplied_file_statistics_skip_reader_attachment() {
         count_metric(plan.as_ref(), "dynamic_filter_topk_filters_skipped"),
         1
     );
+    assert_eq!(
+        count_metric(plan.as_ref(), "dynamic_filter_topk_skipped_no_reader"),
+        1
+    );
 }
