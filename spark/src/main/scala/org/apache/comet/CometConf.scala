@@ -152,9 +152,10 @@ object CometConf extends ShimCometConf {
   val COMET_ICEBERG_RUNTIME_STATS_MAX_BYTES: ConfigEntry[Long] =
     conf("spark.comet.scan.icebergNative.runtimeStats.maxBytes")
       .category(CATEGORY_SCAN)
-      .doc("Maximum estimated bytes collected per runtime statistics entry, including when " +
-        "caching is disabled. This is an approximate metadata budget, not a JVM heap limit. " +
-        "One collection runs at a time per driver; concurrent misses retain row-group pruning.")
+      .doc(
+        "Maximum estimated bytes collected per runtime statistics entry, including when " +
+          "caching is disabled. This is an approximate metadata budget, not a JVM heap limit. " +
+          "One collection runs at a time per driver; concurrent misses retain row-group pruning.")
       .longConf
       .checkValue(
         value => value > 0 && value <= 64L * 1024 * 1024,

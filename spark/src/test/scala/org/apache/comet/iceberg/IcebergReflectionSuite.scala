@@ -290,7 +290,8 @@ class IcebergReflectionSuite extends AnyFunSuite {
       SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, "2")
       for (enabled <- Seq(true, false); _ <- 1 to 2) {
         SQLConf.get.setConfString(
-          CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key, enabled.toString)
+          CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key,
+          enabled.toString)
         assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).isEmpty)
       }
       assert(scan.planningCalls == 0)
@@ -301,7 +302,8 @@ class IcebergReflectionSuite extends AnyFunSuite {
     }
   }
 
-  test("oversized byte collection closes the plan, returns no partial metrics and caches rejection") {
+  test(
+    "oversized byte collection closes the plan, returns no partial metrics and caches rejection") {
     withRuntimeStatsTable { table =>
       val source = table.newScan()
       val scan = new CountingRuntimeScan(source)
@@ -331,7 +333,8 @@ class IcebergReflectionSuite extends AnyFunSuite {
       val sessions = Seq(8, 16).map { capacity =>
         val conf = new SQLConf
         conf.setConfString(
-          CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, capacity.toString)
+          CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key,
+          capacity.toString)
         (conf, new CountingRuntimeScan(source))
       }
       for (_ <- 1 to 3; (conf, scan) <- sessions) {
@@ -360,13 +363,14 @@ class IcebergReflectionSuite extends AnyFunSuite {
       val start = System.nanoTime()
       assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).size == 100)
       val planningNanos = System.nanoTime() - start
-      assert(IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 2), Seq("id"))
-        .size == 2)
+      assert(
+        IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 2), Seq("id")).size == 2)
       assert(scan.planningCalls == 1)
       val (chargedBytes, retainedFiles) = IcebergReflection.runtimeStatsCacheUsage
       assert(chargedBytes <= IcebergReflection.RuntimeStatsCacheMaxBytes)
-      info(s"100-file runtime statistics: planningNanos=$planningNanos " +
-        s"chargedBytes=$chargedBytes retainedFiles=$retainedFiles")
+      info(
+        s"100-file runtime statistics: planningNanos=$planningNanos " +
+          s"chargedBytes=$chargedBytes retainedFiles=$retainedFiles")
     }
   }
 
@@ -397,7 +401,8 @@ class IcebergReflectionSuite extends AnyFunSuite {
       }
       val collectingConf = new SQLConf
       collectingConf.setConfString(
-        CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, "8")
+        CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key,
+        "8")
       val executor = Executors.newSingleThreadExecutor()
       try {
         val collecting = executor.submit(new java.util.concurrent.Callable[Map[String, AnyRef]] {
@@ -408,8 +413,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
         assert(started.await(30, TimeUnit.SECONDS))
         val other = new CountingRuntimeScan(source)
         val otherConf = new SQLConf
-        otherConf.setConfString(
-          CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, "16")
+        otherConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, "16")
         otherConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key, "false")
         SQLConf.withExistingConf(otherConf) {
           assert(IcebergReflection.runtimeFileStatistics(other, tasks, Seq("extra")).isEmpty)
@@ -449,8 +453,10 @@ class IcebergReflectionSuite extends AnyFunSuite {
       lookups += 1
       underlying.get(path)
     }
-    assert(IcebergReflection.selectRuntimeStatistics(Set("file-1", "file-99999"), lookup)
-      .contains(Map("file-1" -> file, "file-99999" -> file)))
+    assert(
+      IcebergReflection
+        .selectRuntimeStatistics(Set("file-1", "file-99999"), lookup)
+        .contains(Map("file-1" -> file, "file-99999" -> file)))
     assert(lookups == 2)
     assert(IcebergReflection.selectRuntimeStatistics(Set("missing"), lookup).isEmpty)
     assert(lookups == 3)

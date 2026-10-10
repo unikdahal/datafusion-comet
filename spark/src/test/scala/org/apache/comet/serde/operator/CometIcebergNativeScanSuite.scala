@@ -42,7 +42,8 @@ class CometIcebergNativeScanSuite extends AnyFunSuite with Matchers {
     val lower = Map(
       Integer.valueOf(1) -> java.nio.ByteBuffer.wrap(Array[Byte](1, 0, 0, 0)),
       Integer.valueOf(2) -> java.nio.ByteBuffer.wrap(Array[Byte](2, 0, 0, 0)))
-    val statistics = DataFiles.builder(PartitionSpec.unpartitioned())
+    val statistics = DataFiles
+      .builder(PartitionSpec.unpartitioned())
       .withPath("file:///shared.parquet")
       .withFileSizeInBytes(100L)
       .withMetrics(new Metrics(10L, null, null, null, null, lower.asJava, lower.asJava))
@@ -51,7 +52,12 @@ class CometIcebergNativeScanSuite extends AnyFunSuite with Matchers {
     val pool = mutable.HashMap.empty[(String, Set[Int]), Int]
     val contentFileClass = IcebergReflection.loadClass(IcebergReflection.ClassNames.CONTENT_FILE)
     def intern(fields: Set[Int]): Int = CometIcebergNativeScan.internFileMetrics(
-      contentFileClass, pool, common, "file:///shared.parquet", statistics, fields)
+      contentFileClass,
+      pool,
+      common,
+      "file:///shared.parquet",
+      statistics,
+      fields)
     val first = intern(Set(1))
     val second = intern(Set(2))
     assert(first != second, "different task projections must not share incompatible metrics")
@@ -59,10 +65,12 @@ class CometIcebergNativeScanSuite extends AnyFunSuite with Matchers {
     val both = intern(Set(1, 2))
     assert(intern(Set(2, 1)) == both)
     assert(common.getFileMetricsPoolCount == 3)
-    assert(common.getFileMetricsPool(first).getLowerBoundsMap.keySet().asScala.toSet ==
-      Set(Integer.valueOf(1)))
-    assert(common.getFileMetricsPool(second).getLowerBoundsMap.keySet().asScala.toSet ==
-      Set(Integer.valueOf(2)))
+    assert(
+      common.getFileMetricsPool(first).getLowerBoundsMap.keySet().asScala.toSet ==
+        Set(Integer.valueOf(1)))
+    assert(
+      common.getFileMetricsPool(second).getLowerBoundsMap.keySet().asScala.toSet ==
+        Set(Integer.valueOf(2)))
     assert(common.getFileMetricsPool(both).getLowerBoundsMap.size() == 2)
   }
 
