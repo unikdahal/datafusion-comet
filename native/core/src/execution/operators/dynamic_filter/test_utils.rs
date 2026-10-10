@@ -33,12 +33,11 @@ pub(super) fn iceberg_input(
     values: Vec<Option<i32>>,
 ) -> (tempfile::NamedTempFile, Arc<dyn ExecutionPlan>) {
     let file = tempfile::NamedTempFile::new().unwrap();
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("key", DataType::Int32, true).with_metadata(HashMap::from([(
+    let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Int32, true)
+        .with_metadata(HashMap::from([(
             PARQUET_FIELD_ID_META_KEY.into(),
             "1".into(),
-        )])),
-    ]));
+        )]))]));
     let rows = values.len();
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
@@ -58,9 +57,12 @@ pub(super) fn iceberg_input(
     writer.close().unwrap();
     let table_schema = Arc::new(
         IcebergSchema::builder()
-            .with_fields(vec![
-                NestedField::optional(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "key",
+                Type::Primitive(PrimitiveType::Int),
+            )
+            .into()])
             .build()
             .unwrap(),
     );

@@ -262,8 +262,9 @@ class IcebergReflectionSuite extends AnyFunSuite {
       assert(scan.planningCalls == 65)
       collect(4)
       assert(scan.planningCalls == 66)
-      assert(IcebergReflection.runtimeStatsCacheUsage._1 <=
-        IcebergReflection.RuntimeStatsCacheMaxBytes)
+      assert(
+        IcebergReflection.runtimeStatsCacheUsage._1 <=
+          IcebergReflection.RuntimeStatsCacheMaxBytes)
     }
   }
 
@@ -340,9 +341,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
       val tasks = runtimeTasks(source)
       val sessions = Seq(8, 16).map { capacity =>
         val conf = new SQLConf
-        conf.setConfString(
-          CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key,
-          capacity.toString)
+        conf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, capacity.toString)
         (conf, new CountingRuntimeScan(source))
       }
       for (_ <- 1 to 3; (conf, scan) <- sessions) {
@@ -403,9 +402,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
         assert(release.await(30, TimeUnit.SECONDS))
       }
       val collectingConf = new SQLConf
-      collectingConf.setConfString(
-        CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key,
-        "8")
+      collectingConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, "8")
       val executor = Executors.newSingleThreadExecutor()
       try {
         val collecting = executor.submit(new java.util.concurrent.Callable[Map[String, AnyRef]] {

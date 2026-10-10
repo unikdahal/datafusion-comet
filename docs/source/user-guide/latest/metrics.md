@@ -93,15 +93,15 @@ With `spark.comet.exec.join.dynamicFilter.enabled=true`, native broadcast and sh
 report these additional metric keys. See [Join Runtime Filters](tuning/operators.md#join-runtime-filters) for
 eligibility and reader restrictions.
 
-| Metric                                 | Description                                                       |
-| -------------------------------------- | ----------------------------------------------------------------- |
-| `dynamic_filter_join_rows_evaluated`   | Probe rows evaluated by the runtime filter.                       |
-| `dynamic_filter_join_rows_pruned`      | Probe rows rejected by that filter before the hash probe.         |
-| `dynamic_filter_join_rows_bypassed`    | Probe rows bypassing runtime filter evaluation, including adaptive bypass. |
+| Metric                                 | Description                                                                   |
+| -------------------------------------- | ----------------------------------------------------------------------------- |
+| `dynamic_filter_join_rows_evaluated`   | Probe rows evaluated by the runtime filter.                                   |
+| `dynamic_filter_join_rows_pruned`      | Probe rows rejected by that filter before the hash probe.                     |
+| `dynamic_filter_join_rows_bypassed`    | Probe rows bypassing runtime filter evaluation, including adaptive bypass.    |
 | `dynamic_filter_join_bypass_switches`  | Transitions into adaptive bypass when decoded filtering rejects too few rows. |
-| `dynamic_filter_join_eval_time`        | Time evaluating the runtime filter.                               |
-| `dynamic_filter_join_filters_attached` | Executions that attach their runtime filter to a native reader.   |
-| `dynamic_filter_join_filters_skipped`  | Executions whose probe input is ineligible for reader attachment. |
+| `dynamic_filter_join_eval_time`        | Time evaluating the runtime filter.                                           |
+| `dynamic_filter_join_filters_attached` | Executions that attach their runtime filter to a native reader.               |
+| `dynamic_filter_join_filters_skipped`  | Executions whose probe input is ineligible for reader attachment.             |
 
 The row counters measure residual filtering of decoded probe batches. They exclude rows skipped
 by the reader. An attached filter does not guarantee that any row groups are pruned: compare the
@@ -144,7 +144,7 @@ runtime pruning activity is absent:
 | `iceberg_runtime_row_groups_pruned`      | Row groups skipped by runtime predicate statistics.                   |
 | `iceberg_runtime_row_groups_pruned_live` | The part of those row groups skipped after a refresh during a file.   |
 | `iceberg_runtime_predicate_refreshes`    | Newer runtime predicates picked up at row-group boundaries.           |
-| `iceberg_runtime_decoder_rebuilds`      | Decoder rebuilds needed to adopt refreshed runtime predicates.        |
+| `iceberg_runtime_decoder_rebuilds`       | Decoder rebuilds needed to adopt refreshed runtime predicates.        |
 
 Compare `bytes_scanned` with the runtime filters disabled to assess the reader savings.
 

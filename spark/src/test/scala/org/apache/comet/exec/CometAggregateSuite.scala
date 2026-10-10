@@ -91,9 +91,8 @@ class CometAggregateSuite extends CometTestBase with AdaptiveSparkPlanHelper {
           var rowCount = 0L
           files.foreach { file =>
             val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
-              org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(
-                new Path(file),
-                spark.sessionState.newHadoopConf()))
+              org.apache.parquet.hadoop.util.HadoopInputFile
+                .fromPath(new Path(file), spark.sessionState.newHadoopConf()))
             try {
               rowCount += reader.getRowGroups.asScala.map(_.getRowCount).sum
               val encodings = reader.getRowGroups.asScala.flatMap { group =>
@@ -199,8 +198,9 @@ class CometAggregateSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       withTempPath { path =>
         val table = "preserved_char_extrema"
         try {
-          sql(s"CREATE TABLE $table (g INT, s CHAR(4)) USING parquet " +
-            s"LOCATION '${path.getCanonicalPath}'")
+          sql(
+            s"CREATE TABLE $table (g INT, s CHAR(4)) USING parquet " +
+              s"LOCATION '${path.getCanonicalPath}'")
           sql(s"INSERT INTO $table VALUES (0, 'a'), (0, 'a '), (0, '中'), (1, NULL)")
           withTempView("char_extrema") {
             // Strip the legacy annotation so the guard must inspect CharType itself.
@@ -218,8 +218,8 @@ class CometAggregateSuite extends CometTestBase with AdaptiveSparkPlanHelper {
                 assert(actualSchema == sql(query).schema)
               }
             }
-            val (_, plan) = checkSparkAnswer(
-              "SELECT s FROM char_extrema ORDER BY s ASC NULLS LAST LIMIT 2")
+            val (_, plan) =
+              checkSparkAnswer("SELECT s FROM char_extrema ORDER BY s ASC NULLS LAST LIMIT 2")
             collect(plan) { case topK: CometLocalTopKExec => topK }.foreach { topK =>
               assert(!topK.dynamicFilterEnabled, plan)
               assert(!topK.nativeOp.getSort.getDynamicFilterEnabled, plan)

@@ -130,9 +130,20 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       assert(RuntimePruningKeyTypes.isFileStatsIcebergType(s"decimal($precision, $scale)"))
     }
     val rejected = Seq(
-      "float", "double", "boolean", "binary", "fixed[16]", "uuid", "timestamp_ns",
-      "decimal(", "decimal(0,0)", "decimal(39,0)", "decimal(10,11)", "decimal(10,-1)",
-      "decimal(10,2)junk", "decimal(999999999999999999,2)")
+      "float",
+      "double",
+      "boolean",
+      "binary",
+      "fixed[16]",
+      "uuid",
+      "timestamp_ns",
+      "decimal(",
+      "decimal(0,0)",
+      "decimal(39,0)",
+      "decimal(10,11)",
+      "decimal(10,-1)",
+      "decimal(10,2)junk",
+      "decimal(999999999999999999,2)")
     rejected.foreach { name =>
       assert(!RuntimePruningKeyTypes.isFileStatsIcebergType(name), name)
     }

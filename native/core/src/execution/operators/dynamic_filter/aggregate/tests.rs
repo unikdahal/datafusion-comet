@@ -324,7 +324,10 @@ fn produced_filter(aggregate: &AggregateExec) -> Arc<DynamicFilterPhysicalExpr> 
 }
 
 fn result_value(batches: &[arrow::record_batch::RecordBatch]) -> ScalarValue {
-    assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
     ScalarValue::try_from_array(batches[0].column(0), 0).unwrap()
 }
 
@@ -334,7 +337,11 @@ async fn native_minmax_execution_matches_disabled_pruning_and_reexecutes() {
     use datafusion::prelude::{SessionConfig, SessionContext};
 
     for max in [false, true] {
-        for values in [vec![Some(5), None, Some(9), Some(-3)], vec![None; 4], vec![]] {
+        for values in [
+            vec![Some(5), None, Some(9), Some(-3)],
+            vec![None; 4],
+            vec![],
+        ] {
             let session = SessionContext::new_with_config(SessionConfig::new().with_batch_size(2));
             let (_file, scan) = super::super::test_utils::iceberg_input(values.clone());
             let plain = aggregate(Arc::clone(&scan), max, false, false);
@@ -344,9 +351,14 @@ async fn native_minmax_execution_matches_disabled_pruning_and_reexecutes() {
                     .unwrap(),
             );
             let mut disabled = SessionConfig::new().with_batch_size(2);
-            disabled.options_mut().optimizer.enable_aggregate_dynamic_filter_pushdown = false;
+            disabled
+                .options_mut()
+                .optimizer
+                .enable_aggregate_dynamic_filter_pushdown = false;
             let baseline_session = SessionContext::new_with_config(disabled);
-            let baseline = collect(Arc::new(plain), baseline_session.task_ctx()).await.unwrap();
+            let baseline = collect(Arc::new(plain), baseline_session.task_ctx())
+                .await
+                .unwrap();
             let expected = if max {
                 values.into_iter().flatten().max()
             } else {
@@ -414,7 +426,10 @@ impl datafusion::physical_plan::streaming::PartitionStream for ControlledScan {
             tail
         })
         .flatten();
-        Box::pin(RecordBatchStreamAdapter::new(self.input.schema(), input.chain(tail)))
+        Box::pin(RecordBatchStreamAdapter::new(
+            self.input.schema(),
+            input.chain(tail),
+        ))
     }
 }
 
@@ -523,7 +538,12 @@ async fn native_minmax_execution_and_stream_lifetime() {
             let fresh_filter = produced_filter(&fresh);
             assert_eq!(fresh_filter.snapshot_generation(), initial_generation);
             assert_eq!(
-                fresh_filter.current().unwrap().downcast_ref::<Literal>().unwrap().value(),
+                fresh_filter
+                    .current()
+                    .unwrap()
+                    .downcast_ref::<Literal>()
+                    .unwrap()
+                    .value(),
                 &ScalarValue::Boolean(Some(true)),
             );
             drop(fresh_filter);

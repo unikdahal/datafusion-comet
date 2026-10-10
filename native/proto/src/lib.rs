@@ -131,8 +131,7 @@ mod tests {
         };
         let mut common =
             IcebergScanCommon::decode(legacy_common.encode_to_vec().as_slice()).unwrap();
-        let mut task =
-            IcebergFileScanTask::decode(legacy_task.encode_to_vec().as_slice()).unwrap();
+        let mut task = IcebergFileScanTask::decode(legacy_task.encode_to_vec().as_slice()).unwrap();
         assert!(common.file_metrics_pool.is_empty());
         assert_eq!(task.file_metrics_idx, None);
         common.file_metrics_pool.push(IcebergFileMetrics {
@@ -157,7 +156,10 @@ mod tests {
             IcebergScanCommon::decode(common_bytes.as_slice()).unwrap(),
             common,
         );
-        assert_eq!(IcebergFileScanTask::decode(task_bytes.as_slice()).unwrap(), task);
+        assert_eq!(
+            IcebergFileScanTask::decode(task_bytes.as_slice()).unwrap(),
+            task
+        );
     }
 
     #[derive(Clone, PartialEq, prost::Message)]

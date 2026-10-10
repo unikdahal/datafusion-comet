@@ -65,8 +65,7 @@ Limits prevent reader attachment. Parquet readers attach only through direct-col
 checks and no projections; native Iceberg readers also attach through filters and projections
 that are row-local and cannot raise errors, with projections passing the key column through.
 Determinism alone is insufficient: casts, division and other fallible expressions prevent
-attachment. See the [expression safety contract](
-../../../contributor-guide/runtime-pruning-design.md#safety-contract).
+attachment. See the [expression safety contract](../../../contributor-guide/runtime-pruning-design.md#safety-contract).
 
 Decoded-batch filtering adapts to observed selectivity. If it rejects too few rows, it bypasses
 evaluation for most batches and periodically samples again. A new predicate generation resets
@@ -203,8 +202,7 @@ collection and caching. Disabling it keeps row-group, page and row runtime pruni
 `spark.comet.scan.icebergNative.runtimeStats.maxFiles` limits collection to 4096 distinct
 selected files by default. Internal byte budgets and one collection at a time per driver bound
 resource use; oversized scans and concurrent cache misses keep reader pruning without file
-statistics. See [driver resource bounds](
-../../../contributor-guide/runtime-statistics-bounds.md).
+statistics. See [driver resource bounds](../../../contributor-guide/runtime-statistics-bounds.md).
 
 Iceberg scans add three behaviors:
 

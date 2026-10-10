@@ -124,17 +124,19 @@ object CometConf extends ShimCometConf {
   val COMET_ICEBERG_RUNTIME_STATS_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.scan.icebergNative.runtimeStats.enabled")
       .category(CATEGORY_SCAN)
-      .doc("Whether to collect and cache runtime-filter column statistics on the driver for " +
-        "immutable Iceberg snapshots under internal estimated byte budgets. Disabling this " +
-        "keeps row-group pruning and skips advisory driver statistics collection.")
+      .doc(
+        "Whether to collect and cache runtime-filter column statistics on the driver for " +
+          "immutable Iceberg snapshots under internal estimated byte budgets. Disabling this " +
+          "keeps row-group pruning and skips advisory driver statistics collection.")
       .booleanConf
       .createWithDefault(true)
 
   val COMET_ICEBERG_RUNTIME_STATS_MAX_FILES: ConfigEntry[Int] =
     conf("spark.comet.scan.icebergNative.runtimeStats.maxFiles")
       .category(CATEGORY_SCAN)
-      .doc("Maximum distinct selected files collected per runtime statistics entry. Larger scans " +
-        "retain row-group pruning only.")
+      .doc(
+        "Maximum distinct selected files collected per runtime statistics entry. Larger scans " +
+          "retain row-group pruning only.")
       .intConf
       .checkValue(_ > 0, "Runtime statistics maximum files must be positive")
       .createWithDefault(4096)

@@ -29,10 +29,10 @@ import org.apache.comet.shims.CometTypeShim
 /**
  * JVM key-type policy for runtime pruning.
  *
- * Driver file statistics admit INT, BIGINT, DATE, microsecond timestamps, DECIMAL and
- * UTF8_BINARY strings. Native Parquet reader pushdown admits signed integer keys, including
- * BYTE and SHORT, which Iceberg schemas cannot produce. TopK and MIN/MAX exclude DECIMAL.
- * Native code makes the final reader-attachment decision.
+ * Driver file statistics admit INT, BIGINT, DATE, microsecond timestamps, DECIMAL and UTF8_BINARY
+ * strings. Native Parquet reader pushdown admits signed integer keys, including BYTE and SHORT,
+ * which Iceberg schemas cannot produce. TopK and MIN/MAX exclude DECIMAL. Native code makes the
+ * final reader-attachment decision.
  */
 object RuntimePruningKeyTypes extends CometTypeShim {
 

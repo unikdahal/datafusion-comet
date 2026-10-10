@@ -471,8 +471,7 @@ object IcebergReflection extends Logging {
 
   /**
    * Top-level INT, BIGINT, DATE, microsecond TIMESTAMP, DECIMAL and STRING columns of `schema`:
-   * the key types the runtime predicate producers support, whose statistics
-   * can prune a file.
+   * the key types the runtime predicate producers support, whose statistics can prune a file.
    */
   def runtimeKeyColumns(schema: Any): Seq[String] = {
     import scala.jdk.CollectionConverters._
@@ -666,8 +665,9 @@ object IcebergReflection extends Logging {
         .orNull
       if (icebergScan == null) return Map.empty
       // Missing identity/snapshot metadata disables caching, not statistics collection.
-      val cacheKey = try { runtimeStatsKey(icebergScan, scan, columns, policy) }
-      catch { case NonFatal(_) => None }
+      val cacheKey =
+        try { runtimeStatsKey(icebergScan, scan, columns, policy) }
+        catch { case NonFatal(_) => None }
       val cached = cacheKey.flatMap(key => Option(runtimeStatsCache.getIfPresent(key)))
       if (cached.exists(_.oversized)) return Map.empty
       cached.flatMap(entry => selectRuntimeStatistics(selected, entry.statistics.get)) match {

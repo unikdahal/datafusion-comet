@@ -212,4 +212,3 @@ columns, missing field IDs, splits, deletes, page selections, concurrent
 publications, failing expressions, resets and stream cancellation. Tests live in
 [Comet's dynamic-filter suite](../../../native/core/src/execution/operators/dynamic_filter/)
 and `iceberg::arrow::reader::runtime_predicate_tests`.
-

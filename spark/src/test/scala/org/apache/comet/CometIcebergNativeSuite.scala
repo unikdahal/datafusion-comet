@@ -183,7 +183,8 @@ class CometIcebergNativeSuite
         try {
           // Each name ends with a metadata table name but is an ordinary data table.
           for (table <- tables) {
-            spark.sql(s"CREATE TABLE hadoop_catalog.db.$table (id INT, name STRING) USING iceberg")
+            spark.sql(
+              s"CREATE TABLE hadoop_catalog.db.$table (id INT, name STRING) USING iceberg")
             spark.sql(s"INSERT INTO hadoop_catalog.db.$table VALUES (1, 'a'), (2, 'b')")
             checkIcebergNativeScan(s"SELECT * FROM hadoop_catalog.db.$table ORDER BY id")
           }

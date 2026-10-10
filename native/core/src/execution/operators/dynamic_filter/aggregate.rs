@@ -180,7 +180,10 @@ impl IcebergMinMaxFilterExec {
             let remaining = if batch.is_ok() { Some(input) } else { None };
             Some((batch, remaining))
         });
-        Ok(Box::pin(RecordBatchStreamAdapter::new(self.schema(), stream)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.schema(),
+            stream,
+        )))
     }
 }
 

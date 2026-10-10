@@ -26,9 +26,9 @@ use iceberg::spec::Datum;
 
 #[tokio::test]
 async fn forced_snapshot_contention_fail_open_through_real_reader() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use datafusion::physical_plan::collect;
     use datafusion::prelude::SessionContext;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let (_file, input) = super::super::test_utils::iceberg_input(vec![Some(1), Some(2)]);
     let scan = input.downcast_ref::<IcebergScanExec>().unwrap();
@@ -42,7 +42,10 @@ async fn forced_snapshot_contention_fail_open_through_real_reader() {
     let writer = std::thread::spawn({
         let dynamic = Arc::clone(&dynamic);
         move || {
-            while requests.recv_timeout(std::time::Duration::from_secs(10)).unwrap() {
+            while requests
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+            {
                 dynamic.update(lit(false)).unwrap();
                 completed.send(()).unwrap();
             }
@@ -72,7 +75,10 @@ async fn forced_snapshot_contention_fail_open_through_real_reader() {
     let contended: Arc<dyn ExecutionPlan> =
         Arc::new(scan.with_runtime_predicate_provider(Arc::clone(&provider) as _, None));
     let batches = collect(contended, session.task_ctx()).await.unwrap();
-    assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 2);
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        2
+    );
     let attempts = reads.load(Ordering::SeqCst);
     assert!(attempts >= 3);
     assert_eq!(
@@ -91,7 +97,10 @@ async fn forced_snapshot_contention_fail_open_through_real_reader() {
     let stable: Arc<dyn ExecutionPlan> =
         Arc::new(scan.with_runtime_predicate_provider(provider, None));
     let batches = collect(stable, session.task_ctx()).await.unwrap();
-    assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 0);
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        0
+    );
 }
 
 #[test]
