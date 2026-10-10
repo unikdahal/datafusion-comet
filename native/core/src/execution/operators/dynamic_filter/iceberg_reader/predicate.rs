@@ -28,6 +28,8 @@ use iceberg::expr::{Predicate, Reference};
 use iceberg::spec::{Datum, Type};
 use std::sync::Arc;
 
+use super::super::MAX_IN_LIST_LITERALS;
+
 pub(super) fn extract_iceberg_predicate(
     expr: &Arc<dyn PhysicalExpr>,
     probe_column_index: usize,
@@ -71,10 +73,6 @@ pub(super) fn extract_iceberg_predicate(
             _ => None,
         })
 }
-
-/// The largest `IN` list translated into an Iceberg predicate. DataFusion only publishes a list
-/// for small build sides; larger ones stay hash lookups on the probe side.
-pub(super) const MAX_IN_LIST_LITERALS: usize = 1024;
 
 /// `key IN (v1, v2, ...)` over the probe column, or `None` if any part is not a plain literal.
 fn extract_in_list(
@@ -297,7 +295,7 @@ fn extract_bound(
 }
 
 /// Converts a runtime pruning scalar to an Iceberg Datum.
-/// Supported variants correspond to [`crate::execution::operators::dynamic_filter::is_runtime_pruning_key_type`].
+/// Supported variants correspond to [`crate::execution::operators::dynamic_filter::is_supported_join_key_type`].
 fn scalar_to_datum(value: &ScalarValue) -> Option<Datum> {
     match value {
         ScalarValue::Int8(Some(value)) => Some(Datum::int(i32::from(*value))),

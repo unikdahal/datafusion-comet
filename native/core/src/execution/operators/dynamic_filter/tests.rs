@@ -47,10 +47,6 @@ fn test_join_key_types() {
             is_supported_join_key_type(data_type),
             "expected {data_type:?} to be supported as join key"
         );
-        assert!(
-            RuntimePruningConsumer::Join.is_supported(data_type),
-            "expected {data_type:?} to be supported via RuntimePruningConsumer::Join"
-        );
     }
 
     let unsupported = vec![
@@ -89,10 +85,6 @@ fn test_join_key_types() {
             !is_supported_join_key_type(data_type),
             "expected {data_type:?} to be unsupported as join key"
         );
-        assert!(
-            !RuntimePruningConsumer::Join.is_supported(data_type),
-            "expected {data_type:?} to be unsupported via RuntimePruningConsumer::Join"
-        );
     }
 }
 
@@ -117,10 +109,6 @@ fn test_topk_key_types() {
             is_supported_topk_key_type(data_type),
             "expected {data_type:?} to be supported as topk key"
         );
-        assert!(
-            RuntimePruningConsumer::TopK.is_supported(data_type),
-            "expected {data_type:?} to be supported via RuntimePruningConsumer::TopK"
-        );
     }
 
     let unsupported = vec![
@@ -138,10 +126,6 @@ fn test_topk_key_types() {
         assert!(
             !is_supported_topk_key_type(data_type),
             "expected {data_type:?} to be unsupported as topk key"
-        );
-        assert!(
-            !RuntimePruningConsumer::TopK.is_supported(data_type),
-            "expected {data_type:?} to be unsupported via RuntimePruningConsumer::TopK"
         );
     }
 }
@@ -165,10 +149,6 @@ fn test_minmax_key_types() {
             is_supported_minmax_key_type(data_type),
             "expected {data_type:?} to be supported as minmax key"
         );
-        assert!(
-            RuntimePruningConsumer::MinMax.is_supported(data_type),
-            "expected {data_type:?} to be supported via RuntimePruningConsumer::MinMax"
-        );
     }
 
     let unsupported = vec![
@@ -187,10 +167,6 @@ fn test_minmax_key_types() {
             !is_supported_minmax_key_type(data_type),
             "expected {data_type:?} to be unsupported as minmax key"
         );
-        assert!(
-            !RuntimePruningConsumer::MinMax.is_supported(data_type),
-            "expected {data_type:?} to be unsupported via RuntimePruningConsumer::MinMax"
-        );
     }
 }
 
@@ -207,10 +183,6 @@ fn test_parquet_reader_key_types() {
         assert!(
             is_supported_parquet_reader_key_type(data_type),
             "expected {data_type:?} to be supported as parquet reader key"
-        );
-        assert!(
-            RuntimePruningConsumer::ParquetReader.is_supported(data_type),
-            "expected {data_type:?} to be supported via RuntimePruningConsumer::ParquetReader"
         );
     }
 
@@ -229,44 +201,6 @@ fn test_parquet_reader_key_types() {
         assert!(
             !is_supported_parquet_reader_key_type(data_type),
             "expected {data_type:?} to be unsupported as parquet reader key"
-        );
-        assert!(
-            !RuntimePruningConsumer::ParquetReader.is_supported(data_type),
-            "expected {data_type:?} to be unsupported via RuntimePruningConsumer::ParquetReader"
-        );
-    }
-}
-
-#[test]
-fn test_column_stats_key_types() {
-    let supported = vec![
-        DataType::Int8,
-        DataType::Int16,
-        DataType::Int32,
-        DataType::Int64,
-        DataType::Date32,
-        DataType::Timestamp(TimeUnit::Microsecond, None),
-        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-        DataType::Decimal128(10, 2),
-        DataType::Decimal128(38, 18),
-        DataType::Utf8,
-        DataType::LargeUtf8,
-        DataType::Utf8View,
-        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-    ];
-
-    for data_type in &supported {
-        assert!(
-            is_supported_column_stats_key_type(data_type),
-            "expected {data_type:?} to be supported for column stats"
-        );
-        assert!(
-            is_runtime_pruning_key_type(data_type),
-            "expected {data_type:?} to be supported via is_runtime_pruning_key_type alias"
-        );
-        assert!(
-            RuntimePruningConsumer::ColumnStats.is_supported(data_type),
-            "expected {data_type:?} to be supported via RuntimePruningConsumer::ColumnStats"
         );
     }
 }

@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use super::predicate::MAX_IN_LIST_LITERALS;
+use super::super::MAX_IN_LIST_LITERALS;
 use super::*;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::Operator;
@@ -455,6 +455,14 @@ fn small_exact_membership_becomes_an_in_predicate() {
     )
     .unwrap();
     assert!(extract_iceberg_predicate(&with_null, 0, "id").is_none());
+    let at_cap = in_list(
+        Arc::clone(&key),
+        (0..MAX_IN_LIST_LITERALS as i32).map(lit).collect(),
+        &false,
+        &schema,
+    )
+    .unwrap();
+    assert!(extract_iceberg_predicate(&at_cap, 0, "id").is_some());
     // More literals than the cap is not translated.
     let many = in_list(
         key,

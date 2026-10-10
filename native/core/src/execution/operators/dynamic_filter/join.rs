@@ -49,7 +49,7 @@ use futures::StreamExt;
 
 use super::iceberg_reader::{reaches_iceberg_reader, try_attach_iceberg_join_filter};
 use super::parquet_reader::{is_parquet_reader_key, try_attach_parquet_reader_filter};
-use super::DynamicFilterExec;
+use super::{DynamicFilterExec, MAX_IN_LIST_LITERALS};
 
 /// A permanent plan must not own a completed join's filter or build accumulator:
 /// those can retain the hash map after its stream-owned reservation is released.
@@ -160,7 +160,7 @@ impl DynamicFilterJoinExec {
         config
             .options_mut()
             .optimizer
-            .hash_join_inlist_pushdown_max_distinct_values = IN_LIST_PUSHDOWN_MAX_DISTINCT;
+            .hash_join_inlist_pushdown_max_distinct_values = MAX_IN_LIST_LITERALS;
         let context = Arc::new(TaskContext::new(
             context.task_id(),
             context.session_id(),
@@ -295,9 +295,8 @@ impl ExecutionPlan for DynamicFilterJoinExec {
 }
 
 /// Largest packed build-side key array, and most distinct keys, DataFusion may turn into an
-/// IN list. At most a few thousand literals per task, so the unreserved allocation stays small.
+/// IN list. The shared literal ceiling also bounds the unreserved allocation.
 const IN_LIST_PUSHDOWN_MAX_BYTES: usize = 16 * 1024;
-const IN_LIST_PUSHDOWN_MAX_DISTINCT: usize = 1024;
 
 fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Option<&'static str>> {
     if !config.optimizer.enable_dynamic_filter_pushdown
