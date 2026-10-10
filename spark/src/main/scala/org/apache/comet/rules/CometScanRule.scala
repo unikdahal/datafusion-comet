@@ -1213,16 +1213,17 @@ case class CometScanTypeChecker() extends DataTypeSupport with CometTypeShim {
 object CometScanRule extends Logging {
 
   /**
-   * Conservative driver collection gate, not the native attachment policy. These Catalyst
-   * shapes serialize to row-local infallible native expressions; unknown functions, casts and
-   * arithmetic keep statistics collection above their evaluation boundary. Extend only with
-   * a corresponding native proof and tests, rather than treating determinism as infallibility.
+   * Conservative driver collection gate, not the native attachment policy. These Catalyst shapes
+   * serialize to row-local infallible native expressions; unknown functions, casts and arithmetic
+   * keep statistics collection above their evaluation boundary. Extend only with a corresponding
+   * native proof and tests, rather than treating determinism as infallibility.
    */
   private[rules] def isSafeRuntimeStatsExpression(expression: Expression): Boolean = {
     import org.apache.spark.sql.catalyst.expressions._
     def comparable(dataType: DataType): Boolean = dataType match {
       case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
-          DateType | TimestampType | TimestampNTZType | BinaryType | _: DecimalType => true
+          DateType | TimestampType | TimestampNTZType | BinaryType | _: DecimalType =>
+        true
       case st: StringType => !RuntimePruningKeyTypes.isStringCollationType(st)
       case _ => false
     }
@@ -1231,7 +1232,7 @@ object CometScanRule extends Logging {
       case _: And | _: Or | _: Not => expression.children.forall(_.dataType == BooleanType)
       case comparison: BinaryComparison =>
         comparable(comparison.left.dataType) &&
-          comparison.left.dataType == comparison.right.dataType
+        comparison.left.dataType == comparison.right.dataType
       case in: In =>
         comparable(in.value.dataType) && in.list.forall {
           case literal: Literal => literal.dataType == in.value.dataType

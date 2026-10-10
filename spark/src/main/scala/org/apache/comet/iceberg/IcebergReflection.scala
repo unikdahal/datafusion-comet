@@ -565,7 +565,12 @@ object IcebergReflection extends Logging {
   private def runtimeStatsFileBytes(file: AnyRef, path: String): Long = {
     val contentFile = loadClass(ClassNames.CONTENT_FILE)
     var bytes = 512L + path.length.toLong * 2
-    Seq("columnSizes", "valueCounts", "nullValueCounts", "nanValueCounts", "lowerBounds",
+    Seq(
+      "columnSizes",
+      "valueCounts",
+      "nullValueCounts",
+      "nanValueCounts",
+      "lowerBounds",
       "upperBounds").foreach { name =>
       val values = getMethod(contentFile, name).invoke(file).asInstanceOf[java.util.Map[_, _]]
       if (values != null) {
@@ -577,10 +582,12 @@ object IcebergReflection extends Logging {
         }
       }
     }
-    val keyMetadata = getMethod(contentFile, "keyMetadata").invoke(file)
+    val keyMetadata = getMethod(contentFile, "keyMetadata")
+      .invoke(file)
       .asInstanceOf[java.nio.ByteBuffer]
     if (keyMetadata != null) bytes += keyMetadata.capacity().toLong
-    val offsets = getMethod(contentFile, "splitOffsets").invoke(file)
+    val offsets = getMethod(contentFile, "splitOffsets")
+      .invoke(file)
       .asInstanceOf[java.util.List[_]]
     if (offsets != null) bytes += offsets.size().toLong * 24
     val partition = getMethod(contentFile, "partition").invoke(file)
@@ -691,14 +698,16 @@ object IcebergReflection extends Logging {
         val planned = getMethod(scanClass, "planFiles").invoke(withStats)
         try {
           val result = scala.collection.mutable.HashMap.empty[String, AnyRef]
-          val keyBytes = cacheKey.map(key =>
-            128L + key.metadataLocation.length.toLong * 2 + key.fieldIds.size.toLong * 24)
+          val keyBytes = cacheKey
+            .map(key =>
+              128L + key.metadataLocation.length.toLong * 2 + key.fieldIds.size.toLong * 24)
             .getOrElse(128L)
           var estimatedBytes = selectedBytes + keyBytes
           val iterator = planned.asInstanceOf[java.lang.Iterable[_]].iterator()
           while (iterator.hasNext) {
             val file = fileMethod.invoke(iterator.next())
-            extractFileLocation(file).filter(path => selected.contains(path) && !result.contains(path))
+            extractFileLocation(file)
+              .filter(path => selected.contains(path) && !result.contains(path))
               .foreach { path =>
                 estimatedBytes += runtimeStatsFileBytes(file.asInstanceOf[AnyRef], path)
                 if (estimatedBytes <= policy.maxBytes) result.put(path, file.asInstanceOf[AnyRef])
@@ -706,8 +715,10 @@ object IcebergReflection extends Logging {
             if (estimatedBytes > policy.maxBytes) {
               // Reject atomically, and remember the oversized snapshot/key policy to avoid
               // repeatedly re-planning it. Eviction permits a later retry; no partial metrics leak.
-              cacheKey.foreach(key => runtimeStatsCache.put(
-                key, RuntimeStatsEntry(Map.empty, keyBytes, oversized = true)))
+              cacheKey.foreach(key =>
+                runtimeStatsCache.put(
+                  key,
+                  RuntimeStatsEntry(Map.empty, keyBytes, oversized = true)))
               return Map.empty
             }
           }
