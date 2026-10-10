@@ -396,7 +396,6 @@ object Utils extends CometTypeShim with Logging {
               logWarning(
                 "Unexpected dictionary-encoded column during BroadcastExchange coalescing; " +
                   "skipping coalesce")
-              reader.close()
               if (targetRoot != null) {
                 targetRoot.close()
                 targetRoot = null

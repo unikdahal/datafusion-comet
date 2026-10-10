@@ -32,6 +32,7 @@ import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector.{BaseVariableWidthVector, FieldVector, IntVector, ValueVector, VarBinaryVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.complex.ListVector
 import org.apache.arrow.vector.dictionary.{Dictionary, DictionaryProvider}
+import org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider
 import org.apache.arrow.vector.ipc.ArrowStreamWriter
 import org.apache.arrow.vector.ipc.message.ArrowFieldNode
 import org.apache.arrow.vector.types.pojo.{ArrowType, DictionaryEncoding, FieldType}
@@ -399,6 +400,50 @@ class UtilsSuite extends CometTestBase {
       }.toSeq
       assert(actual == expected ++ expected)
     }
+  }
+
+  test("broadcast dictionary fallback preserves independent dictionaries and earlier batches") {
+    def buffer(value: String, dictionaryEncoded: Boolean): ChunkedByteBuffer = {
+      val allocator = new RootAllocator(Long.MaxValue)
+      val values = new VarCharVector("key", allocator)
+      val indexType = new ArrowType.Int(32, true)
+      val encoding = new DictionaryEncoding(7L, false, indexType)
+      val indices = new IntVector("key", new FieldType(true, indexType, encoding), allocator)
+      val provider = new MapDictionaryProvider(new Dictionary(values, encoding))
+      try {
+        values.allocateNew()
+        values.setSafe(0, value.getBytes(UTF_8))
+        values.setValueCount(1)
+        indices.allocateNew(1)
+        indices.set(0, 0)
+        indices.setValueCount(1)
+        val vector = if (dictionaryEncoded) indices else values
+        val batch = new ColumnarBatch(
+          Array[ColumnVector](CometVector.getVector(vector, provider)),
+          1)
+        Utils.serializeBatches(Iterator(batch)).next()._2
+      } finally {
+        indices.close()
+        provider.close()
+        assert(allocator.getAllocatedMemory == 0L)
+        allocator.close()
+      }
+    }
+
+    // The first buffer creates a target root. The dictionary buffer must release it and return
+    // all original buffers, including the last buffer whose dictionary reuses ID 7 differently.
+    val input = Seq(buffer("plain", false), buffer("alpha", true), buffer("beta", true))
+    val (buffers, batchCount, rowCount) = Utils.coalesceBroadcastBatches(input.iterator)
+    assert(batchCount == 0L)
+    assert(rowCount == 0L)
+    assert(buffers.length == input.length)
+    assert(buffers.zip(input).forall { case (actual, original) => actual eq original })
+    val values = buffers.iterator.flatMap { bytes =>
+      Utils.decodeBatches(bytes, "dictionary-fallback").flatMap { batch =>
+        (0 until batch.numRows()).map(row => batch.column(0).getUTF8String(row).toString)
+      }
+    }.toSeq
+    assert(values == Seq("plain", "alpha", "beta"))
   }
 
   test("broadcast coalescing preserves all DISTINCT string keys across batch boundaries") {
