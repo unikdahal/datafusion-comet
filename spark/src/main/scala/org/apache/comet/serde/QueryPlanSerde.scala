@@ -30,8 +30,8 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.expressions.objects.{Invoke, StaticInvoke}
 import org.apache.spark.sql.catalyst.expressions.xml.{XPathBoolean, XPathDouble, XPathFloat, XPathInt, XPathList, XPathLong, XPathShort, XPathString}
-import org.apache.spark.sql.comet.DecimalPrecision
-import org.apache.spark.sql.execution.{ScalarSubquery, SparkPlan}
+import org.apache.spark.sql.comet.{CometProjectExec, DecimalPrecision, RuntimePruningKeyTypes}
+import org.apache.spark.sql.execution.{ProjectExec, ScalarSubquery, SparkPlan}
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -1336,6 +1336,36 @@ object QueryPlanSerde extends Logging with CometExprShim with CometTypeShim {
         true
       case _ =>
         false
+    }
+  }
+
+  // Catalyst may preserve CharType or use StringType with CHAR metadata and padding projections.
+  // Trace aliases to that metadata, including below exchanges. Stored Iceberg strings do not
+  // promise CHAR padding, so reader pruning must not compare them to runtime string literals.
+  def hasCharPruningKey(input: SparkPlan, keys: Seq[Expression]): Boolean = {
+    val stringKeys = keys.filter(key =>
+      key.dataType.isInstanceOf[StringType] || key.dataType.isInstanceOf[CharType])
+    if (stringKeys.exists(_.dataType.isInstanceOf[CharType])) return true
+    if (stringKeys.isEmpty) {
+      return false
+    }
+    val references = stringKeys.flatMap(_.references).map(_.exprId).toSet
+    def isChar(attribute: Attribute): Boolean = RuntimePruningKeyTypes.isCharType(attribute)
+    if (stringKeys.flatMap(_.references).exists(isChar) ||
+      input.output.exists(a => references.contains(a.exprId) && isChar(a))) {
+      true
+    } else {
+      val projects = input match {
+        case project: ProjectExec => project.projectList
+        case project: CometProjectExec => project.projectList
+        case _ => Seq.empty
+      }
+      val sourceKeys = if (projects.nonEmpty) {
+        projects.filter(p => references.contains(p.exprId))
+      } else {
+        stringKeys
+      }
+      input.children.exists(child => hasCharPruningKey(child, sourceKeys))
     }
   }
 

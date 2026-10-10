@@ -93,19 +93,20 @@ With `spark.comet.exec.join.dynamicFilter.enabled=true`, native broadcast and sh
 report these additional metric keys. See [Join Runtime Filters](tuning/operators.md#join-runtime-filters) for
 eligibility and reader restrictions.
 
-| Metric                                 | Description                                                       |
-| -------------------------------------- | ----------------------------------------------------------------- |
-| `dynamic_filter_join_rows_evaluated`   | Probe rows evaluated by the runtime filter.                       |
-| `dynamic_filter_join_rows_pruned`      | Probe rows rejected by that filter before the hash probe.         |
-| `dynamic_filter_join_rows_bypassed`    | Probe rows passed through while the runtime filter is inactive.   |
-| `dynamic_filter_join_eval_time`        | Time evaluating the runtime filter.                               |
-| `dynamic_filter_join_filters_attached` | Executions that attach their runtime filter to a native reader.   |
-| `dynamic_filter_join_filters_skipped`  | Executions whose probe input is ineligible for reader attachment. |
+| Metric                                 | Description                                                                   |
+| -------------------------------------- | ----------------------------------------------------------------------------- |
+| `dynamic_filter_join_rows_evaluated`   | Probe rows evaluated by the runtime filter.                                   |
+| `dynamic_filter_join_rows_pruned`      | Probe rows rejected by that filter before the hash probe.                     |
+| `dynamic_filter_join_rows_bypassed`    | Probe rows bypassing runtime filter evaluation, including adaptive bypass.    |
+| `dynamic_filter_join_bypass_switches`  | Transitions into adaptive bypass when decoded filtering rejects too few rows. |
+| `dynamic_filter_join_eval_time`        | Time evaluating the runtime filter.                                           |
+| `dynamic_filter_join_filters_attached` | Executions that attach their runtime filter to a native reader.               |
+| `dynamic_filter_join_filters_skipped`  | Executions whose probe input is ineligible for reader attachment.             |
 
 The row counters measure residual filtering of decoded probe batches. They exclude rows skipped
 by the reader. An attached filter does not guarantee that any row groups are pruned: compare the
-probe scan's `bytes_scanned` and `row_groups_pruned_statistics` with filtering disabled to assess
-reader savings. Existing join, scan, and intervening filter metrics retain their own meanings.
+probe scan's `bytes_scanned` with filtering disabled to assess reader savings, together with
+`row_groups_pruned_statistics` for Parquet or the `iceberg_runtime_*` counters for Iceberg. Existing join, scan, and intervening filter metrics retain their own meanings.
 
 ### Local TopK
 
@@ -113,23 +114,42 @@ With `spark.comet.exec.topK.dynamicFilter.enabled=true`, eligible fused local To
 these counters. See [TopK Reader Pruning](tuning/operators.md#topk-reader-pruning) for the required
 fusion option and reader restrictions.
 
-| Metric                                 | Description                                                                  |
-| -------------------------------------- | ---------------------------------------------------------------------------- |
-| `dynamic_filter_topk_filters_attached` | Executions that attach their live TopK threshold to a native Parquet reader. |
-| `dynamic_filter_topk_filters_skipped`  | Eligible TopK executions whose input cannot accept reader attachment.        |
+| Metric                                 | Description                                                           |
+| -------------------------------------- | --------------------------------------------------------------------- |
+| `dynamic_filter_topk_filters_attached` | Live TopK threshold attachments to native Parquet or Iceberg readers. |
+| `dynamic_filter_topk_filters_skipped`  | Eligible TopK executions whose input cannot accept reader attachment. |
 
 These counters belong to the local TopK. An attached predicate may prune nothing, and a file's
-schema adaptation can disable it to preserve conversion errors. Reader work remains on the scan:
+schema adaptation can disable it to preserve conversion errors. For Parquet, reader work remains on the scan:
 `output_rows` counts rows emitted by the scan, `bytes_scanned` measures requested data/Bloom-filter
 ranges (excluding footer and page-index reads), and page and decoder filtering use the existing
 `page_index_rows_pruned` and `pushdown_rows_pruned` counters.
 
-Row groups skipped by runtime pruning within a file increment `row_groups_pruned_dynamic_filter`.
+For Parquet, row groups skipped by runtime pruning within a file increment `row_groups_pruned_dynamic_filter`.
 When later files open, the reader can prune using the TopK threshold already available; those groups
 increment `row_groups_pruned_statistics`. With one row group per file, the dynamic counter can remain
 zero even when TopK skips most later groups. The statistics counter also includes pruning by other
 predicates, so compare both counters and `bytes_scanned` with filtering disabled to assess TopK savings.
 This feature adds no separate decoded-batch filter or evaluated/pruned row counters to the TopK.
+For Iceberg reader counters and I/O accounting, see [Native Iceberg Scans](#native-iceberg-scans).
+
+### Native Iceberg Scans
+
+Every native Iceberg scan registers these metrics. They remain zero when the corresponding
+runtime pruning activity is absent:
+
+| Metric                                   | Description                                                           |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| `iceberg_runtime_predicate_tasks`        | Data-file tasks that used a runtime predicate.                        |
+| `iceberg_runtime_file_tasks_pruned`      | Tasks rejected from column statistics before opening their data file. |
+| `iceberg_runtime_row_groups_pruned`      | Row groups skipped by runtime predicate statistics.                   |
+| `iceberg_runtime_row_groups_pruned_live` | The part of those row groups skipped after a refresh during a file.   |
+| `iceberg_runtime_predicate_refreshes`    | Newer runtime predicates picked up at row-group boundaries.           |
+| `iceberg_runtime_decoder_rebuilds`       | Decoder rebuilds needed to adopt refreshed runtime predicates.        |
+
+Iceberg's `bytes_scanned` counts ranged reader I/O, including metadata and delete files. It does
+not measure physical disk traffic after operating-system caching. Compare it with runtime filters
+disabled to assess the reader savings.
 
 ### Exchange
 

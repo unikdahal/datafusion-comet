@@ -23,6 +23,12 @@ Comet provides the following configuration settings.
 
 ## Scan Configuration Settings
 
+Native Iceberg advisory file statistics use
+`spark.comet.scan.icebergNative.runtimeStats.enabled` to enable collection and caching, and
+`spark.comet.scan.icebergNative.runtimeStats.maxFiles` to cap distinct selected files (4096 by
+default). Byte budgets are internal. Disabling statistics or exceeding a collection limit retains
+row-group, page and row runtime pruning. See [driver resource bounds](../../contributor-guide/runtime-statistics-bounds.md).
+
 <!--BEGIN:CONFIG_TABLE[scan]-->
 <!--END:CONFIG_TABLE-->
 
@@ -32,6 +38,13 @@ Comet provides the following configuration settings.
 <!--END:CONFIG_TABLE-->
 
 ## Query Execution Settings
+
+The experimental join, TopK and MIN/MAX runtime-filter settings have different key policies.
+Native Iceberg joins support `INT`, `BIGINT`, `DATE`, `TIMESTAMP`, `TIMESTAMP_NTZ`, `DECIMAL`
+with matching precision and scale, and `UTF8_BINARY` strings. Iceberg TopK and MIN/MAX support
+the same types except `DECIMAL`; string TopK reader pruning requires `NULLS LAST`. Fixed `CHAR`,
+padding, non-default collations and computed string lineage prevent reader attachment.
+Native Parquet reader attachment supports signed integer keys. See [operator tuning](tuning/operators.md#join-runtime-filters) for each option's plan and reader restrictions.
 
 <!--BEGIN:CONFIG_TABLE[exec]-->
 <!--END:CONFIG_TABLE-->

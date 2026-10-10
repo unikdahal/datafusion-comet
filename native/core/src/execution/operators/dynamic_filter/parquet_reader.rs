@@ -20,15 +20,17 @@
 use std::sync::Arc;
 
 use datafusion::common::config::ConfigOptions;
+use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::Result;
 use datafusion::datasource::physical_plan::{FileSource, ParquetSource};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::expressions::{
-    BinaryExpr, Column, DynamicFilterPhysicalExpr, IsNotNullExpr,
+    lit, BinaryExpr, Column, DynamicFilterPhysicalExpr, IsNotNullExpr,
 };
 use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::execution_plan::reset_plan_states;
 use datafusion::physical_plan::ExecutionPlan;
 
 use datafusion_comet_operators::CometFilterExec;
@@ -36,6 +38,51 @@ use datafusion_comet_operators::CometFilterExec;
 mod schema_adapter;
 
 use schema_adapter::RuntimeFilterSchemaAdapterFactory;
+
+/// Detach this consumer's old reader predicate without mutating the producer
+/// or other owners of the attached plan. DataSourceExec::reset_state resets its
+/// file queue, but deliberately retains the ParquetSource's expressions.
+pub(super) fn reset_parquet_reader_filter(
+    input: Arc<dyn ExecutionPlan>,
+    predicate: &DynamicFilterPhysicalExpr,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let Some(expression_id) = predicate.expression_id() else {
+        return reset_plan_states(input);
+    };
+    let input = input
+        .transform_up(|plan| {
+            let Some(scan) = plan.downcast_ref::<DataSourceExec>() else {
+                return Ok(Transformed::no(plan));
+            };
+            let Some((file_config, source)) = scan.downcast_to_file_source::<ParquetSource>()
+            else {
+                return Ok(Transformed::no(plan));
+            };
+            let Some(filter) = source.filter() else {
+                return Ok(Transformed::no(plan));
+            };
+            let filter = filter.transform_down(|expr| {
+                if expr.is::<DynamicFilterPhysicalExpr>()
+                    && expr.expression_id() == Some(expression_id)
+                {
+                    Ok(Transformed::yes(lit(true)))
+                } else {
+                    Ok(Transformed::no(expr))
+                }
+            })?;
+            if !filter.transformed {
+                return Ok(Transformed::no(plan));
+            }
+            let mut file_config = file_config.clone();
+            file_config.file_source = Arc::new(source.with_predicate(filter.data));
+            Ok(Transformed::yes(
+                Arc::new(scan.clone().with_data_source(Arc::new(file_config)))
+                    as Arc<dyn ExecutionPlan>,
+            ))
+        })?
+        .data;
+    reset_plan_states(input)
+}
 
 /// Recognize only direct-column null checks joined by AND, without evaluating
 /// or changing the predicate. Every accepted leaf is deterministic, infallible,
@@ -50,6 +97,19 @@ pub(super) fn is_direct_column_null_checks(predicate: &Arc<dyn PhysicalExpr>) ->
     predicate
         .downcast_ref::<IsNotNullExpr>()
         .is_some_and(|is_not_null| is_not_null.arg().is::<Column>())
+}
+
+/// Whether `key` has a type the native Parquet reader filter supports: a signed integer subset
+/// of the general runtime-pruning key types.
+/// Date, timestamp, decimal and string keys reach only native Iceberg readers.
+pub(super) fn is_parquet_reader_key(
+    key: &Arc<dyn PhysicalExpr>,
+    schema: &arrow::datatypes::Schema,
+) -> bool {
+    match key.data_type(schema) {
+        Ok(dt) => super::is_supported_parquet_reader_key_type(&dt),
+        Err(_) => false,
+    }
 }
 
 pub(super) fn try_attach_parquet_reader_filter(

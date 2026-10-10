@@ -1,0 +1,346 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+
+# Fork-only matched benchmark of adaptive native Iceberg pruning. The branch and
+# latest Apache main, resolved once per run, are built with identical commands and run on
+# one runner against the same generated tables. See
+# benchmarks/iceberg-runtime-pruning/README.md.
+
+name: Fork Adaptive Iceberg Pruning Benchmark
+
+on:
+  push:
+    branches: ['adaptive-bench/**']
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Workload coverage (smoke retains the original nine queries)
+        type: choice
+        options: [smoke, extended]
+        default: smoke
+      baseline_repository:
+        description: Baseline repository (use unikdahal/datafusion-comet for before/final)
+        default: apache/datafusion-comet
+      baseline_ref:
+        description: Baseline full commit SHA or ref, resolved once
+        default: refs/heads/main
+      rows:
+        description: Rows per fact table
+        default: '1000000'
+      files:
+        description: Requested writer partitions (actual file count is recorded)
+        default: '8'
+      rounds:
+        description: Fresh JVM rounds (multiples of three balance variant order)
+        default: '3'
+      reps:
+        description: Timed repetitions per round
+        default: '2'
+      split_bytes:
+        description: Iceberg read split target in bytes
+        default: '134217728'
+      reader_concurrency:
+        description: Native Iceberg file concurrency per task
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-iceberg-adaptive-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: "-Clink-arg=-fuse-ld=bfd"
+
+jobs:
+  resolve:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    outputs:
+      main: ${{ steps.revisions.outputs.main }}
+      branch: ${{ steps.revisions.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve latest Apache main once for this run
+        id: revisions
+        env:
+          BASELINE_REPOSITORY: ${{ inputs.baseline_repository || 'apache/datafusion-comet' }}
+          BASELINE_REF: ${{ inputs.baseline_ref || 'refs/heads/main' }}
+        run: |
+          git fetch --no-tags "https://github.com/$BASELINE_REPOSITORY.git" "$BASELINE_REF"
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, subprocess
+          git = lambda *args: subprocess.check_output(["git", *args], text=True).strip()
+          revisions = {"main": git("rev-parse", "FETCH_HEAD^{commit}"),
+                       "branch": git("rev-parse", "HEAD"),
+                       "repository": "https://github.com/" + os.environ["BASELINE_REPOSITORY"] + ".git",
+                       "ref": os.environ["BASELINE_REF"],
+                       "resolved_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+          pathlib.Path("resolved").mkdir()
+          pathlib.Path("resolved/revisions.json").write_text(json.dumps(revisions, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              for side in ("main", "branch"):
+                  out.write(f"{side}={revisions[side]}\n")
+          print(json.dumps(revisions, indent=2))
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: resolved-revisions
+          path: resolved/revisions.json
+          if-no-files-found: error
+
+  build:
+    needs: resolve
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: amd64/rust
+    strategy:
+      matrix:
+        side: [main, branch]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Select the immutable commit resolved for this run
+        id: commit
+        env:
+          COMET_REVISION: ${{ matrix.side == 'main' && needs.resolve.outputs.main || needs.resolve.outputs.branch }}
+          BASELINE_REPOSITORY: ${{ inputs.baseline_repository || 'apache/datafusion-comet' }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [ "${{ matrix.side }}" = main ]; then
+            git fetch --no-tags "https://github.com/$BASELINE_REPOSITORY.git" "$COMET_REVISION"
+          fi
+          git checkout --detach "$COMET_REVISION"
+          test "$(git rev-parse HEAD)" = "$COMET_REVISION"
+          echo "sha=$COMET_REVISION" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: '17'
+      - name: Build the release library and Spark 3.5 jar
+        env:
+          COMET_COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          cd native && cargo build --release --locked && cd ..
+          ./mvnw -B install -Prelease -DskipTests -Pspark-3.5
+          # Written after the Maven build so the license check never sees it.
+          mkdir -p dist
+          echo "$COMET_COMMIT" > dist/comet-commit.txt
+          for jar in spark/target/comet-spark-spark3.5_2.12-*.jar; do
+            case "$jar" in
+              *-sources.jar|*-tests.jar|*/original-*) ;;
+              *) cp "$jar" dist/comet.jar ;;
+            esac
+          done
+          test -s dist/comet.jar
+          sha256sum dist/comet.jar
+          cp native/Cargo.lock dist/Cargo.lock
+          cp native/Cargo.toml dist/Cargo.toml
+          {
+            rustc --version
+            cargo --version
+            java -version 2>&1
+            echo "RUSTFLAGS=$RUSTFLAGS"
+            sha256sum dist/comet.jar native/target/release/libcomet.so native/Cargo.lock
+          } > dist/build-provenance.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: comet-${{ matrix.side }}
+          path: dist
+
+  benchmark:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      BENCH_PROFILE: ${{ inputs.profile || 'smoke' }}
+      BENCH_ROWS: ${{ inputs.rows || '16000000' }}
+      BENCH_FILES: ${{ inputs.files || '16' }}
+      BENCH_ROUNDS: ${{ inputs.rounds || '6' }}
+      BENCH_REPS: ${{ inputs.reps || '3' }}
+      BENCH_SPLIT_BYTES: ${{ inputs.split_bytes || '134217728' }}
+      BENCH_READER_CONCURRENCY: ${{ inputs.reader_concurrency || '1' }}
+      SPARK_LOCAL_HOSTNAME: localhost
+      SPARK_LOCAL_IP: 127.0.0.1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      # Each matrix build lands in jars/comet-main and jars/comet-branch.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: comet-*
+          path: jars
+      - name: Install Spark 3.5.9 and Iceberg 1.8.1
+        run: |
+          python3 -m pip install --user --break-system-packages pyspark==3.5.9
+          curl -fsSL -o jars/iceberg.jar \
+            https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.8.1/iceberg-spark-runtime-3.5_2.12-1.8.1.jar
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v8
+        with:
+          name: resolved-revisions
+          path: resolved
+      - name: Record the environment
+        run: |
+          # Reject costly or nonsensical inputs before generating data.
+          python3 - <<'PY'
+          import os
+          limits = {"BENCH_ROWS": (512, 16000000), "BENCH_FILES": (1, 256),
+                    "BENCH_ROUNDS": (1, 12), "BENCH_REPS": (1, 6),
+                    "BENCH_SPLIT_BYTES": (1048576, 1073741824),
+                    "BENCH_READER_CONCURRENCY": (1, 32)}
+          for key, (low, high) in limits.items():
+              assert low <= int(os.environ[key]) <= high, key
+          PY
+          python3 benchmarks/iceberg-runtime-pruning/workloads.py > experiment.json
+          {
+            echo "## Environment"
+            cat resolved/revisions.json
+            echo
+            echo "- main commit: \`$(cat jars/comet-main/comet-commit.txt)\`"
+            echo "- branch commit: \`$(cat jars/comet-branch/comet-commit.txt)\`"
+            echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) vCPUs"
+            echo "- memory: $(free -g | awk '/Mem:/ {print $2}') GiB"
+            echo "- Spark 3.5.9, Iceberg 1.8.1, Java $(java -version 2>&1 | head -1)"
+            echo "- rows: $BENCH_ROWS in $BENCH_FILES files per table; rounds: $BENCH_ROUNDS; reps per round: $BENCH_REPS"
+            echo "- profile: $BENCH_PROFILE; split target: $BENCH_SPLIT_BYTES; reader concurrency: $BENCH_READER_CONCURRENCY"
+            echo
+          } > environment.md
+          sha256sum jars/*/comet.jar jars/iceberg.jar
+          sha256sum jars/*/comet.jar jars/iceberg.jar > jar-sha256.txt
+          cp -R benchmarks/iceberg-runtime-pruning harness-source
+          sha256sum benchmarks/iceberg-runtime-pruning/*.py > harness-sha256.txt
+      - name: Generate tables once with plain Spark
+        run: |
+          export WAREHOUSE="$RUNNER_TEMP/warehouse"
+          spark-submit --master 'local[4]' --driver-memory 8g --jars jars/iceberg.jar \
+            --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+            --conf spark.sql.catalog.bench=org.apache.iceberg.spark.SparkCatalog \
+            --conf spark.sql.catalog.bench.type=hadoop \
+            --conf "spark.sql.catalog.bench.warehouse=$WAREHOUSE" \
+            --conf spark.ui.enabled=false \
+            benchmarks/iceberg-runtime-pruning/generate_data.py | tee generate.log
+          { echo "## Tables"; echo; grep '^TABLE' generate.log | sed 's/^/- /'; echo; } >> environment.md
+          (cd "$WAREHOUSE" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > data-sha256.txt
+      - name: Record plain Spark correctness oracle on the same tables
+        run: |
+          export WAREHOUSE="$RUNNER_TEMP/warehouse"
+          BENCH_VARIANT=spark BENCH_ROUND=0 BENCH_REPS=1 BENCH_OUTPUT=oracle.jsonl \
+          spark-submit --master 'local[4]' --driver-memory 8g --jars jars/iceberg.jar \
+            --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+            --conf spark.sql.catalog.bench=org.apache.iceberg.spark.SparkCatalog \
+            --conf spark.sql.catalog.bench.type=hadoop \
+            --conf "spark.sql.catalog.bench.warehouse=$WAREHOUSE" \
+            --conf spark.sql.adaptive.enabled=false \
+            --conf spark.sql.shuffle.partitions=4 \
+            --conf spark.sql.iceberg.aggregate-push-down.enabled=false \
+            --conf spark.ui.enabled=false \
+            benchmarks/iceberg-runtime-pruning/run_queries.py > oracle.log 2>&1 \
+            || { tail -100 oracle.log; exit 1; }
+      - name: Run rounds in rotated variant order
+        run: |
+          export WAREHOUSE="$RUNNER_TEMP/warehouse"
+          export BENCH_OUTPUT="$GITHUB_WORKSPACE/results.jsonl"
+          filters() {
+            for key in join.dynamicFilter.enabled \
+                topK.dynamicFilter.enabled aggregate.dynamicFilter.enabled; do
+              echo "--conf spark.comet.exec.$key=$1"
+            done
+          }
+          variants=(main off on)
+          for round in $(seq 0 $((BENCH_ROUNDS - 1))); do
+            for offset in 0 1 2; do
+              variant="${variants[$(((round + offset) % 3))]}"
+              case "$variant" in
+                main) jar=jars/comet-main/comet.jar; enabled=true ;;
+                off) jar=jars/comet-branch/comet.jar; enabled=false ;;
+                on) jar=jars/comet-branch/comet.jar; enabled=true ;;
+              esac
+              echo "round $round variant $variant"
+              BENCH_VARIANT="$variant" BENCH_ROUND="$round" \
+              spark-submit --master 'local[4]' --driver-memory 8g \
+                --jars "jars/iceberg.jar,$jar" \
+                --conf "spark.driver.extraClassPath=$jar" \
+                --conf "spark.executor.extraClassPath=$jar" \
+                --conf spark.plugins=org.apache.spark.CometPlugin \
+                --conf spark.shuffle.manager=org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager \
+                --conf spark.comet.exec.shuffle.enabled=true \
+                --conf spark.comet.exec.topK.fusion.enabled=true \
+                --conf spark.memory.offHeap.enabled=true \
+                --conf spark.memory.offHeap.size=6g \
+                --conf spark.comet.scan.icebergNative.enabled=true \
+                --conf "spark.comet.scan.icebergNative.dataFileConcurrencyLimit=$BENCH_READER_CONCURRENCY" \
+                --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+                --conf spark.sql.catalog.bench=org.apache.iceberg.spark.SparkCatalog \
+                --conf spark.sql.catalog.bench.type=hadoop \
+                --conf "spark.sql.catalog.bench.warehouse=$WAREHOUSE" \
+                --conf spark.sql.adaptive.enabled=false \
+                --conf spark.sql.shuffle.partitions=4 \
+                --conf spark.sql.iceberg.aggregate-push-down.enabled=false \
+                --conf spark.ui.enabled=false \
+                $(filters "$enabled") \
+                benchmarks/iceberg-runtime-pruning/run_queries.py > "run-$round-$variant.log" 2>&1 \
+                || { tail -100 "run-$round-$variant.log"; exit 1; }
+            done
+          done
+      - name: Require unchanged data and metadata bytes
+        if: always()
+        run: |
+          cd "$RUNNER_TEMP/warehouse"
+          sha256sum --check "$GITHUB_WORKSPACE/data-sha256.txt" > "$GITHUB_WORKSPACE/data-verification.log"
+          find . -type f -print0 | sort -z | xargs -0 sha256sum > "$GITHUB_WORKSPACE/data-sha256-after.txt"
+          cmp "$GITHUB_WORKSPACE/data-sha256.txt" "$GITHUB_WORKSPACE/data-sha256-after.txt"
+          touch "$GITHUB_WORKSPACE/data-verified"
+      - name: Summarize
+        if: always()
+        run: |
+          test -f data-verified
+          python3 benchmarks/iceberg-runtime-pruning/summarize.py results.jsonl --manifest experiment.json --oracle oracle.jsonl > results.md
+          cat environment.md results.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: iceberg-adaptive-benchmark
+          path: |
+            environment.md
+            results.jsonl
+            results.md
+            experiment.json
+            oracle.jsonl
+            oracle.log
+            jar-sha256.txt
+            harness-sha256.txt
+            harness-source/
+            data-sha256.txt
+            data-verification.log
+            data-sha256-after.txt
+            resolved/
+            jars/*/build-provenance.txt
+            jars/*/Cargo.lock
+            jars/*/Cargo.toml
+            jars/*/comet-commit.txt
+            plans/
+            generate.log
+            run-*.log

@@ -520,7 +520,9 @@ object CometMetricNode {
       "dynamic_filter_join_rows_pruned" ->
         SQLMetrics.createMetric(sc, "Probe rows rejected before the hash probe"),
       "dynamic_filter_join_rows_bypassed" ->
-        SQLMetrics.createMetric(sc, "Probe rows bypassing an inactive join runtime filter"),
+        SQLMetrics.createMetric(sc, "Probe rows bypassing join runtime filter evaluation"),
+      "dynamic_filter_join_bypass_switches" ->
+        SQLMetrics.createMetric(sc, "Join runtime filter transitions to adaptive bypass"),
       "dynamic_filter_join_eval_time" ->
         SQLMetrics.createNanoTimingMetric(sc, "Time evaluating the join runtime filter"),
       "dynamic_filter_join_filters_attached" ->
