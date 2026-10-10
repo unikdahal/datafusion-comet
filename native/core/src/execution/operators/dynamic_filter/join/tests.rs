@@ -1181,7 +1181,12 @@ async fn direct_parquet_consumer_reset_detaches_old_reader_domain() {
             consumer.children()[0],
         ))
         .unwrap();
-        let consumer = consumer.with_new_children(vec![input]).unwrap();
+        let consumer = consumer
+            .replace_children(
+                vec![input],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap();
         // Reset the actual attached consumer, keeping its old producer and plan
         // alive. A new domain in a different row group must survive the reader.
         let reset = consumer.reset_state().unwrap();

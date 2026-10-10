@@ -5365,7 +5365,7 @@ mod tests {
                 file_metrics_idx: Some(0),
                 ..Default::default()
             };
-            let tasks = super::convert_file_scan_tasks(&[task], Some(&common), None).unwrap();
+            let tasks = super::parse_file_scan_tasks_from_common(&common, &[task]).unwrap();
             assert_eq!(
                 tasks[0].file_metrics().unwrap().lower_bounds(),
                 metrics.lower_bounds()
