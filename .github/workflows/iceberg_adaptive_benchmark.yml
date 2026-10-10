@@ -157,6 +157,7 @@ jobs:
           path: resolved
       - name: Record the environment
         run: |
+          python3 benchmarks/iceberg-runtime-pruning/workloads.py > experiment.json
           {
             echo "## Environment"
             cat resolved/revisions.json
@@ -228,7 +229,7 @@ jobs:
       - name: Summarize
         if: always()
         run: |
-          python3 benchmarks/iceberg-runtime-pruning/summarize.py results.jsonl > results.md
+          python3 benchmarks/iceberg-runtime-pruning/summarize.py results.jsonl --manifest experiment.json > results.md
           cat environment.md results.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
@@ -238,5 +239,6 @@ jobs:
             environment.md
             results.jsonl
             results.md
+            experiment.json
             generate.log
             run-*.log
