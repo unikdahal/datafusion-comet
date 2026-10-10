@@ -72,7 +72,7 @@ jobs:
           cache-all-targets: "true"
 
       - name: Cache Maven dependencies
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.m2/repository
@@ -158,7 +158,7 @@ jobs:
           prefix-key: "fast-jvm"
 
       - name: Cache Maven dependencies
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.m2/repository
