@@ -83,7 +83,7 @@ def main():
         base.filter(F.col("id") >= ROWS // 2).withColumn("id", F.col("id").cast("long")).repartitionByRange(FILES, "id").sortWithinPartitions("id").writeTo("bench.db.fact_evolved").append()
         tables += ["dim_all", "fact_evolved"]
     for table in tables:
-        files = spark.sql(f"SELECT count(*), sum(file_size_in_bytes) FROM bench.db.{table}.files").first()
+        files = spark.sql(f"SELECT count(*), sum(file_size_in_bytes) FROM bench.db.{table}.data_files").first()
         deletes = spark.sql(f"SELECT count(*) FROM bench.db.{table}.delete_files").first()[0]
         print(f"TABLE {table} data_files={files[0]} bytes={files[1]} delete_files={deletes}")
     spark.stop()
