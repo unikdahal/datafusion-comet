@@ -34,6 +34,11 @@ use super::safety::is_safe_to_prune_before;
 use crate::execution::operators::{IcebergScanExec, RuntimeScanOrder};
 use predicate::extract_iceberg_predicate;
 
+#[cfg(test)]
+pub(super) fn extracts_predicate_for_test(expr: &Arc<dyn PhysicalExpr>) -> bool {
+    extract_iceberg_predicate(expr, 0, "key").is_some()
+}
+
 #[derive(Debug)]
 struct IcebergRuntimePredicateProvider {
     predicate: Arc<DynamicFilterPhysicalExpr>,
@@ -41,6 +46,9 @@ struct IcebergRuntimePredicateProvider {
     iceberg_field_name: String,
     /// The bound tightens toward large values (descending top-k, MAX).
     largest_first: bool,
+    /// Deterministically force a publication between bracket reads in reader tests.
+    #[cfg(test)]
+    after_expression_read: Option<SnapshotReadHook>,
 }
 
 impl IcebergRuntimePredicateProvider {
@@ -54,6 +62,8 @@ impl IcebergRuntimePredicateProvider {
             probe_column_index,
             iceberg_field_name,
             largest_first: false,
+            #[cfg(test)]
+            after_expression_read: None,
         }
     }
 
@@ -84,6 +94,10 @@ impl RuntimePredicateProvider for IcebergRuntimePredicateProvider {
                     format!("Failed to snapshot runtime predicate: {error}"),
                 )
             })?;
+            #[cfg(test)]
+            if let Some(hook) = &self.after_expression_read {
+                (hook.0)();
+            }
             if self.generation() == generation {
                 return Ok(RuntimePredicateSnapshot::new(
                     extract_iceberg_predicate(
@@ -99,6 +113,16 @@ impl RuntimePredicateProvider for IcebergRuntimePredicateProvider {
             ErrorKind::Unexpected,
             "Runtime predicate changed while taking its snapshot",
         ))
+    }
+}
+
+#[cfg(test)]
+struct SnapshotReadHook(Arc<dyn Fn() + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for SnapshotReadHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SnapshotReadHook")
     }
 }
 

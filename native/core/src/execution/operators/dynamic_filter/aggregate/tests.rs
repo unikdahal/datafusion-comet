@@ -318,3 +318,225 @@ fn annotated_string_columns_fail_closed() {
         }
     }
 }
+
+fn produced_filter(aggregate: &AggregateExec) -> Arc<DynamicFilterPhysicalExpr> {
+    Arc::clone(aggregate.dynamic_filter_expr().unwrap())
+}
+
+fn result_value(batches: &[arrow::record_batch::RecordBatch]) -> ScalarValue {
+    assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+    ScalarValue::try_from_array(batches[0].column(0), 0).unwrap()
+}
+
+#[tokio::test]
+async fn native_minmax_execution_matches_disabled_pruning_and_reexecutes() {
+    use datafusion::physical_plan::collect;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    for max in [false, true] {
+        for values in [vec![Some(5), None, Some(9), Some(-3)], vec![None; 4], vec![]] {
+            let session = SessionContext::new_with_config(SessionConfig::new().with_batch_size(2));
+            let (_file, scan) = super::super::test_utils::iceberg_input(values.clone());
+            let plain = aggregate(Arc::clone(&scan), max, false, false);
+            let plan = Arc::new(
+                IcebergMinMaxFilterExec::try_new(&plain, &ConfigOptions::default())
+                    .unwrap()
+                    .unwrap(),
+            );
+            let mut disabled = SessionConfig::new().with_batch_size(2);
+            disabled.options_mut().optimizer.enable_aggregate_dynamic_filter_pushdown = false;
+            let baseline_session = SessionContext::new_with_config(disabled);
+            let baseline = collect(Arc::new(plain), baseline_session.task_ctx()).await.unwrap();
+            let expected = if max {
+                values.into_iter().flatten().max()
+            } else {
+                values.into_iter().flatten().min()
+            };
+            assert_eq!(result_value(&baseline), ScalarValue::Int32(expected));
+            for execution in [
+                Arc::clone(&plan) as Arc<dyn ExecutionPlan>,
+                Arc::clone(&plan).reset_state().unwrap(),
+            ] {
+                let actual = collect(execution, session.task_ctx()).await.unwrap();
+                assert_eq!(result_value(&actual), result_value(&baseline));
+            }
+            let (_replacement_file, replacement) =
+                super::super::test_utils::iceberg_input(vec![Some(101), Some(109)]);
+            let replaced = plan.with_new_children(vec![replacement]).unwrap();
+            assert!(replaced.is::<IcebergMinMaxFilterExec>());
+            let actual = collect(replaced, session.task_ctx()).await.unwrap();
+            assert_eq!(
+                result_value(&actual),
+                ScalarValue::Int32(Some(if max { 109 } else { 101 })),
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Ending {
+    Eof,
+    Error,
+    Pending,
+}
+
+/// Execute the attached real reader, then control only the final stream event.
+#[derive(Debug)]
+struct ControlledScan {
+    input: Arc<dyn ExecutionPlan>,
+    schema: arrow::datatypes::SchemaRef,
+    ending: Ending,
+    tail_reached: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl datafusion::physical_plan::streaming::PartitionStream for ControlledScan {
+    fn schema(&self) -> &arrow::datatypes::SchemaRef {
+        &self.schema
+    }
+
+    fn execute(
+        &self,
+        context: Arc<datafusion::execution::TaskContext>,
+    ) -> SendableRecordBatchStream {
+        let input = self.input.execute(0, context).unwrap();
+        let tail: futures::stream::BoxStream<'static, Result<arrow::record_batch::RecordBatch>> =
+            match self.ending {
+                Ending::Eof => futures::stream::empty().boxed(),
+                Ending::Error => futures::stream::once(async {
+                    datafusion::common::exec_err!("controlled failure after real Iceberg input")
+                })
+                .boxed(),
+                Ending::Pending => futures::stream::pending().boxed(),
+            };
+        let tail_reached = Arc::clone(&self.tail_reached);
+        let tail = futures::stream::once(async move {
+            tail_reached.store(true, std::sync::atomic::Ordering::SeqCst);
+            tail
+        })
+        .flatten();
+        Box::pin(RecordBatchStreamAdapter::new(self.input.schema(), input.chain(tail)))
+    }
+}
+
+#[tokio::test]
+async fn native_minmax_execution_and_stream_lifetime() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::streaming::StreamingTableExec;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+    use futures::FutureExt;
+
+    for max in [false, true] {
+        for ending in [Ending::Eof, Ending::Error, Ending::Pending] {
+            let pool = Arc::new(GreedyMemoryPool::new(8 * 1024 * 1024));
+            let runtime_env = RuntimeEnvBuilder::new()
+                .with_memory_pool(Arc::clone(&pool) as _)
+                .build_arc()
+                .unwrap();
+            let session = SessionContext::new_with_config_rt(
+                SessionConfig::new().with_batch_size(2),
+                runtime_env,
+            );
+            let (_file, scan) =
+                super::super::test_utils::iceberg_input(vec![Some(5), None, Some(9), Some(-3)]);
+            let plain = aggregate(scan, max, false, false);
+            let plan = Arc::new(
+                IcebergMinMaxFilterExec::try_new(&plain, &ConfigOptions::default())
+                    .unwrap()
+                    .unwrap(),
+            );
+            let runtime = plan.build_runtime_aggregate().unwrap();
+            let producer = produced_filter(&runtime);
+            let initial_generation = producer.snapshot_generation();
+            let predicate = Arc::downgrade(&producer);
+            let tail_reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let controlled: Arc<dyn ExecutionPlan> = Arc::new(
+                StreamingTableExec::try_new(
+                    runtime.input().schema(),
+                    vec![Arc::new(ControlledScan {
+                        input: Arc::clone(runtime.input()),
+                        schema: runtime.input().schema(),
+                        ending,
+                        tail_reached: Arc::clone(&tail_reached),
+                    })],
+                    None,
+                    [],
+                    false,
+                    None,
+                )
+                .unwrap(),
+            );
+            let controlled_runtime = IcebergMinMaxFilterExec::fresh_aggregate(&runtime, controlled)
+                .unwrap()
+                .with_dynamic_filter_expr(producer)
+                .unwrap();
+            drop(runtime);
+            let mut stream = plan
+                .execute_runtime_aggregate(controlled_runtime, 0, session.task_ctx())
+                .unwrap();
+            match ending {
+                Ending::Eof => {
+                    let batch = stream.next().await.unwrap().unwrap();
+                    assert_eq!(
+                        result_value(&[batch]),
+                        ScalarValue::Int32(Some(if max { 9 } else { -3 })),
+                    );
+                    assert!(
+                        predicate.upgrade().unwrap().snapshot_generation() > initial_generation
+                    );
+                    assert!(stream.next().await.is_none());
+                }
+                Ending::Error => {
+                    let error = stream.next().await.unwrap().unwrap_err();
+                    assert!(error
+                        .to_string()
+                        .contains("controlled failure after real Iceberg input"));
+                    assert!(stream.next().await.is_none());
+                }
+                Ending::Pending => {
+                    // Poll until the real reader reaches the controlled tail, without timing races.
+                    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                        loop {
+                            if let Some(batch) = stream.next().now_or_never() {
+                                panic!("pending aggregate unexpectedly returned {batch:?}");
+                            }
+                            if tail_reached.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(
+                        predicate.upgrade().unwrap().snapshot_generation() > initial_generation
+                    );
+                    assert!(pool.reserved() > 0);
+                    drop(stream);
+                }
+            }
+            // The permanent template stays alive, as does the terminated EOF/error stream.
+            assert_eq!(pool.reserved(), 0, "{max}: {ending:?}");
+            assert!(predicate.upgrade().is_none(), "{max}: {ending:?}");
+            let fresh = plan.build_runtime_aggregate().unwrap();
+            let fresh_filter = produced_filter(&fresh);
+            assert_eq!(fresh_filter.snapshot_generation(), initial_generation);
+            assert_eq!(
+                fresh_filter.current().unwrap().downcast_ref::<Literal>().unwrap().value(),
+                &ScalarValue::Boolean(Some(true)),
+            );
+            drop(fresh_filter);
+            drop(fresh);
+            let (_replacement_file, replacement) =
+                super::super::test_utils::iceberg_input(vec![Some(101), Some(109)]);
+            let replaced = plan.with_new_children(vec![replacement]).unwrap();
+            let actual = collect(replaced, session.task_ctx()).await.unwrap();
+            assert_eq!(
+                result_value(&actual),
+                ScalarValue::Int32(Some(if max { 109 } else { 101 })),
+            );
+            assert_eq!(pool.reserved(), 0);
+        }
+    }
+}

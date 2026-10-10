@@ -31,14 +31,17 @@ mod topk;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod test_utils;
+
 pub(crate) use aggregate::IcebergMinMaxFilterExec;
 pub(crate) use join::DynamicFilterJoinExec;
 pub(crate) use topk::TopKReaderFilterExec;
 
 pub(super) use batch_filter::DynamicFilterExec;
 
-/// Shared producer/reader ceiling for exact IN-list membership.
-/// The separate packed-key publication budget is 16 KiB.
+/// Reader literal cap, also used as the producer's distinct-key cap.
+/// Duplicate producer literals may exceed this cap; the source array is bounded by 16 KiB.
 pub(super) const MAX_IN_LIST_LITERALS: usize = 1024;
 
 /// Returns whether `data_type` is an eligible join runtime pruning key type.

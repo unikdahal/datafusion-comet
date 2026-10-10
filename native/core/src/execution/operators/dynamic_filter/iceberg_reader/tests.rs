@@ -24,6 +24,76 @@ use datafusion::physical_expr::expressions::{BinaryExpr, IsNullExpr};
 use iceberg::expr::{Predicate, Reference};
 use iceberg::spec::Datum;
 
+#[tokio::test]
+async fn forced_snapshot_contention_fail_open_through_real_reader() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use datafusion::physical_plan::collect;
+    use datafusion::prelude::SessionContext;
+
+    let (_file, input) = super::super::test_utils::iceberg_input(vec![Some(1), Some(2)]);
+    let scan = input.downcast_ref::<IcebergScanExec>().unwrap();
+    let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+    let dynamic = Arc::new(DynamicFilterPhysicalExpr::new(vec![key], lit(true)));
+    let forced = Arc::new(AtomicBool::new(true));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let (request, requests) = std::sync::mpsc::channel();
+    let (completed, completions) = std::sync::mpsc::channel();
+    let completions = std::sync::Mutex::new(completions);
+    let writer = std::thread::spawn({
+        let dynamic = Arc::clone(&dynamic);
+        move || {
+            while requests.recv_timeout(std::time::Duration::from_secs(10)).unwrap() {
+                dynamic.update(lit(false)).unwrap();
+                completed.send(()).unwrap();
+            }
+        }
+    });
+    let mut provider = IcebergRuntimePredicateProvider::new(Arc::clone(&dynamic), 0, "key".into());
+    provider.after_expression_read = Some(SnapshotReadHook(Arc::new({
+        let forced = Arc::clone(&forced);
+        let reads = Arc::clone(&reads);
+        let request = request.clone();
+        move || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            if forced.load(Ordering::SeqCst) {
+                // Release the producer only after current(), and wait for its publication
+                // before the second generation read. No scheduling luck is required.
+                request.send(true).unwrap();
+                completions
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+    })));
+    let provider = Arc::new(provider);
+    let session = SessionContext::new();
+    let contended: Arc<dyn ExecutionPlan> =
+        Arc::new(scan.with_runtime_predicate_provider(Arc::clone(&provider) as _, None));
+    let batches = collect(contended, session.task_ctx()).await.unwrap();
+    assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 2);
+    let attempts = reads.load(Ordering::SeqCst);
+    assert!(attempts >= 3);
+    assert_eq!(
+        attempts % 3,
+        0,
+        "every reader snapshot must exhaust all three brackets",
+    );
+
+    forced.store(false, Ordering::SeqCst);
+    request.send(false).unwrap();
+    writer.join().unwrap();
+    let generation = dynamic.snapshot_generation();
+    let snapshot = provider.snapshot().unwrap();
+    assert_eq!(snapshot.generation(), generation);
+    assert_eq!(snapshot.into_predicate(), Some(Predicate::AlwaysFalse));
+    let stable: Arc<dyn ExecutionPlan> =
+        Arc::new(scan.with_runtime_predicate_provider(provider, None));
+    let batches = collect(stable, session.task_ctx()).await.unwrap();
+    assert_eq!(batches.iter().map(|batch| batch.num_rows()).sum::<usize>(), 0);
+}
+
 #[test]
 fn extracts_signed_integer_range() {
     let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));

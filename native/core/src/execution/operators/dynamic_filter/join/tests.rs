@@ -1392,6 +1392,66 @@ fn expression_nodes(expr: &Arc<dyn PhysicalExpr>) -> usize {
         .sum::<usize>()
 }
 
+fn inlist_lengths(expr: &Arc<dyn PhysicalExpr>) -> Vec<usize> {
+    use datafusion::physical_expr::expressions::InListExpr;
+
+    let mut lengths = Vec::new();
+    if let Some(list) = expr.downcast_ref::<InListExpr>() {
+        lengths.push(list.list().len());
+        assert_eq!(
+            super::super::iceberg_reader::extracts_predicate_for_test(expr),
+            list.list().len() <= MAX_IN_LIST_LITERALS,
+        );
+    }
+    for child in expr.children() {
+        lengths.extend(inlist_lengths(child));
+    }
+    lengths
+}
+
+#[tokio::test]
+async fn small_duplicate_build_distinguishes_literal_and_distinct_caps() {
+    for mode in [PartitionMode::Partitioned, PartitionMode::CollectLeft] {
+        for (values, expected_literals) in [
+            (vec![7_i32; 2048], Some(2048)),
+            ((0..1024).map(|key| key * 1009).collect(), Some(1024)),
+            ((0..1025).map(|key| key * 1009).collect(), None),
+        ] {
+            let expected_rows = values.len();
+            let probe = if expected_literals == Some(2048) {
+                vec![7]
+            } else {
+                values.clone()
+            };
+            let (session, pool) = limited_session(8 * 1024 * 1024);
+            let join = single_key_join(
+                Arc::new(Int32Array::from(values)),
+                Arc::new(Int32Array::from(probe)),
+                mode,
+            );
+            let plan = DynamicFilterJoinExec::new(&join, ConfigOptions::default()).unwrap();
+            let runtime = plan.build_runtime_join().unwrap();
+            let predicate = Arc::downgrade(&produced_join_filter(&runtime.join));
+            let mut stream = plan
+                .execute_runtime_join(runtime.join, 0, session.task_ctx())
+                .unwrap();
+            let mut rows = stream.next().await.unwrap().unwrap().num_rows();
+            let current = predicate.upgrade().unwrap().current().unwrap();
+            assert_eq!(
+                inlist_lengths(&current),
+                expected_literals.into_iter().collect::<Vec<_>>(),
+            );
+            // Even when membership is declined, the adapter may retain safe min/max bounds.
+            while let Some(batch) = stream.next().await {
+                rows += batch.unwrap().num_rows();
+            }
+            assert_eq!(rows, expected_rows, "{mode:?}: {expected_literals:?}");
+            assert_eq!(pool.reserved(), 0);
+            assert!(predicate.upgrade().is_none());
+        }
+    }
+}
+
 #[tokio::test]
 async fn duplicate_heavy_builds_do_not_materialize_unreserved_inlists() {
     for mode in [PartitionMode::Partitioned, PartitionMode::CollectLeft] {

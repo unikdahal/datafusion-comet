@@ -157,6 +157,31 @@ impl IcebergMinMaxFilterExec {
         })?;
         Self::fresh_aggregate(&aggregate, input)?.with_dynamic_filter_expr(predicate)
     }
+
+    fn execute_runtime_aggregate(
+        &self,
+        aggregate: AggregateExec,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        MetricBuilder::new(&self.metrics)
+            .counter("dynamic_filter_minmax_filters_attached", partition)
+            .add(1);
+        let result = aggregate.execute(partition, context);
+        // Keep live counters without retaining execution publications on the template.
+        for metric in aggregate.metrics().unwrap_or_default().iter() {
+            self.metrics.register(Arc::clone(metric));
+        }
+        drop(aggregate);
+        let input = result?;
+        let stream = futures::stream::unfold(Some(input), |input| async move {
+            let mut input = input?;
+            let batch = input.next().await?;
+            let remaining = if batch.is_ok() { Some(input) } else { None };
+            Some((batch, remaining))
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(self.schema(), stream)))
+    }
 }
 
 impl DisplayAs for IcebergMinMaxFilterExec {
@@ -224,27 +249,7 @@ impl ExecutionPlan for IcebergMinMaxFilterExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let aggregate = self.build_runtime_aggregate()?;
-        MetricBuilder::new(&self.metrics)
-            .counter("dynamic_filter_minmax_filters_attached", partition)
-            .add(1);
-        let result = aggregate.execute(partition, context);
-        // Each execution builds a fresh aggregate. Its metrics are summed by
-        // name when reported, so repeated executions accumulate correctly.
-        for metric in aggregate.metrics().unwrap_or_default().iter() {
-            self.metrics.register(Arc::clone(metric));
-        }
-        drop(aggregate);
-        let input = result?;
-        let stream = futures::stream::unfold(Some(input), |input| async move {
-            let mut input = input?;
-            let batch = input.next().await?;
-            let remaining = if batch.is_ok() { Some(input) } else { None };
-            Some((batch, remaining))
-        });
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema(),
-            stream,
-        )))
+        self.execute_runtime_aggregate(aggregate, partition, context)
     }
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())

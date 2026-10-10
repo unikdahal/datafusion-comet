@@ -149,9 +149,9 @@ impl DynamicFilterJoinExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         // DataFusion materializes one IN-list literal per build row, although it admits the
-        // list by packed-array bytes and distinct-key count. Admit only small lists, which
-        // the Iceberg reader can turn into a membership predicate; a larger build side keeps
-        // reusing the join's already-reserved hash table and preserves duplicates.
+        // list by packed-array bytes and distinct-key count. Duplicate literals can exceed
+        // the reader's literal cap, in which case the reader declines membership extraction.
+        // Builds exceeding either producer budget reuse the already-reserved hash table.
         let mut config = context.session_config().clone();
         config
             .options_mut()
@@ -294,8 +294,8 @@ impl ExecutionPlan for DynamicFilterJoinExec {
     }
 }
 
-/// Largest packed build-side key array, and most distinct keys, DataFusion may turn into an
-/// IN list. The shared literal ceiling also bounds the unreserved allocation.
+/// Largest source key array DataFusion may turn into an IN list (16 KiB).
+/// The separate 1,024-distinct-key cap does not bound duplicate literal count.
 const IN_LIST_PUSHDOWN_MAX_BYTES: usize = 16 * 1024;
 
 fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Option<&'static str>> {

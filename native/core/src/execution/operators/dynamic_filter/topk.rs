@@ -76,7 +76,7 @@ impl TopKReaderFilterExec {
         let key_type = key.data_type(sort.input().schema().as_ref())?;
         let string_key = super::is_runtime_pruning_string_key_type(&key_type);
         // String bounds require the Iceberg binary domain and unannotated column lineage.
-        // NULLS FIRST string support is owned by the separate null-ordering workstream.
+        // String TopK currently supports NULLS LAST only.
         if string_key
             && (sort.expr()[0].options.nulls_first
                 || !reaches_iceberg_reader(sort.input())
@@ -84,7 +84,7 @@ impl TopKReaderFilterExec {
         {
             return Ok(None);
         }
-        // TopK reader filter pushdown supports integer, date, timestamp and binary string runtime pruning keys.
+        // TopK reader filters support integer, date, timestamp and binary string keys.
         if !key.is::<Column>() || !super::is_supported_topk_key_type(&key_type) {
             return Ok(None);
         }
