@@ -146,7 +146,7 @@ jobs:
         run: |
           export SPARK_HOME="$GITHUB_WORKSPACE"
           ./mvnw -B -Prelease -Pspark-$SPARK_PROFILE test -Dtest=none \
-            '-Dsuites=org.apache.comet.CometIcebergNativeSuite,org.apache.spark.sql.comet.util.UtilsSuite,org.apache.comet.exec.CometJoinSuite,org.apache.comet.exec.CometShuffleSuite,org.apache.comet.exec.DisableAQECometShuffleSuite,org.apache.spark.sql.comet.execution.shuffle.CometDiskBlockWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometNativeShuffleWriterSuite,org.apache.comet.exec.CometAggregateSuite,org.apache.comet.rules.CometScanRuleSuite,org.apache.comet.rules.CometScanSchemeFallbackSuite,org.apache.comet.rules.CometExecRuleSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShufflePlanningSuite'
+            '-Dsuites=org.apache.comet.CometIcebergNativeSuite,org.apache.comet.iceberg.IcebergReflectionSuite,org.apache.spark.sql.comet.RuntimePruningKeyTypesSuite,org.apache.spark.sql.comet.util.UtilsSuite,org.apache.comet.exec.CometJoinSuite,org.apache.comet.exec.CometShuffleSuite,org.apache.comet.exec.DisableAQECometShuffleSuite,org.apache.spark.sql.comet.execution.shuffle.CometDiskBlockWriterSuite,org.apache.spark.sql.comet.execution.shuffle.CometNativeShuffleWriterSuite,org.apache.comet.exec.CometAggregateSuite,org.apache.comet.rules.CometScanRuleSuite,org.apache.comet.rules.CometScanSchemeFallbackSuite,org.apache.comet.rules.CometExecRuleSuite,org.apache.spark.sql.comet.execution.shuffle.CometCelebornShufflePlanningSuite'
       - uses: actions/upload-artifact@v7
         if: always()
         with:
