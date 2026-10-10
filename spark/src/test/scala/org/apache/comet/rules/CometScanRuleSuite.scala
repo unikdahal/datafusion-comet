@@ -66,6 +66,28 @@ class CometScanRuleSuite extends CometTestBase {
     }
   }
 
+  test("runtime pruning rejects preserved CHAR and traces CHAR metadata through aliases") {
+    import org.apache.spark.sql.catalyst.expressions._
+    import org.apache.comet.serde.QueryPlanSerde.hasCharPruningKey
+    val directChar = AttributeReference("char", CharType(8))()
+    val directInput = LocalTableScanExec(Seq(directChar), Nil)
+    assert(hasCharPruningKey(directInput, Seq(directChar)))
+    assert(!CometScanRule.isSafeRuntimeStatsExpression(EqualTo(directChar, directChar)))
+
+    val metadata = new MetadataBuilder()
+      .putString("__CHAR_VARCHAR_TYPE_STRING", "char(8)")
+      .build()
+    val padded = AttributeReference("padded", StringType, metadata = metadata)()
+    val input = LocalTableScanExec(Seq(padded), Nil)
+    val alias = Alias(padded, "renamed")(explicitMetadata = Some(Metadata.empty))
+    val project = ProjectExec(Seq(alias), input)
+    assert(hasCharPruningKey(project, Seq(alias.toAttribute)))
+
+    val binary = AttributeReference("binary", StringType)()
+    assert(!hasCharPruningKey(LocalTableScanExec(Seq(binary), Nil), Seq(binary)))
+    assert(CometScanRule.isSafeRuntimeStatsExpression(EqualTo(binary, binary)))
+  }
+
   /** Helper method to apply CometExecRule and return the transformed plan */
   private def applyCometScanRule(plan: SparkPlan): SparkPlan = {
     CometScanRule(spark).apply(stripAQEPlan(plan))

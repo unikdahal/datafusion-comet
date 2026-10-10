@@ -1224,22 +1224,22 @@ class CometIcebergNativeSuite
             expected = spark.sql(query).collect().toSeq
           }
           assert(expected == Seq(Row(expectedRows * 64L)))
-          // Exercise uncached, cold-cache and warm-cache execution, including both kinds of
-          // deletes below. All must preserve Spark's answer and whole-file pruning savings.
+          // Exercise disabled statistics, cold-cache and warm-cache execution with both kinds
+          // of deletes. Only retained file statistics can reject tasks before footer I/O.
           val readings =
             Seq((false, false), (true, false), (true, true), (true, true)).map {
-              case (enabled, cacheEnabled) =>
+              case (enabled, statsEnabled) =>
                 var bytes = 0L
                 withSQLConf(
                   CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString,
-                  CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key -> cacheEnabled.toString) {
+                  CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.key -> statsEnabled.toString) {
                   val df = spark.sql(query)
                   assert(df.collect().toSeq == expected)
                   val scans = collectIcebergNativeScans(df.queryExecution.executedPlan)
                   assert(scans.nonEmpty)
                   bytes = scans.map(_.metrics("bytes_scanned").value).sum
                   val pruned = scans.map(_.metrics("iceberg_runtime_file_tasks_pruned").value).sum
-                  if (enabled) {
+                  if (enabled && statsEnabled) {
                     assert(
                       pruned >= fileCount - 2,
                       s"too few tasks rejected before footer I/O: $pruned; " +
@@ -1289,13 +1289,19 @@ class CometIcebergNativeSuite
                             s"got $serializedFieldIds")
                       }
                     }
-                  } else { assert(pruned == 0) }
+                  } else {
+                    assert(pruned == 0)
+                    scans.foreach { scan =>
+                      val common = OperatorOuterClass.IcebergScanCommon.parseFrom(scan.commonData)
+                      assert(common.getFileMetricsPoolCount == 0)
+                    }
+                  }
                 }
                 bytes
             }
           assert(
-            readings.tail.forall(_ < readings.head / 3),
-            s"file pruning did not reduce I/O with cache on/off: $readings")
+            readings.drop(2).forall(_ < readings.head / 3),
+            s"file pruning did not reduce I/O with cold/warm statistics: $readings")
         }
         try {
           checkMode(16)

@@ -470,8 +470,8 @@ object IcebergReflection extends Logging {
     if (isStagedScan(scan)) tasksFromTaskGroups(scan) else tasksFromTasksAccessor(scan)
 
   /**
-   * Top-level INT, BIGINT, DATE, microsecond TIMESTAMP and STRING columns of `schema`: the only
-   * key types the runtime predicate producers support, and so the only columns whose statistics
+   * Top-level INT, BIGINT, DATE, microsecond TIMESTAMP, DECIMAL and STRING columns of `schema`:
+   * the key types the runtime predicate producers support, whose statistics
    * can prune a file.
    */
   def runtimeKeyColumns(schema: Any): Seq[String] = {
@@ -497,7 +497,7 @@ object IcebergReflection extends Logging {
     }
   }
 
-  private case class RuntimeStatsPolicy(maxEntries: Int, maxFiles: Int, maxBytes: Long)
+  private case class RuntimeStatsPolicy(maxFiles: Int)
 
   private case class RuntimeStatsKey(
       metadataLocation: String,
@@ -510,11 +510,12 @@ object IcebergReflection extends Logging {
       estimatedBytes: Long,
       oversized: Boolean = false)
 
-  // Process-owned, with immutable policy namespaces: alternating SQLConf limits never replace
-  // the cache. The weight floor enforces each policy's maxEntries as well as the shared byte
-  // ceiling. No SQLConf, session, table, task, residual or delete file is retained in a key.
-  // 64 MiB permits eight default 8 MiB entries; the 4096-file gate also limits object counts.
+  // Process-owned immutable snapshot metrics, bounded by estimated bytes and a fixed entry
+  // floor. SQLConf policies never replace the cache or change the charge for other sessions.
+  // Keys retain no SQLConf, session, table, task, residual or delete file.
   private[iceberg] val RuntimeStatsCacheMaxBytes = 64L * 1024 * 1024
+  private val RuntimeStatsEntryMinBytes = 1024L * 1024
+  private val RuntimeStatsCollectionMaxBytes = 8L * 1024 * 1024
   private val runtimeStatsCollection = new Semaphore(1)
   private val runtimeStatsCache =
     CacheBuilder
@@ -523,9 +524,7 @@ object IcebergReflection extends Logging {
       .maximumWeight(RuntimeStatsCacheMaxBytes)
       .weigher(new Weigher[RuntimeStatsKey, RuntimeStatsEntry] {
         override def weigh(key: RuntimeStatsKey, value: RuntimeStatsEntry): Int = {
-          val entryFloor =
-            (RuntimeStatsCacheMaxBytes + key.policy.maxEntries - 1) / key.policy.maxEntries
-          math.min(Int.MaxValue.toLong, math.max(entryFloor, value.estimatedBytes)).toInt
+          math.max(RuntimeStatsEntryMinBytes, value.estimatedBytes).toInt
         }
       })
       .build[RuntimeStatsKey, RuntimeStatsEntry]()
@@ -534,10 +533,9 @@ object IcebergReflection extends Logging {
     import scala.jdk.CollectionConverters._
     runtimeStatsCache.cleanUp()
     val entries = runtimeStatsCache.asMap().asScala
-    val chargedBytes = entries.iterator.map { case (key, entry) =>
-      val floor = (RuntimeStatsCacheMaxBytes + key.policy.maxEntries - 1) / key.policy.maxEntries
-      math.max(floor, entry.estimatedBytes)
-    }.sum
+    val chargedBytes = entries.valuesIterator
+      .map(entry => math.max(RuntimeStatsEntryMinBytes, entry.estimatedBytes))
+      .sum
     (chargedBytes, entries.valuesIterator.map(_.statistics.size.toLong).sum)
   }
 
@@ -646,10 +644,8 @@ object IcebergReflection extends Logging {
     if (columns.isEmpty || tasks.size() <= 1 || isStagedScan(scan)) return Map.empty
     try {
       val conf = SQLConf.get
-      val policy = RuntimeStatsPolicy(
-        CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.get(conf),
-        CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.get(conf),
-        CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_BYTES.get(conf))
+      if (!CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.get(conf)) return Map.empty
+      val policy = RuntimeStatsPolicy(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.get(conf))
       val fileMethod = getMethod(loadClass(ClassNames.CONTENT_SCAN_TASK), "file")
       val selectedBuilder = scala.collection.mutable.HashSet.empty[String]
       var selectedBytes = 0L
@@ -658,7 +654,8 @@ object IcebergReflection extends Logging {
         extractFileLocation(fileMethod.invoke(taskIterator.next())).foreach { path =>
           if (selectedBuilder.add(path)) selectedBytes += 64L + path.length.toLong * 2
         }
-        if (selectedBuilder.size > policy.maxFiles || selectedBytes > policy.maxBytes) {
+        if (selectedBuilder.size > policy.maxFiles ||
+          selectedBytes > RuntimeStatsCollectionMaxBytes) {
           return Map.empty
         }
       }
@@ -668,11 +665,9 @@ object IcebergReflection extends Logging {
         .map(_.invoke(scan))
         .orNull
       if (icebergScan == null) return Map.empty
-      val cacheKey = if (CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.get(conf)) {
-        // Missing identity/snapshot metadata disables caching, not statistics collection.
-        try { runtimeStatsKey(icebergScan, scan, columns, policy) }
-        catch { case NonFatal(_) => None }
-      } else { None }
+      // Missing identity/snapshot metadata disables caching, not statistics collection.
+      val cacheKey = try { runtimeStatsKey(icebergScan, scan, columns, policy) }
+      catch { case NonFatal(_) => None }
       val cached = cacheKey.flatMap(key => Option(runtimeStatsCache.getIfPresent(key)))
       if (cached.exists(_.oversized)) return Map.empty
       cached.flatMap(entry => selectRuntimeStatistics(selected, entry.statistics.get)) match {
@@ -680,7 +675,7 @@ object IcebergReflection extends Logging {
         case None =>
       }
       // Advisory metadata must not multiply transient driver allocations across concurrent
-      // misses, including disabled caching. Contention keeps row-group pruning and never waits.
+      // misses. Contention keeps row-group pruning and never waits.
       if (!runtimeStatsCollection.tryAcquire()) return Map.empty
       try {
         val scanClass = loadClass("org.apache.iceberg.Scan")
@@ -710,9 +705,11 @@ object IcebergReflection extends Logging {
               .filter(path => selected.contains(path) && !result.contains(path))
               .foreach { path =>
                 estimatedBytes += runtimeStatsFileBytes(file.asInstanceOf[AnyRef], path)
-                if (estimatedBytes <= policy.maxBytes) result.put(path, file.asInstanceOf[AnyRef])
+                if (estimatedBytes <= RuntimeStatsCollectionMaxBytes) {
+                  result.put(path, file.asInstanceOf[AnyRef])
+                }
               }
-            if (estimatedBytes > policy.maxBytes) {
+            if (estimatedBytes > RuntimeStatsCollectionMaxBytes) {
               // Reject atomically, and remember the oversized snapshot/key policy to avoid
               // repeatedly re-planning it. Eviction permits a later retry; no partial metrics leak.
               cacheKey.foreach(key =>

@@ -19,7 +19,6 @@
 
 package org.apache.comet.serde
 
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 
 import scala.collection.mutable
@@ -31,7 +30,7 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.expressions.objects.{Invoke, StaticInvoke}
 import org.apache.spark.sql.catalyst.expressions.xml.{XPathBoolean, XPathDouble, XPathFloat, XPathInt, XPathList, XPathLong, XPathShort, XPathString}
-import org.apache.spark.sql.comet.{CometProjectExec, DecimalPrecision}
+import org.apache.spark.sql.comet.{CometProjectExec, DecimalPrecision, RuntimePruningKeyTypes}
 import org.apache.spark.sql.execution.{ProjectExec, ScalarSubquery, SparkPlan}
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
 import org.apache.spark.sql.internal.SQLConf
@@ -1340,25 +1339,18 @@ object QueryPlanSerde extends Logging with CometExprShim with CometTypeShim {
     }
   }
 
-  /** String bounds are ordered as UTF8_BINARY in both Arrow and Iceberg. */
-  def isBinaryStringPruningType(dataType: DataType): Boolean =
-    dataType.isInstanceOf[StringType] && !isStringCollationType(dataType)
-
-  // Catalyst represents CHAR as StringType plus metadata and may insert padding projections.
+  // Catalyst may preserve CharType or use StringType with CHAR metadata and padding projections.
   // Trace aliases to that metadata, including below exchanges. Stored Iceberg strings do not
   // promise CHAR padding, so reader pruning must not compare them to runtime string literals.
   def hasCharPruningKey(input: SparkPlan, keys: Seq[Expression]): Boolean = {
-    val stringKeys = keys.filter(_.dataType.isInstanceOf[StringType])
+    val stringKeys = keys.filter(key =>
+      key.dataType.isInstanceOf[StringType] || key.dataType.isInstanceOf[CharType])
+    if (stringKeys.exists(_.dataType.isInstanceOf[CharType])) return true
     if (stringKeys.isEmpty) {
       return false
     }
     val references = stringKeys.flatMap(_.references).map(_.exprId).toSet
-    def isChar(attribute: Attribute): Boolean =
-      attribute.metadata.contains("__CHAR_VARCHAR_TYPE_STRING") &&
-        attribute.metadata
-          .getString("__CHAR_VARCHAR_TYPE_STRING")
-          .toLowerCase(Locale.ROOT)
-          .startsWith("char(")
+    def isChar(attribute: Attribute): Boolean = RuntimePruningKeyTypes.isCharType(attribute)
     if (stringKeys.flatMap(_.references).exists(isChar) ||
       input.output.exists(a => references.contains(a.exprId) && isChar(a))) {
       true

@@ -107,11 +107,9 @@ case class CometScanRule(session: SparkSession)
 
       // data source V2
       //
-      // NOTE: the Iceberg metadata-table bailout is NOT here either, for the same reason. It
-      // matches on a table-name suffix (`files`, `snapshots`, ...), which a contrib's own table
-      // could legitimately end with; rejecting here would decline such a scan before the contrib
-      // is ever offered it. `transformV2Scan` applies the guard right after its contrib hook
-      // declines.
+      // Offer V2 scans to contribs before the Iceberg metadata-table guard. The guard prefers
+      // the BaseMetadataTable hierarchy and falls back to dotted or hash-separated name
+      // segments when the table is unavailable. A contrib may support these scans itself.
       case scanExec: BatchScanExec =>
         val columns = Option(runtimeFilterColumns.get(scanExec)).getOrElse(Set.empty[String])
         transformV2Scan(scanExec, columns)
@@ -125,8 +123,8 @@ case class CometScanRule(session: SparkSession)
   /**
    * Whether this V2 scan reads an Iceberg metadata table, which Comet does not support.
    *
-   * Matches on the table-name suffix, so it is only meaningful once contribs have had their turn
-   * -- see the call site in `transformV2Scan`.
+   * Prefers the BaseMetadataTable hierarchy, falling back to a dotted or hash-separated name
+   * segment when the table is unavailable. Applied after contribs in `transformV2Scan`.
    */
   private def isIcebergMetadataTable(scanExec: BatchScanExec): Boolean = {
     // List of Iceberg metadata tables:
@@ -1224,7 +1222,7 @@ object CometScanRule extends Logging {
       case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
           DateType | TimestampType | TimestampNTZType | BinaryType | _: DecimalType =>
         true
-      case st: StringType => !RuntimePruningKeyTypes.isStringCollationType(st)
+      case _ if RuntimePruningKeyTypes.isBinaryStringType(dataType) => true
       case _ => false
     }
     val safe = expression match {

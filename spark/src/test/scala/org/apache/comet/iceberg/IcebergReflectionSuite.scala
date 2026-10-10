@@ -126,7 +126,11 @@ class IcebergReflectionSuite extends AnyFunSuite {
     }
   }
 
-  private def appendRuntimeStatsFiles(table: Table, start: Int, end: Int): Unit = {
+  private def appendRuntimeStatsFiles(
+      table: Table,
+      start: Int,
+      end: Int,
+      pathPadding: Int = 0): Unit = {
     val append = table.newAppend()
     (start until end).foreach { index =>
       val bounds = Map(
@@ -136,7 +140,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
       append.appendFile(
         DataFiles
           .builder(PartitionSpec.unpartitioned())
-          .withPath(s"${table.location()}/data/$index.parquet")
+          .withPath(s"${table.location()}/data/${"x" * pathPadding}/$index.parquet")
           .withFileSizeInBytes(100L)
           .withMetrics(metrics)
           .build())
@@ -240,49 +244,50 @@ class IcebergReflectionSuite extends AnyFunSuite {
 
   test("runtime statistics cache is bounded with least recently used eviction") {
     withRuntimeStatsTable { table =>
-      val conf = SQLConf.get
-      conf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, "2")
       val source = table.newScan()
       val scan = new CountingRuntimeScan(source)
       val tasks = runtimeTasks(source)
-      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
-      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("extra"))
-      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
-      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id", "extra"))
-      assert(scan.planningCalls == 3)
-      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("extra", "id"))
-      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
-      assert(scan.planningCalls == 3)
-      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("extra"))
-      assert(scan.planningCalls == 4)
-      conf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, "1")
-      IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
-      assert(scan.planningCalls == 5)
+      def collect(maxFiles: Int): Unit = {
+        SQLConf.get.setConfString(
+          CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key,
+          maxFiles.toString)
+        assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).size == 3)
+      }
+      // Each small entry charges the fixed internal 1 MiB floor in the 64 MiB cache.
+      (3 to 66).foreach(collect)
+      assert(scan.planningCalls == 64)
+      collect(3)
+      collect(67)
+      collect(3)
+      assert(scan.planningCalls == 65)
+      collect(4)
+      assert(scan.planningCalls == 66)
+      assert(IcebergReflection.runtimeStatsCacheUsage._1 <=
+        IcebergReflection.RuntimeStatsCacheMaxBytes)
     }
   }
 
-  test("disabled runtime statistics cache replans and preserves the same bounds") {
+  test("disabled runtime statistics skip collection and preserve cached snapshot bounds") {
     withRuntimeStatsTable { table =>
       val source = table.newScan()
       val scan = new CountingRuntimeScan(source)
       val tasks = runtimeTasks(source)
       val cached = IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
-      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key, "false")
+      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.key, "false")
       (1 to 2).foreach { _ =>
-        val uncached = IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id"))
-        assert(uncached.keySet == cached.keySet)
-        uncached.foreach { case (path, file) =>
-          val expected = cached(path).asInstanceOf[org.apache.iceberg.DataFile]
-          val actual = file.asInstanceOf[org.apache.iceberg.DataFile]
-          assert(actual.lowerBounds() == expected.lowerBounds())
-          assert(actual.upperBounds() == expected.upperBounds())
-        }
+        assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).isEmpty)
       }
-      assert(scan.planningCalls == 3)
+      val uncached = new CountingRuntimeScan(source)
+      assert(IcebergReflection.runtimeFileStatistics(uncached, tasks, Seq("extra")).isEmpty)
+      assert(uncached.planningCalls == 0)
+      assert(scan.planningCalls == 1)
+      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.key, "true")
+      assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")) == cached)
+      assert(scan.planningCalls == 1)
     }
   }
 
-  test("oversized selections never replan, even when the cache is disabled") {
+  test("oversized selections never replan and disabled statistics skip split tasks") {
     withRuntimeStatsTable { table =>
       val source = table.newScan()
       val scan = new CountingRuntimeScan(source)
@@ -290,12 +295,13 @@ class IcebergReflectionSuite extends AnyFunSuite {
       SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, "2")
       for (enabled <- Seq(true, false); _ <- 1 to 2) {
         SQLConf.get.setConfString(
-          CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key,
+          CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.key,
           enabled.toString)
         assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).isEmpty)
       }
       assert(scan.planningCalls == 0)
       // The bound counts physical files, not split tasks, without changing the one-task gate.
+      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.key, "true")
       val splits = Collections.nCopies(100, tasks.get(0))
       assert(IcebergReflection.runtimeFileStatistics(scan, splits, Seq("id")).size == 1)
       assert(scan.planningCalls == 1)
@@ -305,24 +311,26 @@ class IcebergReflectionSuite extends AnyFunSuite {
   test(
     "oversized byte collection closes the plan, returns no partial metrics and caches rejection") {
     withRuntimeStatsTable { table =>
+      // Selection fits the internal 8 MiB budget; retaining file paths exceeds it.
+      appendRuntimeStatsFiles(table, 3, 1000, pathPadding = 2000)
       val source = table.newScan()
       val scan = new CountingRuntimeScan(source)
       val tasks = runtimeTasks(source)
-      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_BYTES.key, "2048")
       assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).isEmpty)
       assert(scan.planningCalls == 1)
       assert(scan.closedPlans == 1)
       assert(scan.visitedFiles < tasks.size(), "abort before collecting the full snapshot")
       assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).isEmpty)
       assert(scan.planningCalls == 1)
-      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key, "false")
+      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.key, "false")
+      assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).isEmpty)
+      assert(scan.planningCalls == 1)
+      assert(scan.closedPlans == 1)
+      // A different maxFiles policy has its own negative entry, under the same byte budget.
+      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.key, "true")
+      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, "1000")
       assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).isEmpty)
       assert(scan.planningCalls == 2)
-      assert(scan.closedPlans == 2)
-      // A different policy is independent of the negative entry.
-      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key, "true")
-      SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_BYTES.key, "8388608")
-      assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).size == 3)
     }
   }
 
@@ -333,7 +341,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
       val sessions = Seq(8, 16).map { capacity =>
         val conf = new SQLConf
         conf.setConfString(
-          CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key,
+          CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key,
           capacity.toString)
         (conf, new CountingRuntimeScan(source))
       }
@@ -346,11 +354,10 @@ class IcebergReflectionSuite extends AnyFunSuite {
       val (chargedBytes, retainedFiles) = IcebergReflection.runtimeStatsCacheUsage
       assert(chargedBytes <= IcebergReflection.RuntimeStatsCacheMaxBytes)
       assert(retainedFiles >= 6)
-      info(s"runtime statistics cache: chargedBytes=$chargedBytes retainedFiles=$retainedFiles")
     }
   }
 
-  test("many-file snapshots obey the collection gate and report retention and planning cost") {
+  test("many-file snapshots obey the collection gate and bound cache retention") {
     withRuntimeStatsTable { table =>
       appendRuntimeStatsFiles(table, 3, 100)
       val source = table.newScan()
@@ -360,17 +367,13 @@ class IcebergReflectionSuite extends AnyFunSuite {
       assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).isEmpty)
       assert(scan.planningCalls == 0)
       SQLConf.get.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, "100")
-      val start = System.nanoTime()
       assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).size == 100)
-      val planningNanos = System.nanoTime() - start
       assert(
         IcebergReflection.runtimeFileStatistics(scan, tasks.subList(0, 2), Seq("id")).size == 2)
       assert(scan.planningCalls == 1)
       val (chargedBytes, retainedFiles) = IcebergReflection.runtimeStatsCacheUsage
       assert(chargedBytes <= IcebergReflection.RuntimeStatsCacheMaxBytes)
-      info(
-        s"100-file runtime statistics: planningNanos=$planningNanos " +
-          s"chargedBytes=$chargedBytes retainedFiles=$retainedFiles")
+      assert(retainedFiles >= 100)
     }
   }
 
@@ -401,7 +404,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
       }
       val collectingConf = new SQLConf
       collectingConf.setConfString(
-        CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key,
+        CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key,
         "8")
       val executor = Executors.newSingleThreadExecutor()
       try {
@@ -413,8 +416,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
         assert(started.await(30, TimeUnit.SECONDS))
         val other = new CountingRuntimeScan(source)
         val otherConf = new SQLConf
-        otherConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_MAX_ENTRIES.key, "16")
-        otherConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key, "false")
+        otherConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.key, "16")
         SQLConf.withExistingConf(otherConf) {
           assert(IcebergReflection.runtimeFileStatistics(other, tasks, Seq("extra")).isEmpty)
         }
@@ -429,7 +431,6 @@ class IcebergReflectionSuite extends AnyFunSuite {
           assert(IcebergReflection.runtimeFileStatistics(other, tasks, Seq("extra")).size == 3)
         }
         assert(other.planningCalls == 1)
-        otherConf.setConfString(CometConf.COMET_ICEBERG_RUNTIME_STATS_CACHE_ENABLED.key, "true")
         SQLConf.withExistingConf(otherConf) {
           assert(IcebergReflection.runtimeFileStatistics(other, tasks, Seq("extra")).size == 3)
         }
@@ -437,7 +438,7 @@ class IcebergReflectionSuite extends AnyFunSuite {
           assert(IcebergReflection.runtimeFileStatistics(scan, tasks, Seq("id")).size == 3)
         }
         assert(scan.planningCalls == 1)
-        assert(other.planningCalls == 2)
+        assert(other.planningCalls == 1)
       } finally {
         release.countDown()
         executor.shutdownNow()

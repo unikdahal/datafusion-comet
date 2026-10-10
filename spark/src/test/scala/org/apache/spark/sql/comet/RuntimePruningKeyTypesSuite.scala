@@ -21,252 +21,120 @@ package org.apache.spark.sql.comet
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.types._
 
-/**
- * Cross-language agreement tests verifying per-consumer runtime pruning key types in Scala agree
- * with native Arrow types.
- *
- * Hard-coded cross-reference with native Rust tests:
- * `native/core/src/execution/operators/dynamic_filter/tests.rs`.
- */
+import org.apache.comet.serde.{AggSerde, Compatible, Unsupported}
+
+/** JVM key-type policy tests; native reader attachment is tested separately in Rust. */
 class RuntimePruningKeyTypesSuite extends AnyFunSuite {
 
-  test("HashJoin consumer key types agreement with Arrow") {
-    val supportedJoinSparkToArrow: Seq[(DataType, String)] = Seq(
-      (IntegerType, "Int32"),
-      (LongType, "Int64"),
-      (DateType, "Date32"),
-      (TimestampType, "Timestamp(Microsecond, Some(...))"),
-      (TimestampNTZType, "Timestamp(Microsecond, None)"),
-      (DecimalType.SYSTEM_DEFAULT, "Decimal128"),
-      (StringType, "Utf8"))
+  private val orderedTypes: Seq[DataType] =
+    Seq(IntegerType, LongType, DateType, TimestampType, TimestampNTZType, StringType)
 
-    for ((sparkType, _) <- supportedJoinSparkToArrow) {
-      assert(
-        RuntimePruningKeyTypes.isSupportedJoinKey(sparkType),
-        s"Expected $sparkType to be supported as Join key")
-      assert(
-        RuntimePruningKeyTypes.isFileStatsKey(sparkType),
-        s"Expected $sparkType to be supported as file stats key")
+  private val unsupportedTypes: Seq[DataType] = Seq(
+    FloatType,
+    DoubleType,
+    BooleanType,
+    BinaryType,
+    ArrayType(IntegerType),
+    MapType(StringType, StringType),
+    StructType(Seq(StructField("a", IntegerType))))
+
+  test("driver file-statistics key policy includes exact decimals") {
+    val supported = orderedTypes ++ Seq(DecimalType(10, 2), DecimalType(38, 18))
+    supported.foreach { dataType =>
+      assert(RuntimePruningKeyTypes.isFileStatsKey(dataType), dataType.toString)
+      val attr = AttributeReference("key", dataType)()
+      assert(RuntimePruningKeyTypes.isFileStatsAttribute(attr), dataType.toString)
     }
-
-    assert(
-      RuntimePruningKeyTypes.SUPPORTED_JOIN_TYPES == supportedJoinSparkToArrow.map(_._1),
-      "SUPPORTED_JOIN_TYPES must match expected sequence")
-
-    val unsupportedJoinTypes: Seq[DataType] = Seq(
-      ByteType,
-      ShortType,
-      FloatType,
-      DoubleType,
-      BooleanType,
-      BinaryType,
-      ArrayType(IntegerType),
-      MapType(StringType, StringType),
-      StructType(Seq(StructField("a", IntegerType))))
-
-    for (unsupported <- unsupportedJoinTypes) {
-      assert(
-        !RuntimePruningKeyTypes.isSupportedJoinKey(unsupported),
-        s"Expected $unsupported to be rejected as Join key")
-      assert(
-        !RuntimePruningKeyTypes.isFileStatsKey(unsupported),
-        s"Expected $unsupported to be rejected as file stats key")
+    // Native joins also accept Int8/Int16, but Iceberg has no BYTE/SHORT schema types.
+    (unsupportedTypes ++ Seq(ByteType, ShortType)).foreach { dataType =>
+      assert(!RuntimePruningKeyTypes.isFileStatsKey(dataType), dataType.toString)
     }
   }
 
-  test("TopK consumer key types agreement with Arrow") {
-    val supportedTopKSparkToArrow: Seq[(DataType, String)] = Seq(
-      (IntegerType, "Int32"),
-      (LongType, "Int64"),
-      (DateType, "Date32"),
-      (TimestampType, "Timestamp(Microsecond, Some(...))"),
-      (TimestampNTZType, "Timestamp(Microsecond, None)"),
-      (StringType, "Utf8"))
-
-    for ((sparkType, _) <- supportedTopKSparkToArrow) {
-      assert(
-        RuntimePruningKeyTypes.isSupportedTopKKey(sparkType),
-        s"Expected $sparkType to be supported as TopK key")
-      assert(
-        RuntimePruningKeyTypes.isFileStatsKey(sparkType),
-        s"Expected $sparkType to be supported as file stats key")
+  test("TopK and MIN/MAX key policies exclude decimals and narrow integers") {
+    orderedTypes.foreach { dataType =>
+      assert(RuntimePruningKeyTypes.isSupportedTopKKey(dataType), dataType.toString)
+      assert(RuntimePruningKeyTypes.isSupportedMinMaxKey(dataType), dataType.toString)
     }
-
-    assert(
-      RuntimePruningKeyTypes.SUPPORTED_TOPK_TYPES == supportedTopKSparkToArrow.map(_._1),
-      "SUPPORTED_TOPK_TYPES must match expected sequence")
-
-    val unsupportedTopKTypes: Seq[DataType] = Seq(
-      ByteType,
-      ShortType,
-      DecimalType(10, 2),
-      DecimalType(38, 18),
-      FloatType,
-      DoubleType,
-      BooleanType,
-      BinaryType)
-
-    for (unsupported <- unsupportedTopKTypes) {
-      assert(
-        !RuntimePruningKeyTypes.isSupportedTopKKey(unsupported),
-        s"Expected $unsupported to be rejected as TopK key")
+    val rejected = unsupportedTypes ++
+      Seq(ByteType, ShortType, DecimalType(10, 2), DecimalType(38, 18))
+    rejected.foreach { dataType =>
+      assert(!RuntimePruningKeyTypes.isSupportedTopKKey(dataType), dataType.toString)
+      assert(!RuntimePruningKeyTypes.isSupportedMinMaxKey(dataType), dataType.toString)
     }
   }
 
-  test("MinMax consumer key types agreement with Arrow") {
-    val supportedMinMaxSparkToArrow: Seq[(DataType, String)] = Seq(
-      (IntegerType, "Int32"),
-      (LongType, "Int64"),
-      (DateType, "Date32"),
-      (TimestampType, "Timestamp(Microsecond, Some(...))"),
-      (TimestampNTZType, "Timestamp(Microsecond, None)"),
-      (StringType, "Utf8"))
-
-    for ((sparkType, _) <- supportedMinMaxSparkToArrow) {
-      assert(
-        RuntimePruningKeyTypes.isSupportedMinMaxKey(sparkType),
-        s"Expected $sparkType to be supported as MinMax key")
-      assert(
-        RuntimePruningKeyTypes.isFileStatsKey(sparkType),
-        s"Expected $sparkType to be supported as file stats key")
+  test("Parquet reader policy accepts only signed integer keys") {
+    Seq(ByteType, ShortType, IntegerType, LongType).foreach { dataType =>
+      assert(RuntimePruningKeyTypes.isParquetReaderKey(dataType), dataType.toString)
     }
-
-    assert(
-      RuntimePruningKeyTypes.SUPPORTED_MINMAX_TYPES == supportedMinMaxSparkToArrow.map(_._1),
-      "SUPPORTED_MINMAX_TYPES must match expected sequence")
-
-    val unsupportedMinMaxTypes: Seq[DataType] = Seq(
-      ByteType,
-      ShortType,
-      DecimalType(10, 2),
-      DecimalType(38, 18),
-      FloatType,
-      DoubleType,
-      BooleanType,
-      BinaryType)
-
-    for (unsupported <- unsupportedMinMaxTypes) {
-      assert(
-        !RuntimePruningKeyTypes.isSupportedMinMaxKey(unsupported),
-        s"Expected $unsupported to be rejected as MinMax key")
+    val rejected = unsupportedTypes ++
+      Seq(DateType, TimestampType, TimestampNTZType, StringType, DecimalType(10, 2))
+    rejected.foreach { dataType =>
+      assert(!RuntimePruningKeyTypes.isParquetReaderKey(dataType), dataType.toString)
     }
   }
 
-  test("ParquetReader consumer key types agreement with Arrow") {
-    val supportedParquetReaderSparkToArrow: Seq[(DataType, String)] =
-      Seq((ByteType, "Int8"), (ShortType, "Int16"), (IntegerType, "Int32"), (LongType, "Int64"))
-
-    for ((sparkType, _) <- supportedParquetReaderSparkToArrow) {
-      assert(
-        RuntimePruningKeyTypes.isSupportedParquetReaderKey(sparkType),
-        s"Expected $sparkType to be supported as ParquetReader key")
-    }
-
-    assert(
-      RuntimePruningKeyTypes.SUPPORTED_PARQUET_READER_TYPES ==
-        supportedParquetReaderSparkToArrow.map(_._1),
-      "SUPPORTED_PARQUET_READER_TYPES must match expected sequence")
-
-    val unsupportedParquetReaderTypes: Seq[DataType] = Seq(
-      DateType,
-      TimestampType,
-      TimestampNTZType,
-      StringType,
-      DecimalType(10, 2),
-      FloatType,
-      DoubleType,
-      BooleanType)
-
-    for (unsupported <- unsupportedParquetReaderTypes) {
-      assert(
-        !RuntimePruningKeyTypes.isSupportedParquetReaderKey(unsupported),
-        s"Expected $unsupported to be rejected as ParquetReader key")
+  test("CHAR data types and CHAR metadata fail closed") {
+    val directChar = AttributeReference("char", CharType(8))()
+    assert(RuntimePruningKeyTypes.isCharType(directChar))
+    assert(!RuntimePruningKeyTypes.isBinaryStringType(directChar.dataType))
+    assert(!RuntimePruningKeyTypes.isFileStatsAttribute(directChar))
+    assert(!RuntimePruningKeyTypes.isSupportedTopKKey(directChar.dataType))
+    assert(!RuntimePruningKeyTypes.isSupportedMinMaxKey(directChar.dataType))
+    val metadataTypes = Seq("char(8)" -> true, "CHAR(8)" -> true, "varchar(8)" -> false)
+    for ((typeName, isChar) <- metadataTypes) {
+      val metadata = new MetadataBuilder()
+        .putString("__CHAR_VARCHAR_TYPE_STRING", typeName)
+        .build()
+      val attr = AttributeReference("text", StringType, metadata = metadata)()
+      assert(RuntimePruningKeyTypes.isCharType(attr) == isChar)
+      assert(RuntimePruningKeyTypes.isFileStatsAttribute(attr) == !isChar)
     }
   }
 
-  test("ColumnStats key types and Iceberg schema type string agreement") {
-    // Column stats selection includes driver-side file stats types
-    assert(
-      RuntimePruningKeyTypes.SUPPORTED_COLUMN_STATS_TYPES ==
-        RuntimePruningKeyTypes.SUPPORTED_FILE_STATS_TYPES,
-      "ColumnStats supported types must match driver file stats types")
+  test("batch binary-string MIN/MAX remains native while window MIN/MAX falls back") {
+    assert(AggSerde.minMaxSupportLevel(StringType) == Compatible())
+    assert(!AggSerde.minMaxDataTypeSupported(StringType))
+    assert(AggSerde.minMaxSupportLevel(CharType(8)).isInstanceOf[Unsupported])
+  }
 
-    for (sparkType <- RuntimePruningKeyTypes.SUPPORTED_COLUMN_STATS_TYPES) {
-      assert(
-        RuntimePruningKeyTypes.isSupportedColumnStatsKey(sparkType),
-        s"Expected $sparkType to be supported for column stats")
-      assert(
-        RuntimePruningKeyTypes.isFileStatsKey(sparkType),
-        s"Expected isFileStatsKey to return true for $sparkType")
-      assert(
-        RuntimePruningKeyTypes.isSupported(sparkType),
-        s"Expected isSupported alias to return true for $sparkType")
-    }
-
-    val unsupportedColumnStatsTypes: Seq[DataType] =
-      Seq(ByteType, ShortType, FloatType, DoubleType)
-
-    for (unsupported <- unsupportedColumnStatsTypes) {
-      assert(
-        !RuntimePruningKeyTypes.isSupportedColumnStatsKey(unsupported),
-        s"Expected $unsupported to be rejected for column stats")
-      assert(
-        !RuntimePruningKeyTypes.isFileStatsKey(unsupported),
-        s"Expected isFileStatsKey to reject $unsupported")
-    }
-
-    val supportedIcebergTypes =
-      Seq(
-        "int",
-        "long",
-        "date",
-        "timestamp",
-        "timestamptz",
-        "string",
-        "decimal(10,2)",
-        "decimal(38,18)")
-
-    for (icebergType <- supportedIcebergTypes) {
-      assert(
-        RuntimePruningKeyTypes.isSupportedIcebergType(icebergType),
-        s"Expected Iceberg type string '$icebergType' to be supported")
-      assert(
-        RuntimePruningKeyTypes.isFileStatsIcebergType(icebergType),
-        s"Expected isFileStatsIcebergType to return true for '$icebergType'")
-    }
-
-    val unsupportedIcebergTypes =
-      Seq(
-        "float",
-        "double",
-        "boolean",
-        "binary",
-        "fixed[16]",
-        "uuid",
-        "decimal(",
-        "decimal(0,0)",
-        "decimal(39,0)",
-        "decimal(10,11)",
-        "decimal(10,-1)",
-        "decimal(10,2)junk",
-        "decimal(999999999999999999,2)")
-
-    for (icebergType <- unsupportedIcebergTypes) {
-      assert(
-        !RuntimePruningKeyTypes.isSupportedIcebergType(icebergType),
-        s"Expected Iceberg type string '$icebergType' to be unsupported")
-      assert(
-        !RuntimePruningKeyTypes.isFileStatsIcebergType(icebergType),
-        s"Expected isFileStatsIcebergType to reject '$icebergType'")
+  test("binary string comparison policy excludes non-default collations") {
+    assert(RuntimePruningKeyTypes.isBinaryStringType(StringType))
+    assert(!RuntimePruningKeyTypes.isBinaryStringType(IntegerType))
+    // StringType.apply(String) exists only on Spark 4; reflection keeps this suite cross-version.
+    val factory = StringType.getClass.getMethods.find(method =>
+      method.getName == "apply" && method.getParameterTypes.toSeq == Seq(classOf[String]))
+    if (org.apache.spark.SPARK_VERSION.startsWith("4.")) assert(factory.nonEmpty)
+    factory.foreach { method =>
+      Seq("UTF8_LCASE", "UTF8_BINARY_RTRIM").foreach { name =>
+        val collated = method.invoke(StringType, name).asInstanceOf[DataType]
+        assert(!RuntimePruningKeyTypes.isBinaryStringType(collated))
+        assert(!RuntimePruningKeyTypes.isFileStatsKey(collated))
+        assert(!RuntimePruningKeyTypes.isSupportedTopKKey(collated))
+        assert(!RuntimePruningKeyTypes.isSupportedMinMaxKey(collated))
+        assert(AggSerde.minMaxSupportLevel(collated).isInstanceOf[Unsupported])
+      }
     }
   }
 
-  test("Iceberg decimal type strings match valid schema precision and scale") {
+  test("Iceberg schema policy accepts supported primitives and valid decimal domains") {
+    Seq("int", "long", "date", "timestamp", "timestamptz", "string").foreach { name =>
+      assert(RuntimePruningKeyTypes.isFileStatsIcebergType(name), name)
+    }
     for (precision <- 1 to 38; scale <- 0 to precision) {
       assert(RuntimePruningKeyTypes.isFileStatsIcebergType(s"decimal($precision,$scale)"))
       assert(RuntimePruningKeyTypes.isFileStatsIcebergType(s"decimal($precision, $scale)"))
+    }
+    val rejected = Seq(
+      "float", "double", "boolean", "binary", "fixed[16]", "uuid", "timestamp_ns",
+      "decimal(", "decimal(0,0)", "decimal(39,0)", "decimal(10,11)", "decimal(10,-1)",
+      "decimal(10,2)junk", "decimal(999999999999999999,2)")
+    rejected.foreach { name =>
+      assert(!RuntimePruningKeyTypes.isFileStatsIcebergType(name), name)
     }
   }
 }
