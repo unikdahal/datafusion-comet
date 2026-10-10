@@ -174,14 +174,15 @@ async fn iceberg_topk_preserves_errors_in_late_secondary_sort_keys() {
                 .with_schema(Arc::clone(&table_schema))
                 .with_project_field_ids(vec![1, 2])
                 .with_case_sensitive(false)
-                .with_file_metrics(Some(Arc::new(FileScanTaskMetrics::new(
-                    Some(1),
-                    HashMap::from([(1, 1)]),
-                    HashMap::from([(1, 0)]),
-                    HashMap::new(),
-                    HashMap::from([(1, Datum::int(key))]),
-                    HashMap::from([(1, Datum::int(key))]),
-                ))))
+                .with_file_metrics(Some(Arc::new(
+                    FileScanTaskMetrics::builder()
+                        .with_record_count(Some(1))
+                        .with_value_counts(HashMap::from([(1, 1)]))
+                        .with_null_value_counts(HashMap::from([(1, 0)]))
+                        .with_lower_bounds(HashMap::from([(1, Datum::int(key))]))
+                        .with_upper_bounds(HashMap::from([(1, Datum::int(key))]))
+                        .build(),
+                )))
                 .build()
                 .unwrap(),
         );

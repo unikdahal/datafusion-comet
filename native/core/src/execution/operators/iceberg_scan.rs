@@ -1541,14 +1541,14 @@ mod tests {
         );
         let task = |path: &str, start: u64, bounds: Option<(i32, i32, u64)>| {
             let metrics = bounds.map(|(lower, upper, nulls)| {
-                Arc::new(FileScanTaskMetrics::new(
-                    Some(10),
-                    HashMap::new(),
-                    HashMap::from([(1, nulls)]),
-                    HashMap::new(),
-                    HashMap::from([(1, Datum::int(lower))]),
-                    HashMap::from([(1, Datum::int(upper))]),
-                ))
+                Arc::new(
+                    FileScanTaskMetrics::builder()
+                        .with_record_count(Some(10))
+                        .with_null_value_counts(HashMap::from([(1, nulls)]))
+                        .with_lower_bounds(HashMap::from([(1, Datum::int(lower))]))
+                        .with_upper_bounds(HashMap::from([(1, Datum::int(upper))]))
+                        .build(),
+                )
             });
             FileScanTask::builder()
                 .with_file_size_in_bytes(1024)

@@ -4552,14 +4552,14 @@ fn parse_iceberg_file_metrics(
             })
             .collect()
     };
-    iceberg::scan::FileScanTaskMetrics::new(
-        metrics.record_count,
-        metrics.value_counts.clone(),
-        metrics.null_value_counts.clone(),
-        metrics.nan_value_counts.clone(),
-        bounds(&metrics.lower_bounds),
-        bounds(&metrics.upper_bounds),
-    )
+    iceberg::scan::FileScanTaskMetrics::builder()
+        .with_record_count(metrics.record_count)
+        .with_value_counts(metrics.value_counts.clone())
+        .with_null_value_counts(metrics.null_value_counts.clone())
+        .with_nan_value_counts(metrics.nan_value_counts.clone())
+        .with_lower_bounds(bounds(&metrics.lower_bounds))
+        .with_upper_bounds(bounds(&metrics.upper_bounds))
+        .build()
 }
 
 /// Converts protobuf FileScanTasks from Scala into iceberg-rust FileScanTask objects.

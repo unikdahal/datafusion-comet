@@ -1075,14 +1075,15 @@ async fn runtime_pruning_nulls_first_preserves_nulls_and_prunes_out_of_range() {
         .with_schema(Arc::clone(&table_schema))
         .with_project_field_ids(vec![1, 2])
         .with_case_sensitive(false)
-        .with_file_metrics(Some(Arc::new(FileScanTaskMetrics::new(
-            Some(2),
-            HashMap::from([(1, 2), (2, 2)]),
-            HashMap::from([(1, 1), (2, 0)]),
-            HashMap::new(),
-            HashMap::from([(1, Datum::int(50)), (2, Datum::int(1))]),
-            HashMap::from([(1, Datum::int(50)), (2, Datum::int(2))]),
-        ))))
+        .with_file_metrics(Some(Arc::new(
+            FileScanTaskMetrics::builder()
+                .with_record_count(Some(2))
+                .with_value_counts(HashMap::from([(1, 2), (2, 2)]))
+                .with_null_value_counts(HashMap::from([(1, 1), (2, 0)]))
+                .with_lower_bounds(HashMap::from([(1, Datum::int(50)), (2, Datum::int(1))]))
+                .with_upper_bounds(HashMap::from([(1, Datum::int(50)), (2, Datum::int(2))]))
+                .build(),
+        )))
         .build()
         .unwrap();
 
@@ -1110,14 +1111,15 @@ async fn runtime_pruning_nulls_first_preserves_nulls_and_prunes_out_of_range() {
         .with_schema(Arc::clone(&table_schema))
         .with_project_field_ids(vec![1, 2])
         .with_case_sensitive(false)
-        .with_file_metrics(Some(Arc::new(FileScanTaskMetrics::new(
-            Some(2),
-            HashMap::from([(1, 2), (2, 2)]),
-            HashMap::from([(1, 0), (2, 0)]),
-            HashMap::new(),
-            HashMap::from([(1, Datum::int(50)), (2, Datum::int(3))]),
-            HashMap::from([(1, Datum::int(60)), (2, Datum::int(4))]),
-        ))))
+        .with_file_metrics(Some(Arc::new(
+            FileScanTaskMetrics::builder()
+                .with_record_count(Some(2))
+                .with_value_counts(HashMap::from([(1, 2), (2, 2)]))
+                .with_null_value_counts(HashMap::from([(1, 0), (2, 0)]))
+                .with_lower_bounds(HashMap::from([(1, Datum::int(50)), (2, Datum::int(3))]))
+                .with_upper_bounds(HashMap::from([(1, Datum::int(60)), (2, Datum::int(4))]))
+                .build(),
+        )))
         .build()
         .unwrap();
 
