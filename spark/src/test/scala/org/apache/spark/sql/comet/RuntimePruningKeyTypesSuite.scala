@@ -238,7 +238,9 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
     }
 
     val unsupportedIcebergTypes =
-      Seq("float", "double", "boolean", "binary", "fixed[16]", "uuid")
+      Seq("float", "double", "boolean", "binary", "fixed[16]", "uuid",
+        "decimal(", "decimal(0,0)", "decimal(39,0)", "decimal(10,11)",
+        "decimal(10,-1)", "decimal(10,2)junk", "decimal(999999999999999999,2)")
 
     for (icebergType <- unsupportedIcebergTypes) {
       assert(
@@ -247,6 +249,13 @@ class RuntimePruningKeyTypesSuite extends AnyFunSuite {
       assert(
         !RuntimePruningKeyTypes.isFileStatsIcebergType(icebergType),
         s"Expected isFileStatsIcebergType to reject '$icebergType'")
+    }
+  }
+
+  test("Iceberg decimal type strings match valid schema precision and scale") {
+    for (precision <- 1 to 38; scale <- 0 to precision) {
+      assert(RuntimePruningKeyTypes.isFileStatsIcebergType(s"decimal($precision,$scale)"))
+      assert(RuntimePruningKeyTypes.isFileStatsIcebergType(s"decimal($precision, $scale)"))
     }
   }
 }

@@ -1213,10 +1213,50 @@ case class CometScanTypeChecker() extends DataTypeSupport with CometTypeShim {
 object CometScanRule extends Logging {
 
   /**
+   * Conservative driver collection gate, not the native attachment policy. These Catalyst
+   * shapes serialize to row-local infallible native expressions; unknown functions, casts and
+   * arithmetic keep statistics collection above their evaluation boundary. Extend only with
+   * a corresponding native proof and tests, rather than treating determinism as infallibility.
+   */
+  private[rules] def isSafeRuntimeStatsExpression(expression: Expression): Boolean = {
+    import org.apache.spark.sql.catalyst.expressions._
+    def comparable(dataType: DataType): Boolean = dataType match {
+      case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
+          DateType | TimestampType | TimestampNTZType | BinaryType | _: DecimalType => true
+      case st: StringType => !RuntimePruningKeyTypes.isStringCollationType(st)
+      case _ => false
+    }
+    val safe = expression match {
+      case _: Attribute | _: Literal | _: Alias | _: IsNull | _: IsNotNull => true
+      case _: And | _: Or | _: Not => expression.children.forall(_.dataType == BooleanType)
+      case comparison: BinaryComparison =>
+        comparable(comparison.left.dataType) &&
+          comparison.left.dataType == comparison.right.dataType
+      case in: In =>
+        comparable(in.value.dataType) && in.list.forall {
+          case literal: Literal => literal.dataType == in.value.dataType
+          case _ => false
+        }
+      // Spark serializes this to Comet's modulo kernel. A same-type integer constant
+      // other than 0/-1 satisfies the native safety policy in ANSI and non-ANSI modes.
+      case remainder: Remainder =>
+        remainder.right match {
+          case Literal(value: Int, IntegerType) =>
+            remainder.left.dataType == IntegerType && value != 0 && value != -1
+          case Literal(value: Long, LongType) =>
+            remainder.left.dataType == LongType && value != 0L && value != -1L
+          case _ => false
+        }
+      case _ => false
+    }
+    safe && expression.deterministic && expression.children.forall(isSafeRuntimeStatsExpression)
+  }
+
+  /**
    * Exact scan columns that can receive a runtime predicate from an eligible producer in the same
    * native stage. This intentionally mirrors the reader-attachment shapes instead of walking
    * every descendant below a producer: joins mark only their probe input, TopK requires a direct
-   * scan, and MIN/MAX / joins may cross deterministic filters.
+   * scan, and MIN/MAX / joins may cross known infallible filters.
    *
    * The native planner remains the final eligibility check. This pass only decides which Iceberg
    * manifest columns are worth retaining on the driver for whole-file pruning.
@@ -1224,7 +1264,7 @@ object CometScanRule extends Logging {
   def runtimeFilterColumns(
       plan: SparkPlan,
       conf: SQLConf): java.util.IdentityHashMap[SparkPlan, Set[String]] = {
-    import org.apache.spark.sql.catalyst.expressions.SortOrder
+    import org.apache.spark.sql.catalyst.expressions.{NullsFirst, SortOrder}
     import org.apache.spark.sql.catalyst.expressions.aggregate.{Max, Min, Partial}
     import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight}
     import org.apache.spark.sql.catalyst.plans.{Inner, LeftSemi}
@@ -1258,9 +1298,8 @@ object CometScanRule extends Logging {
       case _ => None
     }
 
-    // The native Iceberg reader attaches through deterministic filters (a row the runtime
-    // predicate rejects never reaches the producer), so their scan inputs need statistics too.
-    def passableFilter(expression: Expression): Boolean = expression.deterministic
+    // Deterministic expressions may still raise before the producer sees a row.
+    def passableFilter(expression: Expression): Boolean = isSafeRuntimeStatsExpression(expression)
 
     def record(scan: BatchScanExec, key: Attribute): Unit = {
       scan.output
@@ -1280,7 +1319,7 @@ object CometScanRule extends Logging {
         // Column pruning puts a projection between the filter and the producer. The native
         // reader follows the key through a column reference, so retain its statistics too.
         case project: ProjectExec
-            if allowFilters && project.projectList.forall(_.deterministic) &&
+            if allowFilters && project.projectList.forall(isSafeRuntimeStatsExpression) &&
               project.projectList.exists {
                 case attr: Attribute => attr.exprId == key.exprId
                 case _ => false
@@ -1294,6 +1333,9 @@ object CometScanRule extends Logging {
         case join: HashJoin
             if joins && (join.joinType == Inner || join.joinType == LeftSemi) &&
               join.leftKeys.size == 1 && join.rightKeys.size == 1 &&
+              join.leftKeys.head.dataType == join.rightKeys.head.dataType &&
+              directKeyAttribute(join.leftKeys.head).nonEmpty &&
+              directKeyAttribute(join.rightKeys.head).nonEmpty &&
               !hasCharPruningKey(join.left, join.leftKeys) &&
               !hasCharPruningKey(join.right, join.rightKeys) &&
               !RuntimePruningKeyTypes.isStringCollationType(join.leftKeys.head.dataType) &&
@@ -1311,6 +1353,9 @@ object CometScanRule extends Logging {
         case limit: TakeOrderedAndProjectExec
             if topK && limit.limit > 0 && limit.sortOrder.nonEmpty &&
               !SortOrder.orderingSatisfies(limit.child.outputOrdering, limit.sortOrder) &&
+              limit.sortOrder.tail.forall(order => isSafeRuntimeStatsExpression(order.child)) &&
+              !(limit.sortOrder.head.child.dataType.isInstanceOf[StringType] &&
+                limit.sortOrder.head.nullOrdering == NullsFirst) &&
               !hasCharPruningKey(limit.child, limit.sortOrder.map(_.child)) =>
           directTopKKeyAttribute(limit.sortOrder.head.child)
             .foreach(key => readerInput(limit.child, key, allowFilters = false))

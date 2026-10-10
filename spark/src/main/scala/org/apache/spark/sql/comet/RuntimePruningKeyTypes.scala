@@ -114,10 +114,16 @@ object RuntimePruningKeyTypes extends CometTypeShim {
   /** Alias for [[isParquetReaderKey]]. */
   def isSupportedParquetReaderKey(dataType: DataType): Boolean = isParquetReaderKey(dataType)
 
+  private val icebergDecimal = "decimal\\(([0-9]{1,2}),\\s*([0-9]{1,2})\\)".r
+
   /** Whether the given Iceberg primitive type string is eligible for runtime file statistics. */
-  def isFileStatsIcebergType(typeStr: String): Boolean =
-    SUPPORTED_ICEBERG_FILE_STATS_TYPES.contains(typeStr) ||
-      typeStr.startsWith("decimal(")
+  def isFileStatsIcebergType(typeStr: String): Boolean = typeStr match {
+    case icebergDecimal(precision, scale) =>
+      val p = precision.toInt
+      val s = scale.toInt
+      p >= 1 && p <= 38 && s <= p
+    case _ => SUPPORTED_ICEBERG_FILE_STATS_TYPES.contains(typeStr)
+  }
 
   /** Alias for [[isFileStatsIcebergType]]. */
   def isSupportedIcebergType(typeStr: String): Boolean = isFileStatsIcebergType(typeStr)
