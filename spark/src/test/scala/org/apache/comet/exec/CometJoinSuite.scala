@@ -435,6 +435,100 @@ class CometJoinSuite extends CometTestBase {
     }
   }
 
+  test("join dynamic filter prunes matching decimal batches and rejects decimal casts") {
+    withSQLConf(
+      CometConf.COMET_BATCH_SIZE.key -> "16",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.LEAF_NODE_DEFAULT_PARALLELISM.key -> "1") {
+      withTable("decimal_probe", "decimal_build", "decimal_narrow_build") {
+        sql("CREATE TABLE decimal_probe (key DECIMAL(18,2), payload BIGINT) USING PARQUET")
+        sql("CREATE TABLE decimal_build (key DECIMAL(18,2), payload BIGINT) USING PARQUET")
+        sql("CREATE TABLE decimal_narrow_build (key DECIMAL(10,2), payload BIGINT) USING PARQUET")
+        sql(
+          "INSERT INTO decimal_probe SELECT CAST(id / 100.0 AS DECIMAL(18,2)), id " +
+            "FROM range(-500, 500)")
+        sql("INSERT INTO decimal_probe VALUES (NULL, 1000)")
+        for (table <- Seq("decimal_build", "decimal_narrow_build")) {
+          sql(
+            s"INSERT INTO $table VALUES (-1.25, 1), (0.00, 2), (1.25, 3), (1.25, 4), " +
+              "(NULL, 5)")
+        }
+        for (enabled <- Seq(false, true)) {
+          withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+            for ((buildKey, table, eligible) <- Seq(
+                ("b.key", "decimal_build", true),
+                ("b.key_alias", "(SELECT key AS key_alias, payload FROM decimal_build)", true),
+                ("b.key", "decimal_narrow_build", false),
+                // The exchange materializes this lossless build upcast before pruning.
+                (
+                  "b.key",
+                  "(SELECT CAST(key AS DECIMAL(18,2)) AS key, payload " +
+                    "FROM decimal_narrow_build)",
+                  true),
+                ("CAST(b.key AS DECIMAL(18,3))", "decimal_build", false))) {
+              val query = "SELECT /*+ BROADCAST(b) */ p.payload, b.payload " +
+                s"FROM decimal_probe p JOIN $table b ON p.key = $buildKey"
+              val (_, plan) = checkSparkAnswerAndOperator(sql(query))
+              val joins = nativeHashJoins(plan)
+              assert(joins.size == 1, s"Expected one native decimal join:\n$plan")
+              val join = joins.head
+              assert(join.metrics("output_rows").value == 4L)
+              val pruned = join.metrics.get("dynamic_filter_join_rows_pruned").map(_.value)
+              if (enabled && eligible) {
+                assert(pruned.exists(_ > 0L), s"Decimal batch pruning missing: $plan")
+              } else {
+                assert(pruned.forall(_ == 0L), s"Unexpected decimal pruning: $plan")
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("decimal probe rescaling stays above the reader or is materialized by a shuffle") {
+    withSQLConf(
+      CometConf.COMET_BATCH_SIZE.key -> "16",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+      SQLConf.LEAF_NODE_DEFAULT_PARALLELISM.key -> "1") {
+      withTable("decimal_rescale_probe", "decimal_rescale_build") {
+        sql("CREATE TABLE decimal_rescale_probe (key DECIMAL(18,2), payload INT) USING PARQUET")
+        sql("CREATE TABLE decimal_rescale_build (key DECIMAL(18,1), payload INT) USING PARQUET")
+        sql(
+          "INSERT INTO decimal_rescale_probe VALUES " +
+            "(-1.24, 1), (-1.25, 2), (0.04, 3), (0.05, 4), (1.24, 5), (1.25, 6), (NULL, 7)")
+        sql(
+          "INSERT INTO decimal_rescale_build VALUES (-1.2, 1), (0.0, 2), (1.2, 3), " +
+            "(1.2, 4), (NULL, 5)")
+        for (strategy <- Seq("BROADCAST", "SHUFFLE_HASH"); enabled <- Seq(false, true)) {
+          withSQLConf(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> enabled.toString) {
+            val query = s"SELECT /*+ $strategy(b) */ p.payload, b.payload " +
+              "FROM (SELECT CAST(key AS DECIMAL(18,1)) AS key, payload " +
+              "FROM decimal_rescale_probe) p JOIN decimal_rescale_build b ON p.key = b.key"
+            val (_, plan) = checkSparkAnswerAndOperator(sql(query))
+            val joins = nativeHashJoins(plan)
+            assert(joins.size == 1, s"Expected one native decimal join:\n$plan")
+            val join = joins.head
+            assert(join.metrics("output_rows").value == 4L)
+            // Broadcast keeps the probe cast visible: native eligibility rejects it.
+            // Shuffle materializes it: batch pruning uses the cast output domain, and
+            // the shuffle scan is a boundary that prevents pruning the original reader.
+            val pruned = join.metrics.get("dynamic_filter_join_rows_pruned").map(_.value)
+            if (enabled && strategy == "SHUFFLE_HASH") {
+              assert(pruned.exists(_ > 0L), s"Materialized decimal batch pruning missing: $plan")
+              assert(join.metrics("dynamic_filter_join_filters_attached").value == 0L)
+            } else {
+              assert(pruned.forall(_ == 0L), s"Unexpected decimal pruning: $plan")
+            }
+          }
+        }
+      }
+    }
+  }
+
   test("join dynamic filter prunes a projected Parquet reader through null-check conjunctions") {
     withTempPath { probePath =>
       withSQLConf(
@@ -523,6 +617,42 @@ class CometJoinSuite extends CometTestBase {
             }
           }
         }
+      }
+    }
+  }
+
+  test("join dynamic filter excludes CHAR padding domains") {
+    withTempDir { dir =>
+      val factPath = new java.io.File(dir, "char_fact").getAbsolutePath
+      val dimPath = new java.io.File(dir, "char_dim").getAbsolutePath
+      withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+        spark.sql(
+          s"CREATE TABLE runtime_char_fact (id CHAR(4)) USING parquet LOCATION '$factPath'")
+        spark.sql(s"CREATE TABLE runtime_char_dim (id CHAR(6)) USING parquet LOCATION '$dimPath'")
+        spark.sql("INSERT INTO runtime_char_fact VALUES ('a'), ('ab'), (NULL)")
+        spark.sql("INSERT INTO runtime_char_dim VALUES ('a'), ('ab'), ('z'), (NULL)")
+      }
+      try {
+        withSQLConf(
+          SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+          CometConf.COMET_ENABLED.key -> "true",
+          CometConf.COMET_EXEC_ENABLED.key -> "true",
+          CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true") {
+          val (_, plan) = checkSparkAnswer(
+            "SELECT /*+ BROADCAST(d) */ f.id FROM runtime_char_fact f " +
+              "JOIN runtime_char_dim d ON f.id = d.id")
+          val joins = collect(plan) { case join: CometBroadcastHashJoinExec => join }
+          assert(joins.size == 1, s"Expected native CHAR comparison after padding: $plan")
+          joins.foreach { join =>
+            assert(!join.nativeOp.getHashJoin.getDynamicFilterEnabled)
+            assert(join.metrics("output_rows").value == 2L)
+            assert(join.metrics.get("dynamic_filter_join_filters_attached").forall(_.value == 0L))
+            assert(join.metrics.get("dynamic_filter_join_rows_pruned").forall(_.value == 0L))
+          }
+        }
+      } finally {
+        spark.sql("DROP TABLE IF EXISTS runtime_char_fact")
+        spark.sql("DROP TABLE IF EXISTS runtime_char_dim")
       }
     }
   }
@@ -691,6 +821,29 @@ class CometJoinSuite extends CometTestBase {
     }
   }
 
+  test("join dynamic filter prunes the probe side of a semi join") {
+    withSQLConf(
+      CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true",
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+      SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",
+      SQLConf.SHUFFLE_PARTITIONS.key -> "2") {
+      val probe = (0 until 100).map(i => (Option(i), i.toLong)) :+ ((None: Option[Int], 100L))
+      withParquetTable(probe, "semi_probe") {
+        withParquetTable(Seq((Some(10), 4L), (Some(60), 5L), (None, 6L)), "semi_build") {
+          // An unmatched probe row never reaches a semi join's output, so pruning it early
+          // cannot change the answer.
+          val query = "SELECT /*+ SHUFFLE_HASH(b) */ p.* FROM semi_probe p " +
+            "LEFT SEMI JOIN semi_build b ON p._1 = b._1"
+          val (_, plan) = checkSparkAnswerAndOperator(sql(query))
+          val native = nativeHashJoins(plan)
+          assert(native.size == 1, s"Expected native hash join:\n$plan")
+          assert(native.head.metrics("dynamic_filter_join_rows_evaluated").value > 0L)
+          assert(native.head.metrics("dynamic_filter_join_rows_pruned").value > 0L)
+        }
+      }
+    }
+  }
+
   test("join dynamic filter leaves unsupported joins on their existing native path") {
     withSQLConf(
       CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true",
@@ -705,7 +858,6 @@ class CometJoinSuite extends CometTestBase {
             "LEFT JOIN dynamic_build b ON p._1 = b._1" -> "b",
             "RIGHT JOIN dynamic_build b ON p._1 = b._1" -> "p",
             "FULL JOIN dynamic_build b ON p._1 = b._1" -> "b",
-            "LEFT SEMI JOIN dynamic_build b ON p._1 = b._1" -> "b",
             "LEFT ANTI JOIN dynamic_build b ON p._1 = b._1" -> "b",
             "JOIN dynamic_build b ON p._1 <=> b._1" -> "b",
             "JOIN dynamic_build b ON p._1 + 1 = b._1" -> "b",
@@ -1494,13 +1646,14 @@ class CometJoinSuite extends CometTestBase {
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
       SQLConf.SHUFFLE_PARTITIONS.key -> numPartitions.toString) {
       withParquetTable((0 until 10000).map(i => (i, i % 5)), "tbl_a") {
-        withParquetTable((0 until 10000).map(i => (i % 10, i + 2)), "tbl_b") {
+        // Unique keys keep the answer at 10K rows instead of materializing 10M matches.
+        withParquetTable((0 until 10000).map(i => (i, i + 2)), "tbl_b") {
           // Force a shuffle on tbl_a before broadcast so the broadcast source has
           // numPartitions partitions, not just the number of parquet files.
           val query =
             s"""SELECT /*+ BROADCAST(a) */ *
                |FROM (SELECT /*+ REPARTITION($numPartitions) */ * FROM tbl_a) a
-               |JOIN tbl_b ON a._2 = tbl_b._1""".stripMargin
+               |JOIN tbl_b ON a._1 = tbl_b._1""".stripMargin
 
           val (_, cometPlan) = checkSparkAnswerAndOperator(
             sql(query),

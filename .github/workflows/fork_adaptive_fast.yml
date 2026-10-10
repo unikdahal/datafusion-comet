@@ -1,0 +1,229 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Note: This fast validation lane is for workstream iteration (adaptive-ci/ws-*).
+# Full validation (.github/workflows/iceberg_adaptive_pruning.yml) still gates the integration branch (adaptive-ci/runtime-pruning-rewrite-20261006).
+
+name: Fork Adaptive Fast Validation
+
+on:
+  push:
+    branches: ['adaptive-ci/ws-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-adaptive-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: "-Clink-arg=-fuse-ld=bfd"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  rust:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure Git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Prepare Builder
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: '17'
+
+      - name: Restore Cargo registry
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fork-runtime-registry-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: Linux-cargo-ci-
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "native -> target"
+          prefix-key: "fast-rust"
+
+      - name: Cache Maven dependencies
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.m2/repository
+            /root/.m2/repository
+          key: ${{ runner.os }}-fast-rust-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-fast-rust-maven-
+            runtime-maven-${{ hashFiles('**/pom.xml') }}
+            runtime-maven-
+            Linux-java-maven-
+            ${{ runner.os }}-java-maven-
+
+      - name: Check Rust format
+        run: cd native && cargo fmt --all --check
+
+      - name: Check Cargo clippy
+        run: cd native && cargo clippy --color=never --all-targets --workspace -- -D warnings
+
+      - name: Build common module (pre-requisite for Rust tests)
+        run: |
+          cd common
+          ../mvnw -B clean compile -DskipTests
+
+      - name: Install nextest
+        run: which cargo-nextest || cargo install cargo-nextest --locked
+
+      - name: Build test UDF library (pre-requisite for native UDF tests)
+        run: cd native && cargo build -p comet-test-udfs
+
+      - name: Run Cargo test
+        run: |
+          cd native
+          export LD_LIBRARY_PATH=${JAVA_HOME}/lib/server:${LD_LIBRARY_PATH}
+          RUST_BACKTRACE=1 cargo nextest run
+
+      - name: Check and test the jemalloc allocator backend
+        run: |
+          cd native
+          export LD_LIBRARY_PATH=${JAVA_HOME}/lib/server:${LD_LIBRARY_PATH}
+          cargo clippy --color=never -p datafusion-comet --all-targets --features jemalloc -- -D warnings
+          RUST_BACKTRACE=1 cargo nextest run -p datafusion-comet --lib --features jemalloc alloc_accounting
+
+  jvm-targeted:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    strategy:
+      fail-fast: false
+      matrix:
+        spark: ['3.5', '4.1']
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: amd64/rust
+    env:
+      SPARK_PROFILE: ${{ matrix.spark }}
+      SPARK_LOCAL_HOSTNAME: localhost
+      SPARK_LOCAL_IP: 127.0.0.1
+      MAVEN_OPTS: -Djava.net.preferIPv4Stack=true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure Git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Prepare Builder
+        uses: ./.github/actions/setup-builder
+        with:
+          rust-version: stable
+          jdk-version: '17'
+
+      - name: Restore Cargo registry
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fork-runtime-registry-${{ hashFiles('native/Cargo.lock') }}
+          restore-keys: Linux-cargo-ci-
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "native -> target"
+          prefix-key: "fast-jvm"
+
+      - name: Cache Maven dependencies
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.m2/repository
+            /root/.m2/repository
+          key: ${{ runner.os }}-fast-jvm-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-fast-jvm-maven-
+            runtime-maven-${{ hashFiles('**/pom.xml') }}
+            runtime-maven-
+            Linux-java-maven-
+            ${{ runner.os }}-java-maven-
+
+      # Keep formatting reviewable without requiring a local formatter or waiting
+      # for the release library build. Formatting failure still fails this lane.
+      - name: Record Scala formatting differences
+        run: |
+          ./mvnw -B spotless:apply -Pspark-$SPARK_PROFILE
+          git diff -- spark common > scala-format.patch
+          git checkout -- spark common
+
+      - name: Upload Scala formatting patch
+        uses: actions/upload-artifact@v7
+        with:
+          name: fast-scala-format-${{ matrix.spark }}
+          path: scala-format.patch
+
+      - name: Require formatted Scala sources
+        run: test ! -s scala-format.patch
+
+      - name: Build release library
+        run: cd native && cargo build --release --locked
+
+      # Without a warm Maven cache the parent POM download can fail transiently;
+      # retry the resolution only, never the test run.
+      - name: Resolve Maven parent POM and plugins
+        run: |
+          for attempt in 1 2 3 4; do
+            if ./mvnw -B -Prelease -Pspark-$SPARK_PROFILE validate; then
+              break
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "::error::Maven dependency resolution failed after $attempt attempts."
+              exit 1
+            fi
+            sleep $((10 * attempt))
+          done
+
+      - name: Run targeted Spark Scala suites
+        run: |
+          export SPARK_HOME="$GITHUB_WORKSPACE"
+          ./mvnw -B -Prelease -Pspark-$SPARK_PROFILE test -Dtest=none \
+            '-Dsuites=org.apache.comet.CometFuzzIcebergSuite,org.apache.comet.CometIcebergNativeSuite,org.apache.comet.CometIcebergResidualPushdownSuite,org.apache.comet.CometIcebergRewriteActionSuite,org.apache.comet.CometIcebergSystemFunctionExtensionsSuite,org.apache.comet.CometIcebergSystemFunctionSuite,org.apache.comet.CometIcebergWriteActionSuite,org.apache.comet.CometIcebergWriteDetectionSuite,org.apache.comet.exec.CometJoinSuite,org.apache.comet.exec.CometTopKSuite,org.apache.comet.iceberg.IcebergReflectionSuite,org.apache.comet.serde.operator.CometIcebergNativeScanSuite,org.apache.comet.serde.operator.IcebergWriteProtoTranslationSuite,org.apache.spark.sql.comet.PlanDataInjectorSuite,org.apache.spark.sql.comet.util.UtilsSuite'
+
+      # Spotless truncates its error diff. Print the complete CI-generated diff so fixes can
+      # be applied manually without running a formatter locally. The validation still fails.
+      - name: Show complete formatting diff on failure
+        if: failure()
+        run: |
+          ./mvnw -B -Prelease -Pspark-3.5 spotless:apply
+          git diff -- spark/src
+
+      - name: Upload test reports
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fast-jvm-targeted-test-reports-${{ matrix.spark }}
+          path: |
+            **/target/surefire-reports/*
+            **/target/unit-tests.log

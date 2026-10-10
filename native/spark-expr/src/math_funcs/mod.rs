@@ -44,7 +44,7 @@ pub use floor::spark_floor;
 pub use greatest_least::SparkGreatestLeast;
 pub use internal::*;
 pub use log::spark_log;
-pub use modulo_expr::{create_modulo_expr, spark_modulo};
+pub use modulo_expr::{create_modulo_expr, is_spark_modulo_function, spark_modulo};
 pub use negative::{create_negate_expr, NegativeExpr};
 pub use pow::spark_pow;
 pub use round::spark_round;

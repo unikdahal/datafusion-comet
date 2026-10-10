@@ -37,6 +37,35 @@ import org.apache.comet.testing.{DataGenOptions, FuzzDataGenerator}
  */
 class CometScanRuleSuite extends CometTestBase {
 
+  test("runtime statistics collection crosses only known infallible Catalyst expressions") {
+    import org.apache.spark.sql.catalyst.expressions._
+    val key = AttributeReference("key", IntegerType)()
+    val text = AttributeReference("text", StringType)()
+    val safe = Seq(
+      EqualTo(key, Literal(1)),
+      And(IsNotNull(key), GreaterThan(key, Literal(0))),
+      In(key, Seq(Literal(1), Literal(2))),
+      Alias(key, "renamed")())
+    safe.foreach(expression => assert(CometScanRule.isSafeRuntimeStatsExpression(expression)))
+    for (ansi <- Seq("true", "false")) {
+      withSQLConf(SQLConf.ANSI_ENABLED.key -> ansi) {
+        // Safe non-ANSI modulo still receives statistics; zero and variable divisors remain
+        // conservative collection boundaries even though native eligibility may admit more.
+        assert(CometScanRule.isSafeRuntimeStatsExpression(Remainder(key, Literal(3))))
+        val rejected = Seq(
+          EqualTo(Cast(text, IntegerType), Literal(1)),
+          EqualTo(Divide(key, Literal(0)), Literal(1.0)),
+          EqualTo(Remainder(key, Literal(0)), Literal(1)),
+          EqualTo(Remainder(key, key), Literal(1)),
+          EqualTo(Abs(key), Literal(1)),
+          LessThan(Rand(Literal(42L)), Literal(0.5)))
+        rejected.foreach { expression =>
+          assert(!CometScanRule.isSafeRuntimeStatsExpression(expression), expression.toString)
+        }
+      }
+    }
+  }
+
   /** Helper method to apply CometExecRule and return the transformed plan */
   private def applyCometScanRule(plan: SparkPlan): SparkPlan = {
     CometScanRule(spark).apply(stripAQEPlan(plan))

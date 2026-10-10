@@ -419,7 +419,7 @@ mod tests {
             (
                 Transform::Day,
                 day([-366, -1, -2, -2]),
-                day([-365, -1, -1, -1]),
+                day([-365, -1, -2, -2]),
             ),
             (
                 Transform::Hour,
@@ -438,8 +438,8 @@ mod tests {
             for (i, (transform, java, rust)) in cases.iter().enumerate() {
                 let label = format!("{transform} of {}", source.data_type());
                 assert_eq!(&comet[i], java, "{label}");
-                // The reason Comet computes these: iceberg-rust floors the first two rows, and its
-                // `day` moves the last two into 1969-12-31 (apache/iceberg-rust#3315). If this
+                // The reason Comet computes these: iceberg-rust still parts from iceberg-java on
+                // the first rows, and for the second row of the year, month and hour. If this
                 // starts failing, iceberg-rust's transforms have changed and delegating needs
                 // another look.
                 assert_eq!(&iceberg_rust[i], rust, "iceberg-rust's {label}");

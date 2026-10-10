@@ -17,6 +17,7 @@
 
 //! Native Iceberg table scan operator using iceberg-rust
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
@@ -24,11 +25,11 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::{ArrayRef, RecordBatch, RecordBatchOptions};
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::expressions::{CastExpr, Column};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{
@@ -38,10 +39,8 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use futures::{Stream, StreamExt, TryStreamExt};
-use iceberg::arrow::ScanMetrics;
-use iceberg::io::FileIO;
+use iceberg::arrow::{RuntimePredicateProvider, ScanMetrics};
 use iceberg::Runtime as IcebergRuntime;
-use iceberg::{Error, ErrorKind};
 
 use crate::cloud::s3::credential_bridge::AccessMode;
 use crate::execution::jni_api::get_runtime;
@@ -51,16 +50,7 @@ use crate::parquet::parquet_support::SparkParquetOptions;
 use crate::parquet::schema_adapter::SparkPhysicalExprAdapterFactory;
 use datafusion_comet_spark_expr::EvalMode;
 use datafusion_physical_expr_adapter::{PhysicalExprAdapter, PhysicalExprAdapterFactory};
-use iceberg::scan::{FileScanTask, FileScanTaskDeleteFile};
-use iceberg::spec::DataFileFormat;
-
-/// A valid Parquet file ends with at least an 8-byte footer (4-byte metadata length + "PAR1").
-/// A delete file that stats below this cannot be read, so we reject it in the fill step. opendal
-/// returns size 0 from a successful HEAD whose response carries no Content-Length header (some
-/// S3-compatible endpoints/proxies, or a path-style mismatch), and for a genuinely empty object;
-/// neither errors at the stat layer, so without this floor the 0 would flow into the Parquet
-/// reader and surface as an opaque "file size of 0 is less than footer".
-const MIN_PARQUET_FILE_SIZE: u64 = 8;
+use iceberg::scan::FileScanTask;
 
 /// Iceberg table scan operator that uses iceberg-rust to read Iceberg tables.
 ///
@@ -79,10 +69,16 @@ pub struct IcebergScanExec {
     /// Spark V2 catalog name; forwarded as dispatchKey to the credential bridge. Empty when the
     /// table has no catalog identity.
     catalog_name: String,
-    /// Pre-planned file scan tasks
-    tasks: Vec<FileScanTask>,
+    /// Pre-planned file scan tasks, shared by every copy of this scan (one per runtime
+    /// predicate attachment).
+    tasks: Arc<[FileScanTask]>,
     /// Number of data files to read concurrently
     data_file_concurrency_limit: usize,
+    /// Execution-time predicate source attached to this scan.
+    runtime_predicate_provider: Option<Arc<dyn RuntimePredicateProvider>>,
+    /// Field id and direction to order file tasks by, so the producer's bound tightens on the
+    /// best files first and statistics reject the rest before they are opened.
+    runtime_task_order: Option<(i32, RuntimeScanOrder)>,
     /// Metrics
     metrics: ExecutionPlanMetricsSet,
 }
@@ -96,6 +92,11 @@ impl IcebergScanExec {
         tasks: Vec<FileScanTask>,
         data_file_concurrency_limit: usize,
     ) -> Result<Self, ExecutionError> {
+        if data_file_concurrency_limit == 0 {
+            return Err(ExecutionError::GeneralError(
+                "Iceberg data-file concurrency must be greater than zero".into(),
+            ));
+        }
         let output_schema = schema;
         let plan_properties = Self::compute_properties(Arc::clone(&output_schema), 1);
 
@@ -107,10 +108,117 @@ impl IcebergScanExec {
             plan_properties,
             catalog_properties,
             catalog_name,
-            tasks,
+            tasks: tasks.into(),
             data_file_concurrency_limit,
+            runtime_predicate_provider: None,
+            runtime_task_order: None,
             metrics,
         })
+    }
+
+    /// The Iceberg field id and name behind output column `output_index`, when every task maps
+    /// it to the same supported top-level field with a matching type.
+    pub(crate) fn runtime_predicate_field(&self, output_index: usize) -> Option<(i32, String)> {
+        use arrow::datatypes::{DataType, TimeUnit};
+        use iceberg::spec::{PrimitiveType, Type};
+
+        let output = self.output_schema.fields().get(output_index)?;
+        let mut field_id = None;
+        let mut field_name: Option<String> = None;
+
+        for task in self.tasks.iter() {
+            let current_id = *task.project_field_ids().get(output_index)?;
+            if field_id.is_some_and(|expected| expected != current_id) {
+                return None;
+            }
+            // Only top-level fields have a direct output-column mapping.
+            // Looking up a nested leaf by id and then binding its short name could prune
+            // an unrelated top-level field with that name.
+            let field = task
+                .schema()
+                .as_struct()
+                .fields()
+                .iter()
+                .find(|f| f.id == current_id)?;
+            // Runtime references are bound by name using the task's case policy.
+            // In particular, case-insensitive binding can resolve `key` and `KEY`
+            // to the same id. Never let it change the projected field's identity.
+            let bound_field = if task.case_sensitive() {
+                task.schema().field_by_name(&field.name)
+            } else {
+                task.schema().field_by_name_case_insensitive(&field.name)
+            }?;
+            if bound_field.id != current_id {
+                return None;
+            }
+            let decimal_matches = match (output.data_type(), field.field_type.as_ref()) {
+                (
+                    DataType::Decimal128(precision, scale),
+                    Type::Primitive(PrimitiveType::Decimal {
+                        precision: field_precision,
+                        scale: field_scale,
+                    }),
+                ) => {
+                    u32::from(*precision) == *field_precision
+                        && u32::try_from(*scale).ok() == Some(*field_scale)
+                }
+                _ => false,
+            };
+            let string_matches = is_arrow_string_type(output.data_type())
+                && matches!(
+                    field.field_type.as_ref(),
+                    Type::Primitive(PrimitiveType::String)
+                );
+            if !decimal_matches
+                && !string_matches
+                && !matches!(
+                    (output.data_type(), field.field_type.as_ref()),
+                    (DataType::Int32, Type::Primitive(PrimitiveType::Int))
+                        | (DataType::Int64, Type::Primitive(PrimitiveType::Long))
+                        | (DataType::Date32, Type::Primitive(PrimitiveType::Date))
+                        | (
+                            DataType::Timestamp(TimeUnit::Microsecond, Some(_)),
+                            Type::Primitive(PrimitiveType::Timestamptz)
+                        )
+                        | (
+                            DataType::Timestamp(TimeUnit::Microsecond, None),
+                            Type::Primitive(PrimitiveType::Timestamp)
+                        )
+                )
+            {
+                return None;
+            }
+            let current_name = field.name.clone();
+            if field_name
+                .as_ref()
+                .is_some_and(|expected| expected != &current_name)
+            {
+                return None;
+            }
+            field_id = Some(current_id);
+            field_name = Some(current_name);
+        }
+
+        field_id.zip(field_name)
+    }
+
+    pub(crate) fn with_runtime_predicate_provider(
+        &self,
+        runtime_predicate_provider: Arc<dyn RuntimePredicateProvider>,
+        task_order: Option<(i32, RuntimeScanOrder)>,
+    ) -> Self {
+        Self {
+            metadata_location: self.metadata_location.clone(),
+            output_schema: Arc::clone(&self.output_schema),
+            plan_properties: Arc::clone(&self.plan_properties),
+            catalog_properties: self.catalog_properties.clone(),
+            catalog_name: self.catalog_name.clone(),
+            tasks: Arc::clone(&self.tasks),
+            data_file_concurrency_limit: self.data_file_concurrency_limit,
+            runtime_predicate_provider: Some(runtime_predicate_provider),
+            runtime_task_order: task_order,
+            metrics: self.metrics.clone(),
+        }
     }
 
     fn compute_properties(schema: SchemaRef, num_partitions: usize) -> Arc<PlanProperties> {
@@ -151,17 +259,42 @@ impl ExecutionPlan for IcebergScanExec {
 
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        if !children.is_empty() {
+            return datafusion::common::internal_err!("IcebergScanExec does not accept children");
+        }
         Ok(self)
+    }
+
+    fn reset_state(self: Arc<Self>) -> DFResult<Arc<dyn ExecutionPlan>> {
+        // A reset producer publishes into a new predicate. Its old consumer
+        // must fail open until the execution wrapper attaches that new producer.
+        Ok(Arc::new(Self {
+            metadata_location: self.metadata_location.clone(),
+            output_schema: Arc::clone(&self.output_schema),
+            plan_properties: Arc::clone(&self.plan_properties),
+            catalog_properties: self.catalog_properties.clone(),
+            catalog_name: self.catalog_name.clone(),
+            tasks: Arc::clone(&self.tasks),
+            data_file_concurrency_limit: self.data_file_concurrency_limit,
+            runtime_predicate_provider: None,
+            runtime_task_order: None,
+            metrics: ExecutionPlanMetricsSet::new(),
+        }))
     }
 
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        self.execute_with_tasks(self.tasks.clone(), context)
+        if partition != 0 {
+            return datafusion::common::exec_err!(
+                "IcebergScanExec partition {partition} is out of bounds for one partition"
+            );
+        }
+        self.execute_with_tasks(Arc::clone(&self.tasks), context)
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -174,7 +307,7 @@ impl IcebergScanExec {
     /// deletes via iceberg-rust's ArrowReader.
     fn execute_with_tasks(
         &self,
-        tasks: Vec<FileScanTask>,
+        tasks: Arc<[FileScanTask]>,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let output_schema = Arc::clone(&self.output_schema);
@@ -185,23 +318,27 @@ impl IcebergScanExec {
             AccessMode::Read,
         )?;
         let batch_size = context.session_config().batch_size();
+        if batch_size == 0 {
+            return datafusion::common::exec_err!(
+                "Iceberg scan batch size must be greater than zero"
+            );
+        }
 
         let metrics = IcebergScanMetrics::new(&self.metrics);
         metrics.num_splits.add(tasks.len());
 
-        // Fill delete-file sizes as the first step of the task stream so the stats run on the
-        // iceberg runtime alongside the reads, not on the calling executor thread (see
-        // fill_delete_file_sizes).
-        let fill_io = file_io.clone();
-        let concurrency_limit = self.data_file_concurrency_limit;
-        let task_stream = futures::stream::once(async move {
-            let mut tasks = tasks;
-            Self::fill_delete_file_sizes(&mut tasks, &fill_io, concurrency_limit).await?;
-            Ok::<_, Error>(futures::stream::iter(tasks.into_iter().map(Ok::<_, Error>)))
-        })
-        .try_flatten()
-        .boxed();
+        let tasks = match self.runtime_task_order {
+            Some((field_id, order)) => {
+                let mut ordered = tasks.to_vec();
+                order_tasks_for_runtime_bound(&mut ordered, field_id, order);
+                ordered.into()
+            }
+            None => tasks,
+        };
 
+        // Delete-file sizes are not serialized and arrive as 0 (unknown).
+        // iceberg-rust sizes each Parquet delete file once per reader, when a
+        // task that is actually read first loads it.
         // iceberg-rust's ArrowReader spawns IO/CPU work onto an iceberg::Runtime, which only needs
         // a tokio handle. execute() runs on the JVM-called thread outside any tokio context, so we
         // enter Comet's global runtime to capture its handle (this is where the stream is later
@@ -214,17 +351,23 @@ impl IcebergScanExec {
                 DataFusionError::Execution(format!("Failed to build Iceberg runtime: {e}"))
             })?
         };
-        let reader = iceberg::arrow::ArrowReaderBuilder::new(file_io, iceberg_runtime)
+        let mut reader_builder = iceberg::arrow::ArrowReaderBuilder::new(file_io, iceberg_runtime)
             .with_batch_size(batch_size)
             .with_data_file_concurrency_limit(self.data_file_concurrency_limit)
             .with_row_selection_enabled(true)
-            .with_metadata_size_hint(512 * 1024) // Same as DataFusion's default
-            .build();
+            .with_metadata_size_hint(512 * 1024); // Same as DataFusion's default
+        if let Some(provider) = &self.runtime_predicate_provider {
+            reader_builder = reader_builder.with_runtime_predicate_provider(Arc::clone(provider));
+        }
 
-        // Pass all tasks to iceberg-rust at once to utilize its flatten_unordered
-        // parallelization, avoiding overhead of single-task streams
-        let scan_result = reader.read(task_stream).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to read Iceberg tasks: {}", e))
+        // Share the immutable task list until the reader requests each task.
+        // This avoids eagerly cloning every task and its delete-file references.
+        let task_stream = futures::stream::iter(
+            (0..tasks.len()).map(move |index| Ok::<_, iceberg::Error>(tasks[index].clone())),
+        )
+        .boxed();
+        let scan_result = reader_builder.build().read(task_stream).map_err(|error| {
+            DataFusionError::Execution(format!("Failed to read Iceberg tasks: {error}"))
         })?;
 
         let scan_metrics = scan_result.metrics().clone();
@@ -237,7 +380,7 @@ impl IcebergScanExec {
             stream.map_err(|e| DataFusionError::Execution(format!("Iceberg scan error: {}", e)));
 
         let wrapped_stream = IcebergStreamWrapper {
-            inner: adapted_stream,
+            inner: Some(adapted_stream),
             schema: output_schema,
             adapter_factory,
             cached: None,
@@ -245,139 +388,35 @@ impl IcebergScanExec {
             scan_metrics,
             bytes_scanned: metrics.bytes_scanned,
             last_reported_bytes: 0,
+            runtime: [
+                ReportedCount::new(
+                    metrics.runtime_file_tasks_pruned,
+                    ScanMetrics::runtime_file_tasks_pruned,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_predicate_tasks,
+                    ScanMetrics::runtime_predicate_tasks,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_row_groups_pruned,
+                    ScanMetrics::runtime_row_groups_pruned,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_predicate_refreshes,
+                    ScanMetrics::runtime_predicate_refreshes,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_row_groups_pruned_live,
+                    ScanMetrics::runtime_row_groups_pruned_live,
+                ),
+                ReportedCount::new(
+                    metrics.runtime_decoder_rebuilds,
+                    ScanMetrics::runtime_decoder_rebuilds,
+                ),
+            ],
         };
 
         Ok(Box::pin(wrapped_stream))
-    }
-
-    /// Stats each unique delete file to fill its `file_size_in_bytes` (0 on arrival, since it is
-    /// not serialized).
-    ///
-    /// iceberg-rust seeks the Parquet footer from this size, so it must be correct. A stat failure
-    /// is fatal: reading with missing deletes would silently leak deleted rows.
-    async fn fill_delete_file_sizes(
-        tasks: &mut [FileScanTask],
-        file_io: &FileIO,
-        concurrency_limit: usize,
-    ) -> Result<(), Error> {
-        use datafusion::common::{HashMap, HashSet};
-        use futures::TryStreamExt;
-
-        // Dedup: the JVM pools delete-file lists, not individual files, so the same delete file
-        // recurs across the tasks that share it. Owning the paths also avoids holding a borrow of
-        // `tasks` into the mutable write-back below.
-        let mut needed: HashSet<String> = HashSet::new();
-        for task in tasks.iter() {
-            for delete in task.deletes() {
-                // Delete-file sizes are never serialized, so they always arrive as 0. If we ever
-                // trust manifest sizes (pending the unreleased apache/iceberg#12554 fix), skip
-                // already-sized files here instead of asserting.
-                debug_assert_eq!(delete.file_size_in_bytes, 0);
-                // A deletion vector is range-read from content_offset, and iceberg-rust consults
-                // file_size_in_bytes only on the Parquet delete path. Statting the Puffin file
-                // would be one HEAD per file per Spark partition for a value nothing reads.
-                if delete.file_format == DataFileFormat::Puffin {
-                    continue;
-                }
-                needed.insert(delete.file_path.clone());
-            }
-        }
-        if needed.is_empty() {
-            return Ok(());
-        }
-
-        // Bound the in-flight stats to match the downstream read concurrency (iceberg-rust uses
-        // try_buffer_unordered at the same limit for delete-file loads). An unbounded fan-out
-        // would burst N HEAD requests at once for no gain, since the reads are throttled anyway.
-        // Guaranteed > 0 by COMET_ICEBERG_DATA_FILE_CONCURRENCY_LIMIT; buffer_unordered(0) would
-        // never poll.
-        debug_assert!(concurrency_limit > 0);
-        let sizes: Vec<(String, u64)> = futures::stream::iter(needed.into_iter().map(|path| {
-            let file_io = file_io.clone();
-            async move {
-                let size = file_io
-                    .new_input(&path)?
-                    .metadata()
-                    .await
-                    .map_err(|e| {
-                        Error::new(
-                            ErrorKind::Unexpected,
-                            format!("Failed to stat delete file '{path}'"),
-                        )
-                        .with_source(e)
-                    })?
-                    .size;
-                if size < MIN_PARQUET_FILE_SIZE {
-                    return Err(Error::new(
-                        ErrorKind::Unexpected,
-                        format!(
-                            "Delete file '{path}' statted to {size} bytes, below the \
-                             {MIN_PARQUET_FILE_SIZE}-byte Parquet minimum. The object is empty or \
-                             truncated, or the stat returned no Content-Length (check the object \
-                             store endpoint, TLS, and path-style config)."
-                        ),
-                    ));
-                }
-                Ok::<(String, u64), Error>((path, size))
-            }
-        }))
-        .buffer_unordered(concurrency_limit)
-        .try_collect()
-        .await?;
-
-        let size_map: HashMap<String, u64> = sizes.into_iter().collect();
-        // iceberg-rust 665c64e made `FileScanTask::deletes` a private field exposed only through
-        // a read-only accessor, so a task's delete files can no longer be sized in place. Rebuild
-        // each task that carries deletes with sized copies; tasks without deletes are untouched.
-        for task in tasks.iter_mut() {
-            if task.deletes().is_empty() {
-                continue;
-            }
-            let deletes = task
-                .deletes()
-                .iter()
-                .map(|delete| {
-                    let mut delete = delete.clone();
-                    if let Some(&size) = size_map.get(&delete.file_path) {
-                        delete.file_size_in_bytes = size;
-                    }
-                    delete
-                })
-                .collect::<Vec<_>>();
-            *task = Self::rebuild_task_with_deletes(task, deletes)?;
-        }
-        Ok(())
-    }
-
-    /// Rebuilds a [`FileScanTask`] carrying a new set of delete files.
-    ///
-    /// `FileScanTask::deletes` is private with no mutator, so the only way to change a task's
-    /// delete files is to construct a fresh task via the builder, forwarding every other field
-    /// through its public accessors. The builder runs `FileScanTask`'s validation on `build()`.
-    fn rebuild_task_with_deletes(
-        task: &FileScanTask,
-        deletes: Vec<FileScanTaskDeleteFile>,
-    ) -> Result<FileScanTask, Error> {
-        FileScanTask::builder()
-            .with_file_size_in_bytes(task.file_size_in_bytes())
-            .with_start(task.start())
-            .with_length(task.length())
-            .with_record_count(task.record_count())
-            .with_first_row_id(task.first_row_id())
-            .with_data_sequence_number(task.data_sequence_number())
-            .with_data_file_path(task.data_file_path().to_string())
-            .with_data_file_format(task.data_file_format())
-            .with_schema(task.schema_ref())
-            .with_project_field_ids(task.project_field_ids().to_vec())
-            .with_predicate(task.predicate().cloned())
-            .with_deletes(deletes)
-            .with_partition(task.partition().cloned())
-            .with_partition_spec(task.partition_spec().cloned())
-            .with_name_mapping(task.name_mapping().cloned())
-            .with_unified_partition_type(task.unified_partition_type().cloned())
-            .with_case_sensitive(task.case_sensitive())
-            .with_key_metadata(task.key_metadata().map(Box::from))
-            .build()
     }
 }
 
@@ -389,6 +428,18 @@ struct IcebergScanMetrics {
     num_splits: Count,
     /// Total bytes read from storage
     bytes_scanned: Count,
+    /// File tasks rejected by runtime predicates before opening the file
+    runtime_file_tasks_pruned: Count,
+    /// File tasks that used a runtime predicate
+    runtime_predicate_tasks: Count,
+    /// Row groups skipped by runtime predicate statistics, at task open or live
+    runtime_row_groups_pruned: Count,
+    /// Runtime predicate publications picked up while a file was being read
+    runtime_predicate_refreshes: Count,
+    /// Row groups skipped at row-group boundaries after a refresh
+    runtime_row_groups_pruned_live: Count,
+    /// Decoder restarts required to install a newly sampled pruning selection
+    runtime_decoder_rebuilds: Count,
 }
 
 impl IcebergScanMetrics {
@@ -397,6 +448,18 @@ impl IcebergScanMetrics {
             baseline: BaselineMetrics::new(metrics, 0),
             num_splits: MetricBuilder::new(metrics).counter("num_splits", 0),
             bytes_scanned: MetricBuilder::new(metrics).counter("bytes_scanned", 0),
+            runtime_file_tasks_pruned: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_file_tasks_pruned", 0),
+            runtime_predicate_tasks: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_predicate_tasks", 0),
+            runtime_row_groups_pruned: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_pruned", 0),
+            runtime_predicate_refreshes: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_predicate_refreshes", 0),
+            runtime_row_groups_pruned_live: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_row_groups_pruned_live", 0),
+            runtime_decoder_rebuilds: MetricBuilder::new(metrics)
+                .counter("iceberg_runtime_decoder_rebuilds", 0),
         }
     }
 }
@@ -405,7 +468,8 @@ impl IcebergScanMetrics {
 /// Handles batches from multiple files that may have different Arrow schemas
 /// (metadata, field IDs, etc.).
 struct IcebergStreamWrapper<S> {
-    inner: S,
+    /// Released at EOF or the first error, even if the exhausted wrapper is retained.
+    inner: Option<S>,
     schema: SchemaRef,
     /// Factory for creating adapters when file schema changes
     adapter_factory: SparkPhysicalExprAdapterFactory,
@@ -420,6 +484,59 @@ struct IcebergStreamWrapper<S> {
     bytes_scanned: Count,
     /// Last reported bytes_read value for delta computation
     last_reported_bytes: u64,
+    /// Runtime pruning counters bridged from iceberg-rust's live totals.
+    runtime: [ReportedCount; 6],
+}
+
+impl<S> IcebergStreamWrapper<S> {
+    fn report_scan_metrics(&mut self) {
+        // Async readers and delete loaders can advance these totals while the
+        // outer stream is Pending, including immediately before cancellation.
+        let current = self.scan_metrics.bytes_read();
+        let delta = current.saturating_sub(self.last_reported_bytes);
+        if delta > 0 {
+            self.bytes_scanned.add(delta as usize);
+            self.last_reported_bytes = current;
+        }
+        for counter in &mut self.runtime {
+            counter.report(&self.scan_metrics);
+        }
+    }
+}
+
+impl<S> Drop for IcebergStreamWrapper<S> {
+    fn drop(&mut self) {
+        // Request cancellation before taking the final metric snapshot.
+        self.inner = None;
+        self.report_scan_metrics();
+    }
+}
+
+/// A Spark metric fed from a running total in iceberg-rust's [`ScanMetrics`].
+struct ReportedCount {
+    metric: Count,
+    read: fn(&ScanMetrics) -> u64,
+    reported: u64,
+}
+
+impl ReportedCount {
+    fn new(metric: Count, read: fn(&ScanMetrics) -> u64) -> Self {
+        Self {
+            metric,
+            read,
+            reported: 0,
+        }
+    }
+
+    /// Adds whatever the total grew by since the last report.
+    fn report(&mut self, scan_metrics: &ScanMetrics) {
+        let current = (self.read)(scan_metrics);
+        let delta = current.saturating_sub(self.reported);
+        if delta > 0 {
+            self.metric.add(delta as usize);
+            self.reported = current;
+        }
+    }
 }
 
 /// Cached projection state: file schema, adapter, and pre-built projection expressions.
@@ -442,56 +559,58 @@ where
         let elapsed_compute = self.baseline_metrics.elapsed_compute().clone();
         let _timer = elapsed_compute.timer();
 
-        let poll_result = self.inner.poll_next_unpin(cx);
+        let poll_result = match self.inner.as_mut() {
+            Some(inner) => inner.poll_next_unpin(cx),
+            None => return Poll::Ready(None),
+        };
 
         let result = match poll_result {
             Poll::Ready(Some(Ok(batch))) => {
-                let file_schema = batch.schema();
+                // Keep adaptation failures in the common reporting path below.
+                // Returning early with `?` would lose the last scan metric deltas.
+                let adapted = (|| -> DFResult<RecordBatch> {
+                    let file_schema = batch.schema();
 
-                // Reuse cached projection expressions if file schema hasn't changed.
-                // Batches from the same file share the same Arc<Schema> pointer,
-                // so pointer equality is sufficient here.
-                let projection_exprs = match &self.cached {
-                    Some(cached) if Arc::ptr_eq(&cached.file_schema, &file_schema) => {
-                        &cached.projection_exprs
-                    }
-                    _ => {
-                        let adapter = self
-                            .adapter_factory
-                            .create(Arc::clone(&self.schema), Arc::clone(&file_schema))?;
-                        let exprs =
-                            build_projection_expressions(&self.schema, &adapter).map_err(|e| {
-                                DataFusionError::Execution(format!(
-                                    "Failed to build projection expressions: {}",
-                                    e
-                                ))
-                            })?;
-                        self.cached = Some(CachedProjection {
-                            file_schema,
-                            projection_exprs: exprs,
-                        });
-                        &self.cached.as_ref().unwrap().projection_exprs
-                    }
-                };
+                    // Batches from the same file share their schema Arc.
+                    let projection_exprs: Cow<'_, [Arc<dyn PhysicalExpr>]> = match &self.cached {
+                        Some(cached) if Arc::ptr_eq(&cached.file_schema, &file_schema) => {
+                            Cow::Borrowed(&cached.projection_exprs)
+                        }
+                        _ => {
+                            let adapter = self
+                                .adapter_factory
+                                .create(Arc::clone(&self.schema), Arc::clone(&file_schema))?;
+                            let exprs =
+                                build_projection_expressions(&self.schema, &file_schema, &adapter)
+                                    .map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "Failed to build projection expressions: {}",
+                                            e
+                                        ))
+                                    })?;
+                            self.cached = Some(CachedProjection {
+                                file_schema,
+                                projection_exprs: exprs.clone(),
+                            });
+                            Cow::Owned(exprs)
+                        }
+                    };
 
-                let result = adapt_batch_with_expressions(batch, &self.schema, projection_exprs)
-                    .map_err(|e| {
-                        DataFusionError::Execution(format!("Batch adaptation failed: {}", e))
-                    });
+                    adapt_batch_with_expressions(batch, &self.schema, &projection_exprs).map_err(
+                        |e| DataFusionError::Execution(format!("Batch adaptation failed: {}", e)),
+                    )
+                })();
 
-                Poll::Ready(Some(result))
+                Poll::Ready(Some(adapted))
             }
             other => other,
         };
 
-        // Bridge iceberg-rust's live AtomicU64 counter into the DF metric tree
-        let current = self.scan_metrics.bytes_read();
-        let delta = current - self.last_reported_bytes;
-        if delta > 0 {
-            self.bytes_scanned.add(delta as usize);
-            self.last_reported_bytes = current;
+        if matches!(&result, Poll::Ready(None | Some(Err(_)))) {
+            self.inner = None;
+            self.cached = None;
         }
-
+        self.report_scan_metrics();
         self.baseline_metrics.record_poll(result)
     }
 }
@@ -527,6 +646,10 @@ impl fmt::Debug for IcebergScanExec {
             )
             .field("num_tasks", &self.tasks.len())
             .field(
+                "runtime_predicate_attached",
+                &self.runtime_predicate_provider.is_some(),
+            )
+            .field(
                 "data_file_concurrency_limit",
                 &self.data_file_concurrency_limit,
             )
@@ -554,20 +677,56 @@ impl fmt::Debug for RedactedProperties<'_> {
 /// that share the same file schema, avoiding repeated expression construction.
 fn build_projection_expressions(
     target_schema: &SchemaRef,
+    file_schema: &SchemaRef,
     adapter: &Arc<dyn PhysicalExprAdapter>,
 ) -> DFResult<Vec<Arc<dyn PhysicalExpr>>> {
     target_schema
         .fields()
         .iter()
         .enumerate()
-        .map(|(i, _field)| {
+        .map(|(i, field)| {
             let col_expr: Arc<dyn PhysicalExpr> = Arc::new(Column::new_with_schema(
                 target_schema.field(i).name(),
                 target_schema.as_ref(),
             )?);
-            adapter.rewrite(col_expr)
+            // Retain the adapter's selected-column validation, including duplicate names.
+            let rewritten = adapter.rewrite(col_expr)?;
+            // These layouts all store the same UTF-8 bytes. Iceberg decodes String to
+            // Utf8; a native consumer may request a view, large offsets or a dictionary.
+            // Use Arrow's representation cast without applying Spark SQL type coercions.
+            // Only an unambiguous exact field name can bypass the general schema adapter.
+            let matches = file_schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, source)| source.name() == field.name())
+                .collect::<Vec<_>>();
+            if let [(index, source)] = matches.as_slice() {
+                if source.data_type() != field.data_type()
+                    && is_arrow_string_type(source.data_type())
+                    && is_arrow_string_type(field.data_type())
+                {
+                    let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new(field.name(), *index));
+                    return Ok(
+                        Arc::new(CastExpr::new(column, field.data_type().clone(), None))
+                            as Arc<dyn PhysicalExpr>,
+                    );
+                }
+            }
+            Ok(rewritten)
         })
         .collect::<DFResult<Vec<_>>>()
+}
+
+fn is_arrow_string_type(data_type: &DataType) -> bool {
+    let value_type = match data_type {
+        DataType::Dictionary(_, value) => value.as_ref(),
+        data_type => data_type,
+    };
+    matches!(
+        value_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
 }
 
 /// Adapt a batch to match the target schema using pre-built projection expressions.
@@ -602,21 +761,651 @@ fn adapt_batch_with_expressions(
     RecordBatch::try_new(Arc::clone(target_schema), columns).map_err(|e| e.into())
 }
 
+/// Direction in which a runtime producer's bound tightens: a top-k or MIN keeps the smallest
+/// values (`Ascending`), a descending top-k or MAX the largest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeScanOrder {
+    Ascending { nulls_first: bool },
+    Descending { nulls_first: bool },
+}
+
+/// Reorders file tasks so the ones holding the producer's best values are read first.
+///
+/// Read order never changes a top-k or MIN/MAX result, and a single Spark task reads its file
+/// tasks in sequence by default. Files sorted by key are otherwise read in ascending order, so
+/// a descending top-k or MAX bound only tightens on the last file and prunes nothing. Reading
+/// the file with the highest upper bound first sets the bound at once; statistics then reject
+/// the remaining files before they are opened.
+///
+/// Tasks are ranked by the key's whole-file bound (lower bound ascending, or upper bound
+/// descending). When nulls sort first they are the best values, so files that hold nulls come
+/// first. Splits of one file keep their offsets in the same direction. Tasks without a usable
+/// bound keep their relative order after the ranked ones.
+pub(crate) fn order_tasks_for_runtime_bound(
+    tasks: &mut [FileScanTask],
+    field_id: i32,
+    order: RuntimeScanOrder,
+) {
+    use std::cmp::Ordering;
+
+    let (descending, nulls_first) = match order {
+        RuntimeScanOrder::Ascending { nulls_first } => (false, nulls_first),
+        RuntimeScanOrder::Descending { nulls_first } => (true, nulls_first),
+    };
+    let field_type = |task: &FileScanTask| {
+        task.schema()
+            .field_by_id(field_id)
+            .and_then(|field| field.field_type.as_primitive_type().cloned())
+    };
+    // Every ranked bound must have the same type, including across task schemas.
+    // Otherwise treating an incomparable pair as equal would not define a total order.
+    let key_type = tasks.iter().find_map(field_type);
+    let bound = |task: &FileScanTask| {
+        let metrics = task.file_metrics()?;
+        let bounds = if descending {
+            metrics.upper_bounds()
+        } else {
+            metrics.lower_bounds()
+        };
+        let bound = bounds.get(&field_id)?;
+        (Some(bound.data_type()) == field_type(task).as_ref()
+            && Some(bound.data_type()) == key_type.as_ref())
+        .then(|| bound.clone())
+    };
+    let holds_nulls = |task: &FileScanTask| {
+        task.file_metrics()
+            .and_then(|metrics| metrics.null_value_counts().get(&field_id))
+            .is_some_and(|count| *count > 0)
+    };
+    // Cache statistics once and sort indices rather than cloning complete tasks,
+    // which can contain many delete files and projection fields. Files with equal
+    // bounds retain their original file order; only splits of one file reverse.
+    let mut file_ranks = HashMap::new();
+    let mut ranked: Vec<_> = tasks
+        .iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let file_rank = *file_ranks.entry(task.data_file_path()).or_insert(index);
+            (
+                nulls_first && holds_nulls(task),
+                bound(task),
+                file_rank,
+                task.start(),
+                index,
+            )
+        })
+        .collect();
+    ranked.sort_by(
+        |(left_nulls, left, left_file, left_start, left_index),
+         (right_nulls, right, right_file, right_start, right_index)| {
+            right_nulls
+                .cmp(left_nulls)
+                .then_with(|| match (left, right) {
+                    (Some(left), Some(right)) => {
+                        let order = left.partial_cmp(right).unwrap_or(Ordering::Equal);
+                        let order = if descending { order.reverse() } else { order };
+                        order.then_with(|| left_file.cmp(right_file)).then_with(|| {
+                            if descending {
+                                right_start.cmp(left_start)
+                            } else {
+                                left_start.cmp(right_start)
+                            }
+                        })
+                    }
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    // Unknown bounds preserve the task order, including offsets.
+                    (None, None) => left_index.cmp(right_index),
+                })
+        },
+    );
+    let mut destinations = vec![0; tasks.len()];
+    for (destination, (_, _, _, _, original)) in ranked.into_iter().enumerate() {
+        destinations[original] = destination;
+    }
+    drop(file_ranks);
+    // Apply the permutation in place. Each swap puts at least one task at its
+    // final position, with no additional task copies or ownership changes.
+    for index in 0..tasks.len() {
+        while destinations[index] != index {
+            let destination = destinations[index];
+            tasks.swap(index, destination);
+            destinations.swap(index, destination);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::sync::Arc;
 
     use iceberg::encryption::StandardKeyMetadata;
-    use iceberg::io::{FileIO, FileIOBuilder};
-    use iceberg::scan::{FileScanTask, FileScanTaskDeleteFile};
-    use iceberg::spec::{DataContentType, DataFileFormat, Schema};
-    use iceberg_storage_opendal::OpenDalStorageFactory;
+    use iceberg::scan::FileScanTask;
+    use iceberg::spec::{DataFileFormat, Schema};
 
     use super::IcebergScanExec;
 
-    fn fs_file_io() -> FileIO {
-        FileIOBuilder::new(Arc::new(OpenDalStorageFactory::Fs)).build()
+    /// The runtime predicate field name behind output column `output_index`, resolved the
+    /// way the aggregate dynamic-filter planner resolves it.
+    fn runtime_predicate_field_name(scan: &IcebergScanExec, output_index: usize) -> Option<String> {
+        scan.runtime_predicate_field(output_index)
+            .map(|(_, name)| name)
+    }
+
+    #[test]
+    fn resetting_scan_detaches_previous_execution_runtime_predicate() {
+        use arrow::datatypes::Schema as ArrowSchema;
+        use datafusion::physical_plan::ExecutionPlan;
+        use iceberg::arrow::{RuntimePredicateProvider, RuntimePredicateSnapshot};
+        use iceberg::expr::Predicate;
+
+        struct CompletedFilter;
+        impl RuntimePredicateProvider for CompletedFilter {
+            fn generation(&self) -> u64 {
+                1
+            }
+
+            fn snapshot(&self) -> iceberg::Result<RuntimePredicateSnapshot> {
+                Ok(RuntimePredicateSnapshot::new(
+                    Some(Predicate::AlwaysFalse),
+                    1,
+                ))
+            }
+        }
+
+        let scan = Arc::new(
+            IcebergScanExec::new(
+                "/tmp/reset.parquet".into(),
+                Arc::new(ArrowSchema::empty()),
+                Default::default(),
+                String::new(),
+                vec![],
+                1,
+            )
+            .unwrap()
+            .with_runtime_predicate_provider(
+                Arc::new(CompletedFilter),
+                Some((1, super::RuntimeScanOrder::Ascending { nulls_first: false })),
+            ),
+        );
+        let reset = Arc::clone(&scan).reset_state().unwrap();
+        let reset = reset.downcast_ref::<IcebergScanExec>().unwrap();
+        assert!(reset.runtime_predicate_provider.is_none());
+        assert!(reset.runtime_task_order.is_none());
+        assert!(Arc::ptr_eq(&scan.tasks, &reset.tasks));
+    }
+
+    #[tokio::test]
+    async fn scan_wrapper_releases_reader_state_at_eof_and_errors() {
+        use arrow::array::{RecordBatch, TimestampMicrosecondArray, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+        use datafusion::common::DataFusionError;
+        use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
+        use futures::StreamExt;
+        use iceberg::arrow::ScanMetrics;
+
+        use super::{IcebergStreamWrapper, ReportedCount};
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]));
+        // Obtain an execution's metric handles without performing any storage IO.
+        let reader = iceberg::arrow::ArrowReaderBuilder::new(
+            super::load_file_io(
+                &Default::default(),
+                "/tmp/scan-lifecycle.parquet",
+                "",
+                super::AccessMode::Read,
+            )
+            .unwrap(),
+            iceberg::Runtime::try_current().unwrap(),
+        )
+        .build();
+        let read = reader.read(futures::stream::empty().boxed()).unwrap();
+        let scan_metrics = read.metrics().clone();
+        drop(read);
+
+        for failure in [0, 1, 2] {
+            let resource = Arc::new(());
+            let released = Arc::downgrade(&resource);
+            let batch = match failure {
+                0 => RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(TimestampMicrosecondArray::from(vec![0]))],
+                )
+                .unwrap(),
+                _ => {
+                    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+                        "ts",
+                        DataType::Timestamp(TimeUnit::Millisecond, None),
+                        false,
+                    )]));
+                    RecordBatch::try_new(
+                        schema,
+                        vec![Arc::new(TimestampMillisecondArray::from(vec![i64::MAX]))],
+                    )
+                    .unwrap()
+                }
+            };
+            let item = if failure == 1 {
+                Err(DataFusionError::Execution("reader failed".into()))
+            } else {
+                Ok(batch)
+            };
+            let inner = futures::stream::iter([item]).map(move |item| {
+                let _ = &resource;
+                item
+            });
+            let metrics = ExecutionPlanMetricsSet::new();
+            let mut stream = IcebergStreamWrapper {
+                inner: Some(inner),
+                schema: Arc::clone(&schema),
+                adapter_factory: super::SparkPhysicalExprAdapterFactory::new(
+                    super::SparkParquetOptions::new(super::EvalMode::Legacy, "UTC", false),
+                    None,
+                ),
+                cached: None,
+                baseline_metrics: super::BaselineMetrics::new(&metrics, 0),
+                scan_metrics: scan_metrics.clone(),
+                bytes_scanned: MetricBuilder::new(&metrics).counter("bytes_scanned", 0),
+                last_reported_bytes: 0,
+                runtime: std::array::from_fn(|index| {
+                    ReportedCount::new(
+                        MetricBuilder::new(&metrics).counter(format!("runtime_{index}"), 0),
+                        ScanMetrics::bytes_read,
+                    )
+                }),
+            };
+            let result = stream.next().await.unwrap();
+            assert_eq!(result.is_err(), failure != 0, "failure={failure}");
+            if failure == 0 {
+                assert!(released.upgrade().is_some());
+            } else {
+                assert!(released.upgrade().is_none());
+                assert!(stream.cached.is_none());
+            }
+            assert!(stream.next().await.is_none());
+            assert!(released.upgrade().is_none());
+            assert!(stream.inner.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_scan_reports_background_delete_reads() {
+        use std::collections::HashMap;
+        use std::pin::Pin;
+        use std::task::Context;
+        use std::time::Duration;
+
+        use arrow::array::{Int32Array, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
+        use futures::{Stream, StreamExt, TryStreamExt};
+        use iceberg::arrow::{ArrowReaderBuilder, ScanMetrics};
+        use iceberg::scan::FileScanTaskDeleteFile;
+        use iceberg::spec::{DataContentType, NestedField, PrimitiveType, Type};
+        use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "key",
+            DataType::Int32,
+            false,
+        )
+        .with_metadata(HashMap::from([(
+            PARQUET_FIELD_ID_META_KEY.to_string(),
+            "1".to_string(),
+        )]))]));
+        let write = |values: Vec<i32>| {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int32Array::from(values))],
+            )
+            .unwrap();
+            let mut writer =
+                ArrowWriter::try_new(file.reopen().unwrap(), Arc::clone(&schema), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            file
+        };
+        let data = write(vec![1, 2]);
+        let delete = write(vec![2]);
+        let task = FileScanTask::builder()
+            .with_data_file_path(data.path().to_string_lossy().into_owned())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_file_size_in_bytes(data.as_file().metadata().unwrap().len())
+            .with_start(0)
+            .with_length(0)
+            .with_schema(Arc::new(
+                Schema::builder()
+                    .with_fields(vec![NestedField::required(
+                        1,
+                        "key",
+                        Type::Primitive(PrimitiveType::Int),
+                    )
+                    .into()])
+                    .build()
+                    .unwrap(),
+            ))
+            .with_project_field_ids(vec![1])
+            .with_case_sensitive(false)
+            .with_deletes(vec![FileScanTaskDeleteFile::builder()
+                .with_file_path(delete.path().to_string_lossy().into_owned())
+                .with_file_size_in_bytes(delete.as_file().metadata().unwrap().len())
+                .with_file_type(DataContentType::EqualityDeletes)
+                .with_file_format(DataFileFormat::Parquet)
+                .with_partition_spec_id(0)
+                .with_equality_ids(Some(vec![1]))
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap();
+        let reader = ArrowReaderBuilder::new(
+            super::load_file_io(
+                &Default::default(),
+                data.path().to_str().unwrap(),
+                "",
+                super::AccessMode::Read,
+            )
+            .unwrap(),
+            iceberg::Runtime::try_current().unwrap(),
+        )
+        .with_data_file_concurrency_limit(1)
+        .build();
+        let result = reader
+            .read(futures::stream::iter([Ok(task)]).boxed())
+            .unwrap();
+        let scan_metrics = result.metrics().clone();
+        let metrics = ExecutionPlanMetricsSet::new();
+        let bytes = MetricBuilder::new(&metrics).counter("bytes_scanned", 0);
+        let mut stream = super::IcebergStreamWrapper {
+            inner: Some(result.stream().map_err(|error| {
+                datafusion::common::DataFusionError::Execution(error.to_string())
+            })),
+            schema,
+            adapter_factory: super::SparkPhysicalExprAdapterFactory::new(
+                super::SparkParquetOptions::new(super::EvalMode::Legacy, "UTC", false),
+                None,
+            ),
+            cached: None,
+            baseline_metrics: super::BaselineMetrics::new(&metrics, 0),
+            scan_metrics: scan_metrics.clone(),
+            bytes_scanned: bytes.clone(),
+            last_reported_bytes: 0,
+            runtime: std::array::from_fn(|index| {
+                super::ReportedCount::new(
+                    MetricBuilder::new(&metrics).counter(format!("runtime_{index}"), 0),
+                    ScanMetrics::bytes_read,
+                )
+            }),
+        };
+        let mut context = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
+        let reported = bytes.value();
+        // Delete files load in an independent IO task. Let that real reader
+        // advance while the outer scan remains Pending and is never polled again.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while scan_metrics.bytes_read() <= reported as u64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background delete reader must perform IO");
+        let before_cancel = scan_metrics.bytes_read();
+        assert_eq!(bytes.value(), reported);
+        drop(stream);
+        assert!(bytes.value() as u64 >= before_cancel);
+        assert!(bytes.value() > reported);
+    }
+
+    #[test]
+    fn runtime_field_mapping_aligns_outputs_after_metadata_columns() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use iceberg::metadata_columns::RESERVED_FIELD_ID_FILE;
+        use iceberg::spec::{NestedField, PrimitiveType, Type};
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![NestedField::optional(
+                    2,
+                    "value",
+                    Type::Primitive(PrimitiveType::Long),
+                )
+                .into()])
+                .build()
+                .unwrap(),
+        );
+        let task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("/tmp/metadata-first.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(schema)
+            .with_project_field_ids(vec![RESERVED_FIELD_ID_FILE, 2])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+        let scan = IcebergScanExec::new(
+            "/tmp/metadata.json".into(),
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("_file", DataType::Utf8, false),
+                Field::new("value", DataType::Int64, true),
+            ])),
+            Default::default(),
+            String::new(),
+            vec![task],
+            1,
+        )
+        .unwrap();
+        // A projected metadata column keeps its output position, so the data
+        // column after it still maps to its own field id.
+        assert_eq!(runtime_predicate_field_name(&scan, 0), None);
+        assert_eq!(runtime_predicate_field_name(&scan, 1), Some("value".into()));
+    }
+
+    #[test]
+    fn runtime_decimal_field_mapping_requires_declared_precision_and_scale() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use iceberg::spec::{NestedField, Type};
+
+        for (precision, scale, expected) in [(18, 2, true), (10, 2, false), (18, 3, false)] {
+            let schema = Arc::new(
+                Schema::builder()
+                    .with_fields(vec![NestedField::optional(
+                        1,
+                        "key",
+                        Type::decimal(18, 2).unwrap(),
+                    )
+                    .into()])
+                    .build()
+                    .unwrap(),
+            );
+            let task = FileScanTask::builder()
+                .with_file_size_in_bytes(1024)
+                .with_start(0)
+                .with_length(0)
+                .with_data_file_path("/tmp/decimal-schema-only.parquet".into())
+                .with_data_file_format(DataFileFormat::Parquet)
+                .with_schema(schema)
+                .with_project_field_ids(vec![1])
+                .with_case_sensitive(false)
+                .build()
+                .unwrap();
+            let scan = IcebergScanExec::new(
+                "/tmp/metadata.json".into(),
+                Arc::new(ArrowSchema::new(vec![Field::new(
+                    "key",
+                    DataType::Decimal128(precision, scale),
+                    true,
+                )])),
+                Default::default(),
+                String::new(),
+                vec![task],
+                1,
+            )
+            .unwrap();
+            assert_eq!(runtime_predicate_field_name(&scan, 0).is_some(), expected);
+        }
+    }
+
+    #[test]
+    fn runtime_field_mapping_respects_projection_identity_and_type() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use iceberg::spec::{NestedField, PrimitiveType, Type};
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(1, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(2, "value", Type::Primitive(PrimitiveType::Long)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let task = |ids| {
+            FileScanTask::builder()
+                .with_file_size_in_bytes(1024)
+                .with_start(0)
+                .with_length(0)
+                .with_data_file_path("/tmp/schema-only.parquet".into())
+                .with_data_file_format(DataFileFormat::Parquet)
+                .with_schema(Arc::clone(&schema))
+                .with_project_field_ids(ids)
+                .with_case_sensitive(false)
+                .build()
+                .unwrap()
+        };
+        let scan = |data_type, tasks| {
+            IcebergScanExec::new(
+                "/tmp/metadata.json".into(),
+                Arc::new(ArrowSchema::new(vec![Field::new("value", data_type, true)])),
+                Default::default(),
+                String::new(),
+                tasks,
+                1,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            runtime_predicate_field_name(&scan(DataType::Int64, vec![task(vec![2])]), 0),
+            Some("value".into())
+        );
+        assert_eq!(
+            runtime_predicate_field_name(&scan(DataType::Int32, vec![task(vec![2])]), 0),
+            None
+        );
+        assert_eq!(
+            runtime_predicate_field_name(&scan(DataType::UInt64, vec![task(vec![2])]), 0),
+            None
+        );
+        assert_eq!(
+            runtime_predicate_field_name(
+                &scan(DataType::Int64, vec![task(vec![2]), task(vec![1])]),
+                0,
+            ),
+            None
+        );
+        assert_eq!(
+            runtime_predicate_field_name(&scan(DataType::Int64, vec![task(vec![2])]), 1),
+            None
+        );
+        assert_eq!(
+            runtime_predicate_field_name(&scan(DataType::Int64, vec![]), 0),
+            None
+        );
+
+        let nested_schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(
+                        3,
+                        "nested",
+                        Type::Struct(iceberg::spec::StructType::new(vec![NestedField::optional(
+                            1,
+                            "value",
+                            Type::Primitive(PrimitiveType::Long),
+                        )
+                        .into()])),
+                    )
+                    .into(),
+                    NestedField::optional(2, "value", Type::Primitive(PrimitiveType::Long)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let nested_task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("/tmp/nested.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(nested_schema)
+            .with_project_field_ids(vec![1])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime_predicate_field_name(&scan(DataType::Int64, vec![nested_task]), 0),
+            None
+        );
+
+        let case_schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![
+                    NestedField::optional(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(2, "KEY", Type::Primitive(PrimitiveType::Int)).into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let resolved_id = case_schema
+            .field_by_name_case_insensitive("key")
+            .unwrap()
+            .id;
+        let other_id = if resolved_id == 1 { 2 } else { 1 };
+        let case_task = FileScanTask::builder()
+            .with_file_size_in_bytes(1024)
+            .with_start(0)
+            .with_length(0)
+            .with_data_file_path("/tmp/case.parquet".into())
+            .with_data_file_format(DataFileFormat::Parquet)
+            .with_schema(case_schema)
+            .with_project_field_ids(vec![other_id])
+            .with_case_sensitive(false)
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime_predicate_field_name(&scan(DataType::Int32, vec![case_task]), 0),
+            None
+        );
+    }
+
+    #[test]
+    fn string_layout_cast_preserves_selected_name_validation() {
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use datafusion_physical_expr_adapter::PhysicalExprAdapterFactory;
+
+        let options = super::SparkParquetOptions::new(super::EvalMode::Legacy, "UTC", false);
+        let factory = super::SparkPhysicalExprAdapterFactory::new(options, None);
+        for duplicate_name in ["key", "KEY"] {
+            let physical = Arc::new(ArrowSchema::new(vec![
+                Field::new("key", DataType::Utf8, true),
+                Field::new(duplicate_name, DataType::Utf8, true),
+            ]));
+            for target_type in [DataType::LargeUtf8, DataType::Utf8View] {
+                let target = Arc::new(ArrowSchema::new(vec![Field::new("key", target_type, true)]));
+                let adapter = factory
+                    .create(Arc::clone(&target), Arc::clone(&physical))
+                    .unwrap();
+                let error = super::build_projection_expressions(&target, &physical, &adapter)
+                    .expect_err("string representation changes must retain ambiguity errors")
+                    .to_string();
+                assert!(error.contains("duplicate"), "{error}");
+            }
+        }
     }
 
     #[test]
@@ -642,7 +1431,7 @@ mod tests {
             let adapter = factory
                 .create(Arc::clone(&target), Arc::clone(&physical))
                 .unwrap();
-            let result = super::build_projection_expressions(&target, &adapter);
+            let result = super::build_projection_expressions(&target, &physical, &adapter);
             if name == "a" {
                 let error = result
                     .expect_err("selected root must be ambiguous")
@@ -672,101 +1461,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    fn task_with_deletes(deletes: Vec<FileScanTaskDeleteFile>) -> FileScanTask {
-        FileScanTask::builder()
-            .with_file_size_in_bytes(0)
-            .with_start(0)
-            .with_length(0)
-            .with_data_file_path("data.parquet".to_string())
-            .with_data_file_format(DataFileFormat::Parquet)
-            .with_schema(Arc::new(Schema::builder().build().unwrap()))
-            .with_project_field_ids(vec![])
-            .with_deletes(deletes)
-            .with_case_sensitive(false)
-            .build()
-            .unwrap()
-    }
-
-    fn delete_file(path: &str) -> FileScanTaskDeleteFile {
-        FileScanTaskDeleteFile {
-            file_path: path.to_string(),
-            file_type: DataContentType::PositionDeletes,
-            file_format: DataFileFormat::Parquet,
-            file_size_in_bytes: 0,
-            partition_spec_id: 0,
-            equality_ids: None,
-            referenced_data_file: None,
-            content_offset: None,
-            content_size_in_bytes: None,
-            record_count: None,
-            key_metadata: None,
-        }
-    }
-
-    // A delete file we cannot stat must fail the scan, not be silently read with a missing/0 size.
-    #[tokio::test]
-    async fn fill_delete_file_sizes_errors_on_unreadable_delete_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing-delete.parquet");
-        let mut tasks = vec![task_with_deletes(vec![delete_file(
-            missing.to_str().unwrap(),
-        )])];
-
-        let result = IcebergScanExec::fill_delete_file_sizes(&mut tasks, &fs_file_io(), 4).await;
-
-        assert!(
-            result.is_err(),
-            "expected an error when a delete file cannot be statted"
-        );
-        assert_eq!(tasks[0].deletes()[0].file_size_in_bytes, 0);
-    }
-
-    // The real on-disk size is filled in from the FileIO, replacing the 0 placeholder.
-    #[tokio::test]
-    async fn fill_delete_file_sizes_populates_real_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("delete.parquet");
-        let bytes = b"these bytes stand in for a delete file";
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(bytes).unwrap();
-        f.flush().unwrap();
-
-        let mut tasks = vec![task_with_deletes(vec![delete_file(path.to_str().unwrap())])];
-        IcebergScanExec::fill_delete_file_sizes(&mut tasks, &fs_file_io(), 4)
-            .await
-            .unwrap();
-
-        assert_eq!(tasks[0].deletes()[0].file_size_in_bytes, bytes.len() as u64);
-    }
-
-    // A present-but-undersized delete file (0-byte object, truncated write, or a HEAD with no
-    // Content-Length that opendal reports as size 0) must fail loudly rather than passing a
-    // sub-footer size into the Parquet reader.
-    #[tokio::test]
-    async fn fill_delete_file_sizes_errors_on_subfooter_delete_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty-delete.parquet");
-        std::fs::File::create(&path).unwrap(); // 0 bytes on disk
-
-        let mut tasks = vec![task_with_deletes(vec![delete_file(path.to_str().unwrap())])];
-        let result = IcebergScanExec::fill_delete_file_sizes(&mut tasks, &fs_file_io(), 4).await;
-
-        assert!(
-            result.is_err(),
-            "expected an error when a delete file is below the Parquet footer minimum"
-        );
-        assert_eq!(tasks[0].deletes()[0].file_size_in_bytes, 0);
-    }
-
-    // No deletes means no stats and no error.
-    #[tokio::test]
-    async fn fill_delete_file_sizes_noop_without_deletes() {
-        let mut tasks = vec![task_with_deletes(vec![])];
-        IcebergScanExec::fill_delete_file_sizes(&mut tasks, &fs_file_io(), 4)
-            .await
-            .unwrap();
     }
 
     fn from_hex(s: &str) -> Vec<u8> {
@@ -822,6 +1516,107 @@ mod tests {
             decoded.aad_prefix().map(|a| a.len()),
             Some(16),
             "expected a 16-byte AAD prefix from the Java blob"
+        );
+    }
+
+    #[test]
+    fn runtime_order_reads_best_files_first() {
+        use std::collections::HashMap;
+
+        use iceberg::scan::FileScanTaskMetrics;
+        use iceberg::spec::{Datum, NestedField, PrimitiveType, Type};
+
+        use super::{order_tasks_for_runtime_bound, RuntimeScanOrder};
+
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![NestedField::optional(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Int),
+                )
+                .into()])
+                .build()
+                .unwrap(),
+        );
+        let task = |path: &str, start: u64, bounds: Option<(i32, i32, u64)>| {
+            let metrics = bounds.map(|(lower, upper, nulls)| {
+                Arc::new(FileScanTaskMetrics::new(
+                    Some(10),
+                    HashMap::new(),
+                    HashMap::from([(1, nulls)]),
+                    HashMap::new(),
+                    HashMap::from([(1, Datum::int(lower))]),
+                    HashMap::from([(1, Datum::int(upper))]),
+                ))
+            });
+            FileScanTask::builder()
+                .with_file_size_in_bytes(1024)
+                .with_start(start)
+                .with_length(0)
+                .with_data_file_path(path.into())
+                .with_data_file_format(DataFileFormat::Parquet)
+                .with_schema(Arc::clone(&schema))
+                .with_project_field_ids(vec![1])
+                .with_case_sensitive(false)
+                .with_file_metrics(metrics)
+                .build()
+                .unwrap()
+        };
+        let tasks = vec![
+            task("a", 0, Some((0, 99, 0))),
+            task("unknown", 0, None),
+            task("b", 0, Some((100, 199, 3))),
+            task("c", 0, Some((200, 299, 0))),
+            task("c", 100, Some((200, 299, 0))),
+        ];
+        let order = |order| {
+            let mut tasks = tasks.clone();
+            order_tasks_for_runtime_bound(&mut tasks, 1, order);
+            tasks
+                .iter()
+                .map(|task| format!("{}@{}", task.data_file_path(), task.start()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(RuntimeScanOrder::Descending { nulls_first: false }),
+            ["c@100", "c@0", "b@0", "a@0", "unknown@0"]
+        );
+        assert_eq!(
+            order(RuntimeScanOrder::Ascending { nulls_first: false }),
+            ["a@0", "b@0", "c@0", "c@100", "unknown@0"]
+        );
+        // Nulls sort first: the file holding nulls has the best values.
+        assert_eq!(
+            order(RuntimeScanOrder::Ascending { nulls_first: true }),
+            ["b@0", "a@0", "c@0", "c@100", "unknown@0"]
+        );
+
+        let mut equal_and_unknown = vec![
+            task("first", 0, Some((0, 99, 0))),
+            task("unknown-late", 900, None),
+            task("second", 400, Some((0, 99, 0))),
+            task("first", 100, Some((0, 99, 0))),
+            task("unknown-early", 0, None),
+        ];
+        order_tasks_for_runtime_bound(
+            &mut equal_and_unknown,
+            1,
+            RuntimeScanOrder::Descending { nulls_first: false },
+        );
+        assert_eq!(
+            equal_and_unknown
+                .iter()
+                .map(|task| format!("{}@{}", task.data_file_path(), task.start()))
+                .collect::<Vec<_>>(),
+            [
+                "first@100",
+                "first@0",
+                "second@400",
+                "unknown-late@900",
+                "unknown-early@0",
+            ],
+            "equal bounds preserve file order and unknown bounds preserve task order"
         );
     }
 }

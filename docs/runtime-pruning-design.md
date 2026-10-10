@@ -1,0 +1,256 @@
+<!--
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+-->
+
+# Native Iceberg runtime pruning
+
+Comet connects completed join domains and tightening TopK/MIN/MAX bounds to
+Iceberg's Arrow reader. Iceberg Java continues to plan `FileScanTask`s; Comet
+keeps Spark schema adaptation and operator execution; iceberg-rust owns
+file access, physical decoding, schema evolution and deletes. The original
+join, sort or aggregate still determines the exact result.
+
+```text
+Spark / Iceberg Java tasks
+  -> Comet execution-local producer + RuntimePredicateProvider
+  -> iceberg-rust ArrowReader: file -> row-group -> page -> row pruning
+  -> Spark batch adaptation -> original join / sort / aggregate
+```
+
+## Safety contract
+
+- A published predicate may discard only rows that can never affect the result.
+  Publications tighten monotonically; generations increase after publication.
+  `None` stops new adoption and cannot restore work already skipped. Comet takes
+  bounded, generation-bracketed snapshots; readers cache both successful and
+  failed bindings by generation, schema and case policy.
+- Snapshot, binding, statistics, planning and page-pruning failures are advisory:
+  ignore the runtime predicate and retain the planned filters and deletes.
+  Actual decoding and row-evaluation errors propagate. Advisory failure never
+  converts a planned-filter error into success.
+- Moving pruning below an expression requires that expression to be row-local
+  and infallible. Determinism alone is insufficient. Casts, arbitrary functions,
+  overflow-prone arithmetic and variable division remain boundaries. Secondary
+  TopK sort keys obey the same rule, so a later file's division-by-zero cannot
+  disappear behind a first-key bound. Fetch limits are boundaries too.
+- Nulls remain possible when counts are unknown. TopK preserves null-first
+  arms and first-key ties for multiple sort keys. Whole-file proofs may remove
+  a redundant row filter only when Arrow's null semantics agree; negative
+  equality/membership predicates require explicit zero null counts for that
+  optimization. Floating comparisons and sets fail open because statistics and
+  Arrow total-order comparisons disagree on NaNs and signed zeros. The reader's
+  floating null/NaN tests remain supported.
+- Binding follows field IDs, task schemas and case policy. Comet requires a
+  consistent top-level field identity and matching type across tasks. Missing
+  physical fields and table type promotions disable runtime physical filtering;
+  Iceberg still applies defaults and output evolution. Row comparisons perform
+  supported lossless physical numeric widening before comparison. Page bounds
+  must use the same value domain: narrowing a wide literal or interpreting an
+  `INT32` bound as a differently encoded value is unsafe. Regression coverage
+  includes out-of-range literals, narrow physical integers and page pruning.
+- Position deletes retain physical row positions before filtering. Page and
+  positional selections remain local to each row group through refreshes and
+  reordered reads. Equality deletes, deletion vectors, encryption and byte-range
+  splits continue through the existing Iceberg reader path.
+
+The attachment and expression rules are in
+[iceberg_reader.rs](../native/core/src/execution/operators/dynamic_filter/iceberg_reader.rs).
+The reader contracts and schema checks are in
+[runtime_predicate.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_predicate.rs),
+[pipeline.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/pipeline.rs)
+and [page_index_evaluator.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/expr/visitors/page_index_evaluator.rs).
+
+## Attachment and lifecycle
+
+Join pruning supports a single direct key with exactly matching native types:
+signed integers, dates, microsecond timestamps, Decimal128 and binary strings.
+Decimal keys must have matching precision and scale and unmodified column
+lineage. Decimal decoded-batch filtering is available across probe backends;
+native Parquet reader attachment supports signed integers only. Dates,
+microsecond timestamps and strings require native Iceberg probes. Strings must
+use binary collation; fixed CHAR, padding, collation annotations and computed
+decimal/string lineage prevent attachment. Dictionary strings compare by their
+values, never dictionary indices. Eligible
+inner and semi joins use null-unequal semantics and one native partition per
+input. Outer/anti joins, computed keys and unsupported types retain their
+ordinary execution. Join residuals still run on exact key matches.
+
+TopK requires a direct supported first key and positive fetch. MIN/MAX requires
+one ungrouped partial aggregate with a direct supported argument, without
+distinct, aggregate filters or aggregate ordering. Safe projections and filters
+can be traversed while preserving the key's column mapping. Parquet attachment
+keeps its separate schema-adapter and statistics safety checks.
+
+String TopK supports ASC and DESC with NULLS LAST on native Iceberg readers.
+String NULLS FIRST conservatively retains ordinary execution without reader
+pruning. Integer, date and timestamp TopK can support either null ordering;
+eligibility still depends on the reader and every sort expression. Decimal
+join and file-statistics support does not imply Decimal TopK or MIN/MAX support.
+String MIN/MAX requires direct binary string lineage. JVM file-statistics
+eligibility and native per-consumer eligibility are separate contracts, with
+agreement tests for the shared cases.
+
+Join reader attachment also retains a pass-through `ReaderFilterConsumerExec` exposing
+the predicate through the physical-plan expression visitor. DataFusion checks
+that consumer identity before publishing the build domain. The opaque reader
+provider alone does not satisfy that discovery check. This node delegates
+execution directly to its input; it performs no decoded-row membership lookup
+or payload filtering. Regression coverage requires actual reader adoption and
+reduced reader output, in addition to exact join results.
+
+## Component boundaries and incremental support
+
+| Component                            | Responsibility                                                                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `join.rs`, `topk.rs`, `aggregate.rs` | Producer eligibility and execution-local publication lifecycle                                         |
+| `safety.rs`                          | Whether bypassing an expression preserves values, nulls and errors; independent of the storage backend |
+| `iceberg_reader.rs`                  | Traverse permitted plan nodes and map the producer column to a consistent Iceberg field identity       |
+| `iceberg_reader/predicate.rs`        | Conservatively translate the published producer expression; unfamiliar shapes fail open                |
+| `consumer.rs`                        | Expose the reader's consumer identity to DataFusion; delegate batches without evaluation               |
+| `batch_filter.rs`                    | Evaluate membership on decoded batches for non-Iceberg join inputs                                     |
+| iceberg-rust runtime reader          | Bind publications, validate physical schemas, and prune files, groups, pages and rows                  |
+
+`try_attach_iceberg_join_filter` connects the reader provider and the discoverable
+consumer together. A caller cannot accidentally retain only the provider. The
+consumer remains above projection traversal, where the expression's column
+indices belong to the producer's input schema. Reset removes both its discovery
+expression and the reader's old provider, even when invoked directly.
+
+Add expression support in `safety.rs` only after establishing row-local,
+infallible evaluation for that concrete physical expression and its types.
+Determinism or a scalar function's name is insufficient. Test the expression
+produced by Spark serialization as well as null, overflow and error behavior;
+a hand-built DataFusion expression can differ from Spark's expression tree.
+
+Adding a safe filter does not require translating that filter into an Iceberg
+predicate: it permits the independently published join or TopK bound to pass
+below it. New producer predicate shapes belong in `predicate.rs`, with separate
+tests for conservative AND extraction, complete OR coverage, ties and nulls.
+New physical column types require reader/statistics agreement in iceberg-rust
+before being admitted by a producer. These extension points do not broaden one
+another automatically.
+
+Permanent wrappers retain unexecuted templates. Each execution creates a fresh
+producer and connected reader consumer; completed build domains, hash tables
+and TopK thresholds do not survive into the next execution. EOF, error and
+cancellation release stream-owned state. Reset detaches a scan's old provider
+and ordering. Native Iceberg scans reject nonzero partition indices.
+
+See [join.rs](../native/core/src/execution/operators/dynamic_filter/join.rs),
+[topk.rs](../native/core/src/execution/operators/dynamic_filter/topk.rs),
+[aggregate.rs](../native/core/src/execution/operators/dynamic_filter/aggregate.rs)
+and [iceberg_scan.rs](../native/core/src/execution/operators/iceberg_scan.rs).
+
+## Optimization rationale
+
+| Change                                                             | Work avoided                                                                                                                |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| File rejection before opening data or loading deletes              | Footer, data and delete-file I/O for provably irrelevant tasks                                                              |
+| Shared read lock for an unchanged bound predicate                  | Serializing parallel tasks merely to reuse a binding                                                                        |
+| Generation checks at row-group boundaries                          | Rebinding and rebuilding on every batch; a changed publication makes one pass over remaining groups and one decoder rebuild |
+| Combined planned/runtime Arrow predicate                           | Decoding shared predicate columns twice                                                                                     |
+| Whole-file proof that every row matches                            | Re-evaluating a redundant runtime row filter                                                                                |
+| Shared tasks, lazy task cloning and in-place ordering permutation  | Eager copies of all tasks during ordinary execution and additional complete task copies during sorting                      |
+| Best-first files and descending row groups for MAX/descending TopK | Reading worse candidates before a useful bound exists; unknown bounds retain conservative handling                          |
+| Original join verifies surviving Iceberg rows directly             | A second decoded-batch membership lookup and payload-array filtering                                                        |
+| Compact single-column equality-delete sets above eight entries     | Building one expression per delete row; supported larger sets compile membership once and use hash lookup per data row      |
+
+These changes reduce specific work; they do not establish a wall-clock speedup.
+Best-first task ordering is a preferred scheduling order. Concurrent file reads
+can finish in a different order, and a useful bound can arrive after other files
+are already in flight. Equal bounds retain file order; known splits within a
+file may be visited in reverse for descending bounds. Unknown bounds retain
+task order. Execution with runtime ordering still clones the task list before
+applying the lightweight ranking and in-place permutation. No allocation or
+scheduling benefit beyond these source-level properties has been established.
+See [runtime_stream.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_stream.rs),
+[predicate_visitor.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/predicate_visitor.rs)
+and [caching_delete_file_loader.rs](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/caching_delete_file_loader.rs).
+
+## Metrics and comparison
+
+`bytes_scanned` counts ranged reader I/O, including metadata and deletes; it is
+not a measure of physical disk traffic after operating-system caching. Spark
+also receives `iceberg_runtime_predicate_tasks`, `iceberg_runtime_file_tasks_pruned`,
+`iceberg_runtime_row_groups_pruned`, `iceberg_runtime_predicate_refreshes`,
+`iceberg_runtime_row_groups_pruned_live` and `iceberg_runtime_decoder_rebuilds`.
+Row-group counters attribute only additional runtime pruning, excluding groups
+already removed by splits, planned filters or deletes. The live count is a
+subset of the total. Scan compute time measures active polling/adaptation;
+producer metrics measure their own operators. Poll, error and drop paths report
+available metric deltas without retaining producer state.
+
+The committed harness captures decoder rebuilds along with the existing scan
+counters. Missing counters are reported as unavailable, and reader-byte ratios
+require the same nonempty native scan metadata locations, including repeated
+tables. Saved plans are still needed to inspect projection and fallback scope.
+Driver planning time includes SQL analysis and physical planning. It does not
+isolate manifest-statistics collection, cache hit/miss cost, retained heap, time
+to first bound or files in flight at publication. Those measurements remain
+required before changing statistics gates, binding caches or concurrency.
+
+Compare the existing and rewritten runtime implementations with the
+[historical detailed benchmark harness](https://github.com/unikdahal/datafusion-comet/blob/a591c3700e2fa4094500eee53ecc8f40ad3e8cce/benchmarks/iceberg-runtime-pruning-detailed/README.md). Its revision defines
+shared generated fixtures, a plain Spark correctness oracle, four balanced rounds
+in fresh JVMs, paired timing intervals, separate planning/execution timings and
+reader counters. Six suites cover sorted selective queries, unsorted/control
+queries, position/equality deletes, schema evolution, TPC-H and deterministic fuzz
+cases, with pinned build revisions and identical settings. Wall-clock distributions,
+reader bytes and decoder rebuilds must be considered together; local CI timings
+do not establish object-store latency improvements.
+
+This historical campaign is distinct from the committed
+[matched smoke and extended harness](../benchmarks/iceberg-runtime-pruning/README.md).
+Preserve original campaign artifacts, query catalogs, seeds, data hashes,
+resolved implementations, oracle records and raw samples when citing results.
+For example, [run 37865998293](https://github.com/unikdahal/datafusion-comet/actions/runs/37865998293)
+passed a targeted 15-query campaign for candidate
+`007080ae028edddf3ca2e360c3d38cf17504edbd` against Apache main
+`412468e2817207eff0c1907d1c4aac8c3f06680d`. It does not validate this revision.
+The later [full campaign 37943700291](https://github.com/unikdahal/datafusion-comet/actions/runs/37943700291)
+failed validation and cannot serve as a complete correctness or performance
+verdict. Query/test totals and speedups require revision-associated raw evidence;
+neither a prior campaign nor a smaller new run proves a final-branch total.
+
+## Limits and regression coverage
+
+Comet's attachment is task-local; it does not share domains across Spark
+exchanges. Floating keys, general computed keys and fallible expressions receive
+no reader attachment. Iceberg membership translation accepts at most 1,024
+plain literals; larger unsupported shapes fail open. Existing rows, pages and
+groups are never recovered after pruning. Refresh depends on row-group filtering
+being enabled. `TableScan::to_arrow()` does not accept a runtime provider; Comet
+supplies one directly to `ArrowReaderBuilder`. The live decoder currently uses
+the pinned Parquet 59 backport.
+
+Regression suites cover nulls, NaNs, signed zeros, schema evolution, dictionary
+columns, missing field IDs, splits, deletes, page selections, concurrent
+publications, failing expressions, resets and stream cancellation. Tests live in
+[Comet's dynamic-filter suite](../native/core/src/execution/operators/dynamic_filter/)
+and [Iceberg's reader suite](https://github.com/unikdahal/iceberg-rust/blob/5aefebcb156216fe810ef54b499219fc0e71026d/crates/iceberg/src/arrow/reader/runtime_predicate_tests.rs).
+
+Validation is layered: JVM/native eligibility, predicate translation, physical
+schema binding, reader pruning, exact Spark comparisons, execution lifecycle,
+concurrency/resource behavior and end-to-end performance have separate verdicts.
+The fast synthetic harness workflow checks benchmark evidence completeness
+without Spark; it does not replace reader, native or Spark integration suites.
+All build, test, formatting and benchmark validation for this hardening work runs
+in GitHub Actions. [Base-revision run 38027288909](https://github.com/unikdahal/datafusion-comet/actions/runs/38027288909)
+failed Preflight and skipped the build/integration jobs. Those skipped jobs are
+unvalidated. Every final report must identify its exact revisions, run URLs and
+passed, failed, skipped or unexecuted jobs rather than carrying forward totals.

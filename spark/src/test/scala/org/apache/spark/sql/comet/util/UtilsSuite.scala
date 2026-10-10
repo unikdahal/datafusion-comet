@@ -19,16 +19,489 @@
 
 package org.apache.spark.sql.comet.util
 
+import java.io.{ByteArrayOutputStream, DataOutputStream, IOException, OutputStream}
+import java.nio.ByteBuffer
+import java.nio.channels.Channels
+import java.nio.charset.StandardCharsets.UTF_8
+import java.util.Arrays
+
+import scala.jdk.CollectionConverters._
+
 import org.apache.arrow.c.CDataDictionaryProvider
+import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
+import org.apache.arrow.vector.{BaseVariableWidthVector, FieldVector, IntVector, ValueVector, VarBinaryVector, VarCharVector, VectorSchemaRoot}
+import org.apache.arrow.vector.complex.{ListVector, StructVector}
+import org.apache.arrow.vector.dictionary.{Dictionary, DictionaryProvider}
+import org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider
+import org.apache.arrow.vector.ipc.ArrowStreamWriter
+import org.apache.arrow.vector.ipc.message.ArrowFieldNode
+import org.apache.arrow.vector.types.pojo.{ArrowType, DictionaryEncoding, FieldType}
+import org.apache.arrow.vector.util.TransferPair
+import org.apache.spark.SparkEnv
+import org.apache.spark.io.CompressionCodec
 import org.apache.spark.sql.CometTestBase
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType, TimestampType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+import org.apache.spark.util.io.{ChunkedByteBuffer, ChunkedByteBufferOutputStream}
 
 import org.apache.comet.CometArrowAllocator
 import org.apache.comet.vector.CometVector
 
 class UtilsSuite extends CometTestBase {
+
+  test("batch IPC releases vectors when Arrow writer construction fails") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val indexType = new ArrowType.Int(32, true)
+    val encoding = new DictionaryEncoding(7L, false, indexType)
+    val struct = StructVector.empty("struct", allocator)
+    val indices =
+      struct.addOrGet("key", new FieldType(true, indexType, encoding), classOf[IntVector])
+    val values = new VarCharVector("values", allocator)
+    val provider = new MapDictionaryProvider(new Dictionary(values, encoding))
+    try {
+      values.allocateNew()
+      values.setSafe(0, "alpha".getBytes(UTF_8))
+      values.setSafe(1, "beta".getBytes(UTF_8))
+      values.setValueCount(2)
+      val dictionaryBytes = allocator.getAllocatedMemory
+      struct.allocateNew()
+      struct.setIndexDefined(0)
+      struct.setIndexDefined(1)
+      indices.set(0, 0)
+      indices.set(1, 1)
+      struct.setValueCount(2)
+      val batch =
+        new ColumnarBatch(Array[ColumnVector](CometVector.getVector(struct, provider)), 2)
+      val failure = intercept[IllegalArgumentException] {
+        // Provider combination currently only visits top-level dictionary fields. A nested
+        // dictionary therefore reaches the real writer constructor with no matching dictionary.
+        // Preserve that existing error while releasing the consumed batch and normalized root.
+        Utils.serializeBatches(Iterator(batch)).next()
+      }
+      assert(failure.getMessage.contains("Could not find dictionary with ID 7"))
+      assert(allocator.getAllocatedMemory == dictionaryBytes)
+      assert(values.getObject(1).toString == "beta")
+    } finally {
+      struct.close()
+      provider.close()
+      assert(allocator.getAllocatedMemory == 0L)
+      allocator.close()
+    }
+  }
+
+  test("batch IPC retains the write error when ending the failed stream also throws") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val vector = new VarCharVector("key", allocator)
+    val root = new VectorSchemaRoot(Arrays.asList[FieldVector](vector))
+    val writeError = new IOException("injected IPC write failure")
+    val out = new DataOutputStream(new OutputStream {
+      override def write(value: Int): Unit = throw writeError
+    })
+    try {
+      vector.allocateNew()
+      vector.setSafe(0, "key".getBytes(UTF_8))
+      root.setRowCount(1)
+      val failure = intercept[IOException](Utils.writeBatch(root, null, out))
+      assert(failure eq writeError)
+      assert(failure.getSuppressed.nonEmpty, "Ending IPC must fail on the same broken output")
+      assert(allocator.getAllocatedMemory == 0L)
+    } finally {
+      root.close()
+      out.close()
+      allocator.close()
+    }
+  }
+
+  test("batch IPC releases normalized vectors when dictionary serialization fails") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val indexType = new ArrowType.Int(32, true)
+    val encoding = new DictionaryEncoding(7L, false, indexType)
+    val indices = new IntVector("key", new FieldType(true, indexType, encoding), allocator)
+    val values = new VarCharVector("values", allocator)
+    val root = new VectorSchemaRoot(Arrays.asList[FieldVector](indices))
+    val writeError = new IOException("injected dictionary write failure")
+    val provider = new DictionaryProvider {
+      private var lookups = 0
+      override def getDictionaryIds: java.util.Set[java.lang.Long] =
+        java.util.Collections.singleton(java.lang.Long.valueOf(7L))
+      override def lookup(id: Long): Dictionary = {
+        lookups += 1
+        if (lookups == 1) new Dictionary(values, encoding) else throw writeError
+      }
+    }
+    val out = new DataOutputStream(new ByteArrayOutputStream)
+    try {
+      values.allocateNew()
+      values.setSafe(0, "value".getBytes(UTF_8))
+      values.setValueCount(1)
+      val dictionaryBytes = allocator.getAllocatedMemory
+      indices.allocateNew(1)
+      indices.set(0, 0)
+      root.setRowCount(1)
+      val failure = intercept[IOException](Utils.writeBatch(root, provider, out))
+      assert(failure eq writeError)
+      // The caller owns the dictionary. Only the batch indices and normalized copies are cleared.
+      assert(allocator.getAllocatedMemory == dictionaryBytes)
+      assert(values.getObject(0).toString == "value")
+    } finally {
+      root.close()
+      values.close()
+      out.close()
+      allocator.close()
+    }
+  }
+
+  test("offset normalization releases earlier and partially transferred columns on failure") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val first = new VarCharVector("first", allocator)
+    val transferError = new IOException("injected partial transfer failure")
+    val second =
+      new ListVector("second", allocator, FieldType.nullable(ArrowType.List.INSTANCE), null) {
+        override def getTransferPair(targetAllocator: BufferAllocator): TransferPair = {
+          val pair = super.getTransferPair(targetAllocator)
+          new TransferPair {
+            override def getTo: ValueVector = pair.getTo
+            override def transfer(): Unit = pair.transfer()
+            override def copyValueSafe(from: Int, to: Int): Unit = pair.copyValueSafe(from, to)
+            override def splitAndTransfer(start: Int, length: Int): Unit = {
+              pair.splitAndTransfer(start, length)
+              throw transferError
+            }
+          }
+        }
+      }
+    val secondValues = second
+      .addOrGetVector[IntVector](FieldType.nullable(new ArrowType.Int(32, true)))
+      .getVector
+    val root = new VectorSchemaRoot(Arrays.asList[FieldVector](first, second))
+    try {
+      first.allocateNew()
+      first.setSafe(0, "retained source".getBytes(UTF_8))
+      second.allocateNew()
+      val start = second.startNewValue(0)
+      secondValues.setSafe(start, 42)
+      second.endValue(0, 1)
+      root.setRowCount(1)
+      val sourceBytes = allocator.getAllocatedMemory
+      val buffers = root.getFieldVectors.asScala.flatMap(_.getFieldBuffers.asScala).toSeq
+      val refs = buffers.map(_.refCnt())
+      val failure = intercept[IOException](Utils.normalizeBatchOffsets(root))
+      assert(failure eq transferError)
+      assert(allocator.getAllocatedMemory == sourceBytes)
+      assert(buffers.map(_.refCnt()) == refs)
+      assert(first.getObject(0).toString == "retained source")
+      assert(secondValues.get(0) == 42)
+      assert(second.getObject(0).size() == 1)
+      root.clear()
+      assert(allocator.getAllocatedMemory == 0L)
+    } finally {
+      root.close()
+      allocator.close()
+    }
+  }
+
+  test("batch IPC round trips incompressible binary data across scratch chunks") {
+    val payload = new Array[Byte](1024 * 1024)
+    new java.util.Random(17).nextBytes(payload)
+    val vector = new VarBinaryVector("b", CometArrowAllocator)
+    val provider = new CDataDictionaryProvider
+    try {
+      vector.allocateNew()
+      vector.setSafe(0, payload)
+      vector.setNull(1)
+      vector.setValueCount(2)
+      val batch =
+        new ColumnarBatch(Array[ColumnVector](CometVector.getVector(vector, provider)), 2)
+      val (count, bytes) = Utils.serializeBatches(Iterator(batch)).next()
+      assert(count == 2)
+      assert(bytes.getChunks.length > 1, "The fixture must exercise multiple IPC chunks")
+      val decoded = Utils.decodeBatches(bytes, "multi-chunk-binary")
+      val output = decoded.next()
+      assert(Arrays.equals(output.column(0).getBinary(0), payload))
+      assert(output.column(0).isNullAt(1))
+      assert(!decoded.hasNext)
+    } finally {
+      vector.close()
+      provider.close()
+    }
+  }
+
+  test("broadcast transport normalizes sliced string and binary offsets with nulls") {
+    val values = Seq(
+      Some(""),
+      None,
+      Some("short"),
+      Some("long \u03bb" * 20),
+      Some("last"),
+      None,
+      Some("tail"),
+      Some("end"))
+
+    def slicedBuffer(serializeWithUtils: Boolean): ChunkedByteBuffer = {
+      val originals = Seq[BaseVariableWidthVector](
+        new VarCharVector("s", CometArrowAllocator),
+        new VarBinaryVector("b", CometArrowAllocator))
+      val sliced = Seq[BaseVariableWidthVector](
+        new VarCharVector("s", CometArrowAllocator),
+        new VarBinaryVector("b", CometArrowAllocator))
+      val root = new VectorSchemaRoot(Arrays.asList[FieldVector](sliced: _*))
+      try {
+        originals.zip(sliced).foreach { case (original, slice) =>
+          original.allocateNew()
+          (Seq.fill(8)(Some("unused prefix" * 20)) ++ values).zipWithIndex.foreach {
+            case (Some(value), row) => original.setSafe(row, value.getBytes(UTF_8))
+            case (None, row) => original.setNull(row)
+          }
+          original.setValueCount(16)
+          slice.loadFieldBuffers(
+            new ArrowFieldNode(8, 2),
+            Arrays.asList(
+              original.getValidityBuffer.slice(1, 1),
+              original.getOffsetBuffer.slice(8 * 4, 9 * 4),
+              original.getDataBuffer))
+          assert(slice.getOffsetBuffer.getInt(0) > 0)
+        }
+        root.setRowCount(8)
+        if (serializeWithUtils) {
+          val provider = new CDataDictionaryProvider
+          val columns = sliced.map(vector => CometVector.getVector(vector, provider))
+          val batch = new ColumnarBatch(columns.toArray[ColumnVector], 8)
+          Utils.serializeBatches(Iterator(batch)).next()._2
+        } else {
+          // External IPC retains its original offsets; the coalescer must normalize it too.
+          val output = new ChunkedByteBufferOutputStream(1024, ByteBuffer.allocate)
+          val codec = CompressionCodec.createCodec(SparkEnv.get.conf)
+          val compressed = new DataOutputStream(codec.compressedOutputStream(output))
+          val writer = new ArrowStreamWriter(root, null, Channels.newChannel(compressed))
+          try {
+            writer.start()
+            writer.writeBatch()
+          } finally {
+            writer.close()
+          }
+          output.toChunkedByteBuffer
+        }
+      } finally {
+        root.close()
+        originals.foreach(_.close())
+      }
+    }
+
+    Seq(false, true).foreach { serializeWithUtils =>
+      val input = Seq.fill(3)(slicedBuffer(serializeWithUtils))
+      if (serializeWithUtils) {
+        input.foreach { bytes =>
+          val decoded = Utils.decodeBatches(bytes, "compact-broadcast")
+          val batch = decoded.next()
+          (0 until batch.numCols()).foreach { column =>
+            val vector = batch.column(column).asInstanceOf[CometVector].getValueVector
+            assert(vector.getOffsetBuffer.getInt(0) == 0)
+            assert(vector.getDataBuffer.capacity() < 1024)
+          }
+          assert(!decoded.hasNext)
+        }
+      }
+      val (buffers, batchCount, rowCount) = Utils.coalesceBroadcastBatches(input.iterator)
+      assert(batchCount == 3)
+      assert(rowCount == 24)
+      val actual = buffers.iterator.flatMap { bytes =>
+        Utils.decodeBatches(bytes, "sliced-broadcast").flatMap { batch =>
+          (0 until batch.numRows()).map { row =>
+            val string =
+              if (batch.column(0).isNullAt(row)) None
+              else Some(batch.column(0).getUTF8String(row).toString)
+            val binary =
+              if (batch.column(1).isNullAt(row)) None
+              else Some(batch.column(1).getBinary(row).toSeq)
+            (string, binary)
+          }
+        }
+      }.toSeq
+      val expected =
+        Seq.fill(3)(values).flatten.map(value => (value, value.map(_.getBytes(UTF_8).toSeq)))
+      assert(actual == expected)
+    }
+  }
+
+  test("broadcast transport normalizes sliced lists and their string children") {
+    val expected = Seq(
+      Some(Seq(Some("λ"), None, Some(""))),
+      None,
+      Some(Seq.empty),
+      Some(Seq(Some("tail"))),
+      Some(Seq(None)),
+      Some(Seq(Some("last"))),
+      None,
+      Some(Seq(Some("end"))))
+
+    def buffer(serializeWithUtils: Boolean): ChunkedByteBuffer = {
+      val allocator = new RootAllocator(Long.MaxValue)
+      val original = ListVector.empty("list", allocator)
+      val sliced = ListVector.empty("list", allocator)
+      val childType = FieldType.nullable(ArrowType.Utf8.INSTANCE)
+      val originalValues = original.addOrGetVector[VarCharVector](childType).getVector
+      val slicedValues = sliced.addOrGetVector[VarCharVector](childType).getVector
+      val root = new VectorSchemaRoot(Arrays.asList[FieldVector](sliced))
+      val provider = new CDataDictionaryProvider
+      try {
+        original.allocateNew()
+        val rows = Seq.fill(8)(Some(Seq(Some("unused prefix" * 20)))) ++ expected
+        rows.zipWithIndex.foreach {
+          case (None, row) => original.setNull(row)
+          case (Some(values), row) =>
+            val start = original.startNewValue(row)
+            values.zipWithIndex.foreach {
+              case (Some(value), index) =>
+                originalValues.setSafe(start + index, value.getBytes(UTF_8))
+              case (None, index) => originalValues.setNull(start + index)
+            }
+            original.endValue(row, values.size)
+        }
+        original.setValueCount(rows.size)
+        slicedValues.loadFieldBuffers(
+          new ArrowFieldNode(
+            originalValues.getValueCount.toLong,
+            originalValues.getNullCount.toLong),
+          originalValues.getFieldBuffers)
+        sliced.loadFieldBuffers(
+          new ArrowFieldNode(8, 2),
+          Arrays.asList(
+            original.getValidityBuffer.slice(1, 1),
+            original.getOffsetBuffer.slice(8 * 4, 9 * 4)))
+        root.setRowCount(8)
+        assert(sliced.getOffsetBuffer.getInt(0) > 0)
+        val bytes = if (serializeWithUtils) {
+          val batch =
+            new ColumnarBatch(Array[ColumnVector](CometVector.getVector(sliced, provider)), 8)
+          Utils.serializeBatches(Iterator(batch)).next()._2
+        } else {
+          val output = new ChunkedByteBufferOutputStream(1024, ByteBuffer.allocate)
+          val codec = CompressionCodec.createCodec(SparkEnv.get.conf)
+          val out = new DataOutputStream(codec.compressedOutputStream(output))
+          val writer = new ArrowStreamWriter(root, null, Channels.newChannel(out))
+          try {
+            writer.start()
+            writer.writeBatch()
+          } finally {
+            writer.close()
+          }
+          output.toChunkedByteBuffer
+        }
+        bytes
+      } finally {
+        root.close()
+        original.close()
+        provider.close()
+        assert(allocator.getAllocatedMemory == 0L)
+        allocator.close()
+      }
+    }
+
+    Seq(false, true).foreach { serializeWithUtils =>
+      val input = Seq.fill(2)(buffer(serializeWithUtils))
+      val (buffers, batchCount, rowCount) = Utils.coalesceBroadcastBatches(input.iterator)
+      assert(batchCount == 2)
+      assert(rowCount == 16)
+      val actual = buffers.iterator.flatMap { bytes =>
+        Utils.decodeBatches(bytes, "sliced-list").flatMap { batch =>
+          val vector = batch.column(0).asInstanceOf[CometVector].getValueVector
+          val list = vector.asInstanceOf[ListVector]
+          assert(list.getOffsetBuffer.getInt(0) == 0)
+          assert(list.getDataVector.asInstanceOf[VarCharVector].getOffsetBuffer.getInt(0) == 0)
+          (0 until batch.numRows()).map { row =>
+            if (batch.column(0).isNullAt(row)) None
+            else {
+              val array = batch.column(0).getArray(row)
+              Some((0 until array.numElements()).map { index =>
+                if (array.isNullAt(index)) None else Some(array.getUTF8String(index).toString)
+              })
+            }
+          }
+        }
+      }.toSeq
+      assert(actual == expected ++ expected)
+    }
+  }
+
+  test("broadcast dictionary fallback preserves independent dictionaries and earlier batches") {
+    def buffer(value: String, dictionaryEncoded: Boolean): ChunkedByteBuffer = {
+      val allocator = new RootAllocator(Long.MaxValue)
+      val values = new VarCharVector("key", allocator)
+      val indexType = new ArrowType.Int(32, true)
+      val encoding = new DictionaryEncoding(7L, false, indexType)
+      val indices = new IntVector("key", new FieldType(true, indexType, encoding), allocator)
+      val provider = new MapDictionaryProvider(new Dictionary(values, encoding))
+      try {
+        values.allocateNew()
+        values.setSafe(0, value.getBytes(UTF_8))
+        values.setValueCount(1)
+        indices.allocateNew(1)
+        indices.set(0, 0)
+        indices.setValueCount(1)
+        val vector = if (dictionaryEncoded) indices else values
+        val batch =
+          new ColumnarBatch(Array[ColumnVector](CometVector.getVector(vector, provider)), 1)
+        Utils.serializeBatches(Iterator(batch)).next()._2
+      } finally {
+        indices.close()
+        provider.close()
+        assert(allocator.getAllocatedMemory == 0L)
+        allocator.close()
+      }
+    }
+
+    // The first buffer creates a target root. The dictionary buffer must release it and return
+    // all original buffers, including the last buffer whose dictionary reuses ID 7 differently.
+    val input = Seq(buffer("plain", false), buffer("alpha", true), buffer("beta", true))
+    val (buffers, batchCount, rowCount) = Utils.coalesceBroadcastBatches(input.iterator)
+    assert(batchCount == 0L)
+    assert(rowCount == 0L)
+    assert(buffers.length == input.length)
+    assert(buffers.zip(input).forall { case (actual, original) => actual eq original })
+    val values = buffers.iterator.flatMap { bytes =>
+      Utils.decodeBatches(bytes, "dictionary-fallback").flatMap { batch =>
+        (0 until batch.numRows()).map(row => batch.column(0).getUTF8String(row).toString)
+      }
+    }.toSeq
+    assert(values == Seq("plain", "alpha", "beta"))
+  }
+
+  test("broadcast coalescing preserves all DISTINCT string keys across batch boundaries") {
+    withSQLConf(
+      "spark.sql.adaptive.enabled" -> "false",
+      "spark.sql.shuffle.partitions" -> "4",
+      "spark.comet.expression.Cast.allowIncompatible" -> "true") {
+      val df = spark
+        .range(100000, 140000, 1, 4)
+        .selectExpr("concat('k', lpad(cast(id as string), 10, '0')) AS id")
+        .distinct()
+      val executed = df.queryExecution.executedPlan
+      val plan = executed
+        .collectFirst { case columnar: org.apache.spark.sql.comet.CometColumnarToRowExec =>
+          columnar.child
+        }
+        .getOrElse(fail(s"No native DISTINCT output: $executed"))
+      val buffers = plan
+        .executeColumnar()
+        .mapPartitions(iter => Utils.serializeBatches(iter))
+        .collect()
+        .map(_._2)
+      def keys(input: Iterator[ChunkedByteBuffer]): Seq[String] = {
+        input.flatMap { bytes =>
+          Utils.decodeBatches(bytes, "broadcast-test").flatMap { batch =>
+            (0 until batch.numRows()).map(row => batch.column(0).getUTF8String(row).toString)
+          }
+        }.toSeq
+      }
+      val original = keys(buffers.iterator)
+      val (coalesced, _, _) = Utils.coalesceBroadcastBatches(buffers.iterator)
+      val actual = keys(coalesced.iterator)
+      val expected = (100000 until 140000).map(id => f"k$id%010d")
+      assert(original.sorted == expected)
+      assert(actual.sorted == expected)
+    }
+  }
 
   test("serializeBatches preserves row count for a zero-column batch") {
     val numRows = 5

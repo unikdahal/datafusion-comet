@@ -62,7 +62,7 @@ import org.apache.comet.rules.CometExecRule
 import org.apache.comet.serde.{CometCollectBuffer, CometOperatorSerde, Compatible, OperatorOuterClass, QueryContextInterner, SupportLevel, Unsupported}
 import org.apache.comet.serde.OperatorOuterClass.{AggregateMode => CometAggregateMode, Operator}
 import org.apache.comet.serde.QueryPlanSerde
-import org.apache.comet.serde.QueryPlanSerde.{aggExprToProto, exprToProto, isStringCollationType, supportedSortType}
+import org.apache.comet.serde.QueryPlanSerde.{aggExprToProto, exprToProto, hasCharPruningKey, isStringCollationType, supportedSortType}
 import org.apache.comet.serde.operator.CometSink
 import org.apache.comet.shims.MergeRowsMetricsShim
 
@@ -2359,6 +2359,9 @@ trait CometBaseAggregate[T <: BaseAggregateExec] extends CometOperatorSerde[T] {
         val hashAggBuilder = OperatorOuterClass.HashAggregate.newBuilder()
         hashAggBuilder.addAllGroupingExprs(groupingExprs.map(_.get).asJava)
         hashAggBuilder.addAllAggExprs(aggExprs.map(_.get).asJava)
+        hashAggBuilder.setDynamicFilterEnabled(
+          CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.get(aggregate.conf) &&
+            !hasCharPruningKey(child, aggregateExpressions.flatMap(_.aggregateFunction.children)))
         hashAggBuilder.setModeValue(mode.getNumber)
         hashAggBuilder.setOrderedByGroupingKeys(orderedByGroupingKeys)
 
@@ -2875,7 +2878,10 @@ trait CometHashJoin {
         .setBuildSide(if (join.buildSide == BuildLeft) OperatorOuterClass.BuildSide.BuildLeft
         else OperatorOuterClass.BuildSide.BuildRight)
         .setNullAwareAntiJoin(isNullAwareAntiJoin)
-        .setDynamicFilterEnabled(CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get(join.conf))
+        .setDynamicFilterEnabled(
+          CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.get(join.conf) &&
+            !hasCharPruningKey(join.left, join.leftKeys) &&
+            !hasCharPruningKey(join.right, join.rightKeys))
       condition.foreach(joinBuilder.setCondition)
       Some(builder.setHashJoin(joinBuilder).build())
     } else {

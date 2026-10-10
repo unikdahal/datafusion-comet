@@ -1,0 +1,76 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+
+
+name: Fork Runtime Pruning Harness Checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['adaptive-ci/**', 'adaptive-bench/**', 'hardening/**']
+    paths:
+      - 'benchmarks/iceberg-runtime-pruning/**'
+      - '.github/workflows/iceberg_runtime_pruning_harness.yml'
+      - '.github/workflows/iceberg_adaptive_benchmark.yml'
+      - 'docs/runtime-pruning-design.md'
+  pull_request:
+    paths:
+      - 'benchmarks/iceberg-runtime-pruning/**'
+      - '.github/workflows/iceberg_runtime_pruning_harness.yml'
+      - '.github/workflows/iceberg_adaptive_benchmark.yml'
+      - 'docs/runtime-pruning-design.md'
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-fixtures:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Validate complete and incomplete synthetic JSONL experiments
+        run: python3 -m unittest discover -s benchmarks/iceberg-runtime-pruning -p 'test_*.py' -v
+      - name: Compile harness scripts without importing Spark
+        run: python3 -m compileall -q benchmarks/iceberg-runtime-pruning
+
+  benchmark-docs:
+    if: github.repository == 'unikdahal/datafusion-comet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Capture required Markdown formatting as an artifact
+        run: |
+          npm install -g prettier
+          prettier --write docs/runtime-pruning-design.md benchmarks/iceberg-runtime-pruning/README.md
+          git diff -- docs/runtime-pruning-design.md benchmarks/iceberg-runtime-pruning/README.md > benchmark-docs-format.patch
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: benchmark-docs-format
+          path: benchmark-docs-format.patch
+      - name: Require formatted benchmark documentation
+        run: test ! -s benchmark-docs-format.patch

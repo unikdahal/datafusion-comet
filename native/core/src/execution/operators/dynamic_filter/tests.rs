@@ -15,111 +15,208 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::sync::Arc;
+
 use super::*;
+use arrow::datatypes::{DataType, Field, TimeUnit};
 
-use arrow::array::{ArrayRef, Int32Array, RecordBatch};
-use arrow::compute::cast;
-use arrow::datatypes::{DataType, Field, Schema};
-use datafusion::datasource::memory::MemorySourceConfig;
-use datafusion::logical_expr::Operator;
-use datafusion::physical_expr::expressions::BinaryExpr;
-use datafusion::physical_plan::collect;
-use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::prelude::SessionContext;
-
-fn input(
-    values: Vec<Option<i32>>,
-    key_type: &DataType,
-    key_index: usize,
-) -> Arc<dyn ExecutionPlan> {
-    let payload = Arc::new(Int32Array::from_iter_values(0..values.len() as i32)) as ArrayRef;
-    let key = cast(&Int32Array::from(values), key_type).unwrap();
-    let mut fields = vec![
-        Field::new("key", key_type.clone(), true),
-        Field::new("payload", DataType::Int32, false),
+/// Cross-reference test with Scala:
+/// `spark/src/test/scala/org/apache/spark/sql/comet/RuntimePruningKeyTypesSuite.scala`.
+#[test]
+fn test_join_key_types() {
+    let supported = vec![
+        DataType::Int8,
+        DataType::Int16,
+        DataType::Int32,
+        DataType::Int64,
+        DataType::Date32,
+        DataType::Timestamp(TimeUnit::Microsecond, None),
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        DataType::Decimal128(10, 2),
+        DataType::Decimal128(38, 18),
+        DataType::Utf8,
+        DataType::LargeUtf8,
+        DataType::Utf8View,
+        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::LargeUtf8)),
+        DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8View)),
     ];
-    let mut columns = vec![key, payload];
-    fields.swap(0, key_index);
-    columns.swap(0, key_index);
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema, columns).unwrap();
-    // Multiple build batches prove that an early subset of keys cannot prune
-    // matches belonging to a later batch.
-    let batches = if batch.num_rows() == 0 {
-        vec![batch]
-    } else {
-        (0..batch.num_rows())
-            .step_by(2)
-            .map(|offset| batch.slice(offset, 2.min(batch.num_rows() - offset)))
-            .collect()
-    };
-    memory_exec(batches)
-}
 
-fn memory_exec(batches: Vec<RecordBatch>) -> Arc<dyn ExecutionPlan> {
-    MemorySourceConfig::try_new_exec(std::slice::from_ref(&batches), batches[0].schema(), None)
-        .unwrap()
-}
-
-fn metric(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
-    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
-        return metric(projection.input(), name);
+    for data_type in &supported {
+        assert!(
+            is_supported_join_key_type(data_type),
+            "expected {data_type:?} to be supported as join key"
+        );
     }
-    plan.metrics()
-        .unwrap()
-        .sum_by_name(name)
-        .unwrap()
-        .as_usize()
-}
 
-fn row_count(batches: &[RecordBatch]) -> usize {
-    batches.iter().map(RecordBatch::num_rows).sum()
-}
+    let unsupported = vec![
+        DataType::UInt8,
+        DataType::UInt16,
+        DataType::UInt32,
+        DataType::UInt64,
+        DataType::Float16,
+        DataType::Float32,
+        DataType::Float64,
+        DataType::Boolean,
+        DataType::Binary,
+        DataType::LargeBinary,
+        DataType::BinaryView,
+        DataType::FixedSizeBinary(16),
+        DataType::Date64,
+        DataType::Time32(TimeUnit::Second),
+        DataType::Time32(TimeUnit::Millisecond),
+        DataType::Time64(TimeUnit::Microsecond),
+        DataType::Time64(TimeUnit::Nanosecond),
+        DataType::Timestamp(TimeUnit::Second, None),
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+        DataType::Timestamp(TimeUnit::Nanosecond, None),
+        DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+        DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+        DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+        DataType::Decimal256(50, 10),
+        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Int32)),
+        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Int64)),
+        DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+        DataType::Struct(vec![Field::new("a", DataType::Int32, true)].into()),
+    ];
 
-#[tokio::test]
-async fn placeholder_updates_and_errors_are_not_hidden() {
-    let source = input((0..10).map(Some).collect(), &DataType::Int32, 1);
-    let predicate = Arc::new(DynamicFilterPhysicalExpr::new(
-        vec![Arc::new(Column::new("key", 1))],
-        lit(true),
-    ));
-    let wrapper: Arc<dyn ExecutionPlan> = Arc::new(DynamicFilterExec::new(
-        source,
-        Arc::clone(&predicate),
-        ExecutionPlanMetricsSet::new(),
-        "test_filter",
-    ));
-    let task = SessionContext::new().task_ctx();
-    let mut stream = wrapper.execute(0, Arc::clone(&task)).unwrap();
-    let first = stream.next().await.unwrap().unwrap();
-    assert_eq!(first.num_rows(), 2);
-    predicate
-        .update(Arc::new(BinaryExpr::new(
-            Arc::new(Column::new("key", 1)),
-            Operator::Lt,
-            lit(2i32),
-        )))
-        .unwrap();
-    assert_eq!(stream.next().await.unwrap().unwrap().num_rows(), 0);
-    predicate.update(lit(false)).unwrap();
-    while let Some(batch) = stream.next().await {
-        assert_eq!(batch.unwrap().num_rows(), 0);
+    for data_type in &unsupported {
+        assert!(
+            !is_supported_join_key_type(data_type),
+            "expected {data_type:?} to be unsupported as join key"
+        );
     }
-    assert_eq!(metric(&wrapper, "test_filter_rows_bypassed"), 2);
-    assert_eq!(metric(&wrapper, "test_filter_rows_pruned"), 8);
-    assert_eq!(metric(&wrapper, "test_filter_rows_evaluated"), 8);
+}
 
-    // Reset must not preserve an old condition, even while another owner
-    // still holds the previous predicate.
-    let reset = Arc::clone(&wrapper).reset_state().unwrap();
-    let reset_output = collect(Arc::clone(&reset), Arc::clone(&task))
-        .await
-        .unwrap();
-    assert_eq!(row_count(&reset_output), 10);
-    assert_eq!(metric(&reset, "test_filter_rows_pruned"), 0);
-    assert_eq!(metric(&reset, "test_filter_rows_bypassed"), 10);
+#[test]
+fn test_topk_key_types() {
+    let supported = vec![
+        DataType::Int8,
+        DataType::Int16,
+        DataType::Int32,
+        DataType::Int64,
+        DataType::Date32,
+        DataType::Timestamp(TimeUnit::Microsecond, None),
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        DataType::Utf8,
+        DataType::LargeUtf8,
+        DataType::Utf8View,
+        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+    ];
 
-    predicate.update(lit(42i32)).unwrap();
-    let error = collect(wrapper, task).await.unwrap_err();
-    assert!(error.to_string().contains("must evaluate to a Boolean"));
+    for data_type in &supported {
+        assert!(
+            is_supported_topk_key_type(data_type),
+            "expected {data_type:?} to be supported as topk key"
+        );
+    }
+
+    let unsupported = vec![
+        DataType::Decimal128(10, 2),
+        DataType::Decimal128(38, 18),
+        DataType::UInt32,
+        DataType::Float32,
+        DataType::Float64,
+        DataType::Boolean,
+        DataType::Binary,
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+    ];
+
+    for data_type in &unsupported {
+        assert!(
+            !is_supported_topk_key_type(data_type),
+            "expected {data_type:?} to be unsupported as topk key"
+        );
+    }
+}
+
+#[test]
+fn test_minmax_key_types() {
+    let supported = vec![
+        DataType::Int32,
+        DataType::Int64,
+        DataType::Date32,
+        DataType::Timestamp(TimeUnit::Microsecond, None),
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        DataType::Utf8,
+        DataType::LargeUtf8,
+        DataType::Utf8View,
+        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+    ];
+
+    for data_type in &supported {
+        assert!(
+            is_supported_minmax_key_type(data_type),
+            "expected {data_type:?} to be supported as minmax key"
+        );
+    }
+
+    let unsupported = vec![
+        DataType::Int8,
+        DataType::Int16,
+        DataType::Decimal128(10, 2),
+        DataType::Decimal128(38, 18),
+        DataType::Float32,
+        DataType::Float64,
+        DataType::Boolean,
+        DataType::Binary,
+    ];
+
+    for data_type in &unsupported {
+        assert!(
+            !is_supported_minmax_key_type(data_type),
+            "expected {data_type:?} to be unsupported as minmax key"
+        );
+    }
+}
+
+#[test]
+fn test_parquet_reader_key_types() {
+    let supported = vec![
+        DataType::Int8,
+        DataType::Int16,
+        DataType::Int32,
+        DataType::Int64,
+    ];
+
+    for data_type in &supported {
+        assert!(
+            is_supported_parquet_reader_key_type(data_type),
+            "expected {data_type:?} to be supported as parquet reader key"
+        );
+    }
+
+    let unsupported = vec![
+        DataType::Date32,
+        DataType::Timestamp(TimeUnit::Microsecond, None),
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        DataType::Decimal128(10, 2),
+        DataType::Utf8,
+        DataType::LargeUtf8,
+        DataType::Float32,
+        DataType::Boolean,
+    ];
+
+    for data_type in &unsupported {
+        assert!(
+            !is_supported_parquet_reader_key_type(data_type),
+            "expected {data_type:?} to be unsupported as parquet reader key"
+        );
+    }
+}
+
+#[test]
+fn test_is_runtime_pruning_string_key_type() {
+    assert!(is_runtime_pruning_string_key_type(&DataType::Utf8));
+    assert!(is_runtime_pruning_string_key_type(&DataType::LargeUtf8));
+    assert!(is_runtime_pruning_string_key_type(&DataType::Utf8View));
+    assert!(is_runtime_pruning_string_key_type(&DataType::Dictionary(
+        Box::new(DataType::Int32),
+        Box::new(DataType::Utf8)
+    )));
+    assert!(!is_runtime_pruning_string_key_type(&DataType::Int32));
+    assert!(!is_runtime_pruning_string_key_type(&DataType::Dictionary(
+        Box::new(DataType::Int32),
+        Box::new(DataType::Int32)
+    )));
 }

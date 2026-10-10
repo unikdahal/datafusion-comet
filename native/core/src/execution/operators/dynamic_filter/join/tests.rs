@@ -28,6 +28,7 @@ use crate::parquet::parquet_support::ObjectStoreBackend;
 use arrow::array::{ArrayRef, BooleanArray, Int32Array, Int64Array, Int8Array, RecordBatch};
 use arrow::compute::{cast, filter_record_batch};
 use arrow::datatypes::{Field, Schema};
+use datafusion::common::cast::as_int32_array;
 use datafusion::common::test_util::batches_to_sort_string;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::listing::PartitionedFile;
@@ -128,10 +129,10 @@ fn metric(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
     if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
         return metric(projection.input(), name);
     }
-    plan.metrics()
-        .unwrap()
+    let metrics = plan.metrics().unwrap();
+    metrics
         .sum_by_name(name)
-        .unwrap()
+        .unwrap_or_else(|| panic!("missing metric {name} in {metrics:?}"))
         .as_usize()
 }
 
@@ -276,10 +277,10 @@ async fn completed_filter_evaluates_only_the_shared_probe_key() {
         batches_to_sort_string(&expected)
     );
 
-    // Inspect the actual build-generated bounds AND hash-membership expression. Its key
-    // remains at index 17 here, so the consumer must also remap every nested reference.
+    // Inspect the actual build-generated bounds AND membership expression: an IN list for
+    // this 1024-key build side, a hash lookup for larger ones. Its key remains at index 17
+    // here, so the consumer must also remap every nested reference.
     let completed = predicate.current().unwrap();
-    assert!(completed.to_string().contains("hash_lookup"));
     assert!(completed.to_string().contains("AND"));
     predicate
         .update(Arc::new(AssertKeyOnlyBatch {
@@ -397,6 +398,79 @@ fn assert_skipped(join: HashJoinExec, config: &ConfigOptions) {
         .is_empty());
 }
 
+#[tokio::test]
+async fn semi_joins_are_filtered_without_changing_results() {
+    let session = SessionContext::new();
+    let config = ConfigOptions::default();
+    for join_type in [JoinType::LeftSemi, JoinType::RightSemi] {
+        let build = input(
+            vec![Some(-5), Some(20), Some(20), Some(90)],
+            &DataType::Int32,
+            1,
+        );
+        let probe = input(
+            (-100..=100).map(Some).chain([None]).collect(),
+            &DataType::Int32,
+            0,
+        );
+        let plain: Arc<dyn ExecutionPlan> = Arc::new(
+            join(build, probe, false)
+                .downcast_ref::<HashJoinExec>()
+                .unwrap()
+                .builder()
+                .with_type(join_type)
+                .build()
+                .unwrap(),
+        );
+        let attached =
+            PhysicalPlanner::apply_join_dynamic_filter(Arc::clone(&plain), true, &config).unwrap();
+        assert!(
+            attached.is::<DynamicFilterJoinExec>(),
+            "{join_type} must be filtered"
+        );
+        let expected = collect(plain, session.task_ctx()).await.unwrap();
+        let actual = collect(Arc::clone(&attached), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(
+            batches_to_sort_string(&actual),
+            batches_to_sort_string(&expected)
+        );
+        assert!(metric(&attached, "dynamic_filter_join_rows_pruned") >= 195);
+    }
+}
+
+#[tokio::test]
+async fn small_build_sides_publish_an_in_list_and_larger_ones_a_hash_lookup() {
+    let session = SessionContext::new();
+    let plan = |keys: Vec<i64>| {
+        let build: ArrayRef = Arc::new(Int64Array::from(keys));
+        let probe: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        single_key_join(build, probe, PartitionMode::CollectLeft)
+    };
+    for (keys, expect_list) in [
+        (vec![1, 2], true),
+        ((0..100_000).collect::<Vec<i64>>(), false),
+    ] {
+        let join = plan(keys);
+        let wrapper =
+            DynamicFilterJoinExec::new(&join, session.copied_config().options().as_ref().clone())
+                .unwrap();
+        let producer = wrapper.build_runtime_join().unwrap();
+        let filter = produced_join_filter(&producer.join);
+        let mut stream = wrapper
+            .execute_runtime_join(producer.join, 0, session.task_ctx())
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let published = filter.current().unwrap().to_string();
+        assert_eq!(
+            !published.contains("hash_lookup"),
+            expect_list,
+            "unexpected filter {published}"
+        );
+    }
+}
+
 #[test]
 fn skips_unsupported_joins_and_session_disables() {
     let default = ConfigOptions::default();
@@ -404,8 +478,6 @@ fn skips_unsupported_joins_and_session_disables() {
         JoinType::Left,
         JoinType::Right,
         JoinType::Full,
-        JoinType::LeftSemi,
-        JoinType::RightSemi,
         JoinType::LeftAnti,
         JoinType::RightAnti,
         JoinType::LeftMark,
@@ -463,12 +535,7 @@ fn skips_unsupported_joins_and_session_disables() {
 
 #[test]
 fn skips_unsupported_keys_and_multiple_native_partitions() {
-    for key_type in [
-        DataType::Float32,
-        DataType::Float64,
-        DataType::Utf8,
-        DataType::Decimal128(10, 0),
-    ] {
+    for key_type in [DataType::Float32, DataType::Float64, DataType::Utf8] {
         let plan = join(
             input(vec![Some(10)], &key_type, 1),
             input(vec![Some(10)], &key_type, 0),
@@ -1057,6 +1124,96 @@ async fn run_parquet_join(values: Vec<i32>, enabled: bool) -> (usize, usize, usi
 }
 
 #[tokio::test]
+async fn direct_parquet_consumer_reset_detaches_old_reader_domain() {
+    fn only_key(output: &[RecordBatch]) -> i32 {
+        assert_eq!(row_count(output), 1);
+        let batch = output.iter().find(|batch| batch.num_rows() != 0).unwrap();
+        as_int32_array(batch.column(0).as_ref()).unwrap().value(0)
+    }
+
+    for row_filter in [false, true] {
+        let mut config = SessionConfig::new()
+            .with_target_partitions(1)
+            .with_parquet_page_index_pruning(false);
+        config.options_mut().execution.parquet.pushdown_filters = row_filter;
+        let session = Arc::new(SessionContext::new_with_config(config));
+        let (_file, scan) = parquet_probe((0..400).collect(), &session, 100);
+        let join = single_key_join_plans(
+            two_batch_build(),
+            filtered_probe(&scan),
+            PartitionMode::Partitioned,
+        );
+        let wrapper =
+            DynamicFilterJoinExec::new(&join, session.copied_config().options().as_ref().clone())
+                .unwrap();
+        let runtime = wrapper.build_runtime_join().unwrap();
+        assert!(runtime.reader_filter_attached);
+        let consumer = Arc::clone(runtime.join.right());
+        let filter = consumer.children()[0]
+            .downcast_ref::<CometFilterExec>()
+            .unwrap();
+        let reader = Arc::new(
+            filter
+                .input()
+                .downcast_ref::<DataSourceExec>()
+                .unwrap()
+                .clone(),
+        );
+        let old_predicate = produced_join_filter(&runtime.join);
+        let domain = |key| {
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("key", 0)),
+                Operator::Eq,
+                lit(key),
+            )) as Arc<dyn PhysicalExpr>
+        };
+        old_predicate.update(domain(5_i32)).unwrap();
+        let output = collect(Arc::clone(&consumer), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(only_key(&output), 5);
+        assert!(pruning_metric(&reader, "row_groups_pruned_statistics") > 0);
+
+        // Refresh child queues first, as reset_plan_states does bottom-up.
+        // DataSource reset retains the reader expression, so the regression
+        // isolates stale pruning from an exhausted file queue.
+        let input = datafusion::physical_plan::execution_plan::reset_plan_states(Arc::clone(
+            consumer.children()[0],
+        ))
+        .unwrap();
+        let consumer = consumer
+            .replace_children(
+                vec![input],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap();
+        // Reset the actual attached consumer, keeping its old producer and plan
+        // alive. A new domain in a different row group must survive the reader.
+        let reset = consumer.reset_state().unwrap();
+        reset
+            .apply_expressions(&mut |expr| {
+                expr.downcast_ref::<DynamicFilterPhysicalExpr>()
+                    .unwrap()
+                    .update(domain(250_i32))?;
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        let output = collect(Arc::clone(&reset), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(only_key(&output), 250);
+        // Reset must not clear shared state in the original reader/producer.
+        assert!(old_predicate.current().unwrap().eq(&domain(5_i32)));
+        let (_, source) = reader.downcast_to_file_source::<ParquetSource>().unwrap();
+        let filter = source.filter().unwrap();
+        assert_eq!(
+            find_dynamic_filter(&filter).unwrap().expression_id(),
+            old_predicate.expression_id(),
+        );
+    }
+}
+
+#[tokio::test]
 async fn broadcast_filter_reaches_parquet_reader_after_complete_build() {
     let mut config = SessionConfig::new()
         .with_target_partitions(1)
@@ -1562,5 +1719,615 @@ fn wrapper_preserves_join_statistics_and_distribution() {
                 vec![]
             }
         );
+    }
+}
+
+#[tokio::test]
+async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
+    use std::collections::HashMap;
+
+    use iceberg::scan::FileScanTask;
+    use iceberg::spec::{
+        DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
+    };
+
+    let schema = Arc::new(
+        IcebergSchema::builder()
+            .with_fields(vec![
+                NestedField::optional(1, "key", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(2, "payload", Type::Primitive(PrimitiveType::Int)).into(),
+            ])
+            .build()
+            .unwrap(),
+    );
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let physical_schema = Arc::new(Schema::new(
+        ["key", "payload"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Field::new(name, DataType::Int32, true).with_metadata(HashMap::from([(
+                    parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+                    (index + 1).to_string(),
+                )]))
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&physical_schema),
+        vec![
+            Arc::new(Int32Array::from(vec![
+                Some(99),
+                Some(100),
+                Some(101),
+                Some(102),
+                Some(103),
+                Some(103),
+                None,
+            ])),
+            Arc::new(Int32Array::from_iter_values(0..7)),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(file.reopen().unwrap(), physical_schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let task = FileScanTask::builder()
+        .with_file_size_in_bytes(file.as_file().metadata().unwrap().len())
+        .with_start(0)
+        .with_length(0)
+        .with_data_file_path(file.path().to_string_lossy().into_owned())
+        .with_data_file_format(DataFileFormat::Parquet)
+        .with_schema(schema)
+        .with_project_field_ids(vec![1, 2])
+        .with_case_sensitive(false)
+        .build()
+        .unwrap();
+    let probe: Arc<dyn ExecutionPlan> = Arc::new(
+        crate::execution::operators::IcebergScanExec::new(
+            file.path().to_string_lossy().into_owned(),
+            Arc::new(Schema::new(vec![
+                Field::new("key", DataType::Int32, true),
+                Field::new("payload", DataType::Int32, true),
+            ])),
+            Default::default(),
+            String::new(),
+            vec![task],
+            1,
+        )
+        .unwrap(),
+    );
+    let build = input(vec![Some(100), Some(103), Some(103)], &DataType::Int32, 1);
+    let plain = join(Arc::clone(&build), Arc::clone(&probe), false);
+    let plan = join(build, probe, false);
+    let wrapper = DynamicFilterJoinExec::try_new(
+        plan.downcast_ref::<HashJoinExec>().unwrap(),
+        &ConfigOptions::default(),
+    )
+    .unwrap()
+    .unwrap();
+    let runtime = wrapper.build_runtime_join().unwrap();
+    assert!(runtime.reader_filter_attached);
+    let consumer = runtime
+        .join
+        .right()
+        .downcast_ref::<super::super::consumer::ReaderFilterConsumerExec>()
+        .unwrap();
+    assert!(consumer
+        .input
+        .is::<crate::execution::operators::IcebergScanExec>());
+    let reader = Arc::clone(&consumer.input);
+    let visible_consumer = Arc::clone(runtime.join.right());
+    let session = SessionContext::new();
+    let expected = collect(plain, session.task_ctx()).await.unwrap();
+    let before = reader.metrics().unwrap().output_rows().unwrap();
+    // Check actual reader adoption, not only the wrapper's attachment counter.
+    let actual = collect(
+        Arc::new(runtime.join) as Arc<dyn ExecutionPlan>,
+        session.task_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(metric(&reader, "iceberg_runtime_predicate_tasks"), 1);
+    assert_eq!(reader.metrics().unwrap().output_rows().unwrap() - before, 3);
+    // A direct reset must detach the old reader restriction as well as the
+    // producer's discovery expression, even if the old join is still owned.
+    let reset = visible_consumer.reset_state().unwrap();
+    let reset_output = collect(Arc::clone(&reset), session.task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(row_count(&reset_output), 7);
+    // Reattach a disjoint domain to the reset reader. Its old {100, 103}
+    // restriction must not survive alongside the new provider.
+    let predicate = Arc::new(DynamicFilterPhysicalExpr::new(
+        vec![Arc::new(Column::new("key", 0))],
+        lit(true),
+    ));
+    predicate
+        .update(Arc::new(BinaryExpr::new(
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("key", 0)),
+                Operator::GtEq,
+                lit(99_i32),
+            )),
+            Operator::And,
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("key", 0)),
+                Operator::LtEq,
+                lit(99_i32),
+            )),
+        )))
+        .unwrap();
+    let reattached =
+        super::super::iceberg_reader::try_attach_iceberg_join_filter(&reset, predicate)
+            .unwrap()
+            .unwrap();
+    let reset_output = collect(reattached, session.task_ctx()).await.unwrap();
+    assert_eq!(row_count(&reset_output), 1);
+    let batch = reset_output
+        .iter()
+        .find(|batch| batch.num_rows() != 0)
+        .unwrap();
+    assert_eq!(
+        as_int32_array(batch.column(0).as_ref()).unwrap().value(0),
+        99
+    );
+    assert_eq!(
+        batches_to_sort_string(&actual),
+        batches_to_sort_string(&expected)
+    );
+    let filtered: Arc<dyn ExecutionPlan> = Arc::new(wrapper);
+    let actual = collect(Arc::clone(&filtered), session.task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        row_count(&actual),
+        5,
+        "duplicates must retain join multiplicity"
+    );
+    assert_eq!(
+        batches_to_sort_string(&actual),
+        batches_to_sort_string(&expected)
+    );
+    assert_eq!(metric(&filtered, "dynamic_filter_join_filters_attached"), 1);
+    assert!(filtered.metrics().unwrap().iter().all(|metric| {
+        !metric
+            .value()
+            .name()
+            .starts_with("dynamic_filter_join_rows_")
+    }));
+}
+
+#[test]
+fn decimal_eligibility_requires_identical_precision_and_scale() {
+    for (build_type, probe_type, eligible) in [
+        (
+            DataType::Decimal128(18, 2),
+            DataType::Decimal128(18, 2),
+            true,
+        ),
+        (
+            DataType::Decimal128(10, 2),
+            DataType::Decimal128(18, 2),
+            false,
+        ),
+        (
+            DataType::Decimal128(18, 2),
+            DataType::Decimal128(18, 3),
+            false,
+        ),
+    ] {
+        let plan = join(
+            input(vec![Some(10)], &build_type, 1),
+            input(vec![Some(10)], &probe_type, 0),
+            false,
+        );
+        let attached = PhysicalPlanner::apply_join_dynamic_filter(
+            Arc::clone(&plan),
+            true,
+            &ConfigOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(attached.is::<DynamicFilterJoinExec>(), eligible);
+        if !eligible {
+            assert!(Arc::ptr_eq(&plan, &attached));
+        }
+    }
+}
+
+#[test]
+fn decimal_casts_on_either_input_are_ineligible_even_when_projected() {
+    use datafusion::physical_expr::expressions::CastExpr;
+
+    let decimal_type = DataType::Decimal128(18, 2);
+    for cast_build in [false, true] {
+        let source = input(vec![Some(10)], &DataType::Decimal128(10, 2), 0);
+        let direct = input(vec![Some(10)], &decimal_type, 0);
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let cast: Arc<dyn PhysicalExpr> =
+            Arc::new(CastExpr::new(Arc::clone(&key), decimal_type.clone(), None));
+        let (build, probe, on) = if cast_build {
+            (
+                Arc::clone(&source),
+                Arc::clone(&direct),
+                vec![(Arc::clone(&cast), key)],
+            )
+        } else {
+            (
+                Arc::clone(&direct),
+                Arc::clone(&source),
+                vec![(key, Arc::clone(&cast))],
+            )
+        };
+        assert_skipped(
+            single_key_join_plans(build, probe, PartitionMode::CollectLeft)
+                .builder()
+                .with_on(on)
+                .build()
+                .unwrap(),
+            &ConfigOptions::default(),
+        );
+        let projected: Arc<dyn ExecutionPlan> =
+            Arc::new(ProjectionExec::try_new(vec![(cast, "key".into())], source).unwrap());
+        let (build, probe) = if cast_build {
+            (projected, direct)
+        } else {
+            (direct, projected)
+        };
+        assert_skipped(
+            single_key_join_plans(build, probe, PartitionMode::CollectLeft),
+            &ConfigOptions::default(),
+        );
+    }
+}
+
+#[tokio::test]
+async fn decimal_batch_filter_prunes_bounds_and_membership_without_losing_nulls_or_duplicates() {
+    use arrow::array::Decimal128Array;
+
+    let session = SessionContext::new();
+    let maximum = 10_i128.pow(38) - 1;
+    for mode in [PartitionMode::Partitioned, PartitionMode::CollectLeft] {
+        for large_build in [false, true] {
+            let mut build_values = vec![Some(-125), Some(0), Some(125), Some(125), None];
+            if large_build {
+                // Exceed the IN-list limit to exercise DataFusion's exact hash membership.
+                build_values.extend((1000..2100).map(Some));
+            }
+            let probe_values = vec![
+                None,
+                Some(-126),
+                Some(-125),
+                Some(-1),
+                Some(0),
+                Some(1),
+                Some(125),
+                Some(126),
+                Some(maximum),
+            ];
+            let array = |values: Vec<Option<i128>>| -> ArrayRef {
+                Arc::new(
+                    Decimal128Array::from(values)
+                        .with_precision_and_scale(38, 2)
+                        .unwrap(),
+                )
+            };
+            let plain = single_key_join(array(build_values), array(probe_values), mode);
+            let expected = collect(
+                Arc::new(plain.builder().reset_state().build().unwrap()),
+                session.task_ctx(),
+            )
+            .await
+            .unwrap();
+            let attached: Arc<dyn ExecutionPlan> = Arc::new(
+                DynamicFilterJoinExec::try_new(&plain, &ConfigOptions::default())
+                    .unwrap()
+                    .unwrap(),
+            );
+            let output = collect(Arc::clone(&attached), session.task_ctx())
+                .await
+                .unwrap();
+            assert_eq!(
+                batches_to_sort_string(&output),
+                batches_to_sort_string(&expected)
+            );
+            assert_eq!(row_count(&output), 4);
+            assert_eq!(metric(&attached, "dynamic_filter_join_rows_pruned"), 6);
+        }
+    }
+}
+
+fn string_key_types() -> Vec<DataType> {
+    let mut types = vec![DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View];
+    for value_type in types.clone() {
+        types.push(DataType::Dictionary(
+            Box::new(DataType::Int32),
+            Box::new(value_type),
+        ));
+    }
+    types
+}
+
+fn string_input(values: Vec<Option<&str>>, key_type: &DataType) -> Arc<dyn ExecutionPlan> {
+    let key = cast(&arrow::array::StringArray::from(values), key_type).unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("key", key_type.clone(), true)]));
+    memory_exec(vec![RecordBatch::try_new(schema, vec![key]).unwrap()])
+}
+
+fn string_iceberg_probe(key_type: &DataType) -> (tempfile::NamedTempFile, Arc<dyn ExecutionPlan>) {
+    use std::collections::HashMap;
+
+    use iceberg::scan::FileScanTask;
+    use iceberg::spec::{
+        DataFileFormat, NestedField, PrimitiveType, Schema as IcebergSchema, Type,
+    };
+
+    let schema = Arc::new(
+        IcebergSchema::builder()
+            .with_fields(vec![NestedField::optional(
+                1,
+                "key",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into()])
+            .build()
+            .unwrap(),
+    );
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let physical_schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, true)
+        .with_metadata(HashMap::from([(
+            parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+            "1".to_string(),
+        )]))]));
+    let values = vec![
+        Some(""),
+        Some("abcdefghijklmnop-first"),
+        Some("abcdefghijklmnop-last"),
+        Some("é東京🙂"),
+        Some("é東京🙂"),
+        Some("z-outside"),
+        None,
+    ];
+    let batch = RecordBatch::try_new(
+        Arc::clone(&physical_schema),
+        vec![Arc::new(arrow::array::StringArray::from(values))],
+    )
+    .unwrap();
+    let properties = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(2))
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(file.reopen().unwrap(), physical_schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let task = FileScanTask::builder()
+        .with_file_size_in_bytes(file.as_file().metadata().unwrap().len())
+        .with_start(0)
+        .with_length(0)
+        .with_data_file_path(file.path().to_string_lossy().into_owned())
+        .with_data_file_format(DataFileFormat::Parquet)
+        .with_schema(schema)
+        .with_project_field_ids(vec![1])
+        .with_case_sensitive(false)
+        .build()
+        .unwrap();
+    let probe: Arc<dyn ExecutionPlan> = Arc::new(
+        crate::execution::operators::IcebergScanExec::new(
+            file.path().to_string_lossy().into_owned(),
+            Arc::new(Schema::new(vec![Field::new("key", key_type.clone(), true)])),
+            Default::default(),
+            String::new(),
+            vec![task],
+            1,
+        )
+        .unwrap(),
+    );
+    (file, probe)
+}
+
+#[test]
+fn string_eligibility_requires_matching_types_and_native_iceberg() {
+    for build_type in string_key_types() {
+        for probe_type in string_key_types() {
+            let (_file, probe) = string_iceberg_probe(&probe_type);
+            let scan = probe
+                .downcast_ref::<crate::execution::operators::IcebergScanExec>()
+                .unwrap();
+            assert_eq!(scan.runtime_predicate_field(0), Some((1, "key".into())));
+            let candidate = single_key_join_plans(
+                string_input(vec![Some("x")], &build_type),
+                probe,
+                PartitionMode::CollectLeft,
+            );
+            assert_eq!(
+                ineligible_reason(&candidate, &ConfigOptions::default())
+                    .unwrap()
+                    .is_none(),
+                build_type == probe_type,
+                "{build_type:?} / {probe_type:?}"
+            );
+        }
+        assert_skipped(
+            single_key_join_plans(
+                string_input(vec![Some("x")], &build_type),
+                string_input(vec![Some("x")], &build_type),
+                PartitionMode::CollectLeft,
+            ),
+            &ConfigOptions::default(),
+        );
+    }
+}
+
+#[test]
+fn string_annotations_and_visible_casts_disable_pruning() {
+    use std::collections::HashMap;
+
+    use datafusion::physical_expr::expressions::CastExpr;
+
+    for annotation in [
+        "__COLLATIONS",
+        "__CHAR_VARCHAR_TYPE_STRING",
+        "ARROW:extension:name",
+    ] {
+        let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, true)
+            .with_metadata(HashMap::from([(annotation.into(), "non-binary".into())]))]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::StringArray::from(vec!["x"]))],
+        )
+        .unwrap();
+        let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
+        assert_skipped(
+            single_key_join_plans(memory_exec(vec![batch]), probe, PartitionMode::CollectLeft),
+            &ConfigOptions::default(),
+        );
+    }
+    for (raw_type, eligible) in [
+        ("varchar(4)", true),
+        ("VARCHAR(24)", true),
+        ("char(4)", false),
+        ("CHAR(24)", false),
+    ] {
+        let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, true)
+            .with_metadata(HashMap::from([(
+                "__CHAR_VARCHAR_TYPE_STRING".into(),
+                raw_type.into(),
+            )]))]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::StringArray::from(vec!["x"]))],
+        )
+        .unwrap();
+        let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
+        let candidate =
+            single_key_join_plans(memory_exec(vec![batch]), probe, PartitionMode::CollectLeft);
+        assert_eq!(
+            ineligible_reason(&candidate, &ConfigOptions::default())
+                .unwrap()
+                .is_none(),
+            eligible,
+            "{raw_type}"
+        );
+    }
+    for cast_build in [false, true] {
+        let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
+        let build = string_input(vec![Some("x")], &DataType::Utf8);
+        let key: Arc<dyn PhysicalExpr> = Arc::new(Column::new("key", 0));
+        let cast: Arc<dyn PhysicalExpr> = Arc::new(CastExpr::new(key, DataType::Utf8, None));
+        let (build, probe) = if cast_build {
+            (
+                Arc::new(ProjectionExec::try_new(vec![(cast, "key".into())], build).unwrap())
+                    as Arc<dyn ExecutionPlan>,
+                probe,
+            )
+        } else {
+            (
+                build,
+                Arc::new(ProjectionExec::try_new(vec![(cast, "key".into())], probe).unwrap())
+                    as Arc<dyn ExecutionPlan>,
+            )
+        };
+        assert_skipped(
+            single_key_join_plans(build, probe, PartitionMode::CollectLeft),
+            &ConfigOptions::default(),
+        );
+    }
+}
+
+#[tokio::test]
+async fn string_reader_join_preserves_nulls_duplicates_and_binary_values() {
+    for key_type in string_key_types() {
+        let (_file, probe) = string_iceberg_probe(&key_type);
+        let build = string_input(
+            vec![
+                Some(""),
+                Some("abcdefghijklmnop-last"),
+                Some("é東京🙂"),
+                Some("é東京🙂"),
+                None,
+            ],
+            &key_type,
+        );
+        let plain = single_key_join_plans(
+            Arc::clone(&build),
+            Arc::clone(&probe),
+            PartitionMode::CollectLeft,
+        );
+        let candidate = single_key_join_plans(build, probe, PartitionMode::CollectLeft);
+        let wrapper = DynamicFilterJoinExec::try_new(&candidate, &ConfigOptions::default())
+            .unwrap()
+            .unwrap();
+        let runtime = wrapper.build_runtime_join().unwrap();
+        assert!(runtime.reader_filter_attached, "{key_type:?}");
+        let consumer = runtime
+            .join
+            .right()
+            .downcast_ref::<super::super::consumer::ReaderFilterConsumerExec>()
+            .unwrap();
+        let reader = Arc::clone(&consumer.input);
+        let session = SessionContext::new();
+        let expected = collect(Arc::new(plain), session.task_ctx()).await.unwrap();
+        let adopted = collect(Arc::new(runtime.join), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(metric(&reader, "iceberg_runtime_predicate_tasks"), 1);
+        assert_eq!(
+            batches_to_sort_string(&adopted),
+            batches_to_sort_string(&expected)
+        );
+        let filtered: Arc<dyn ExecutionPlan> = Arc::new(wrapper);
+        let actual = collect(Arc::clone(&filtered), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(row_count(&actual), 6, "{key_type:?}");
+        assert_eq!(
+            batches_to_sort_string(&actual),
+            batches_to_sort_string(&expected)
+        );
+        assert_eq!(metric(&filtered, "dynamic_filter_join_filters_attached"), 1);
+    }
+}
+
+#[tokio::test]
+async fn string_pruning_keeps_join_type_rules_and_empty_domains() {
+    let session = SessionContext::new();
+    for join_type in [
+        JoinType::Inner,
+        JoinType::LeftSemi,
+        JoinType::RightSemi,
+        JoinType::Left,
+        JoinType::Right,
+        JoinType::Full,
+        JoinType::LeftAnti,
+        JoinType::RightAnti,
+    ] {
+        for values in [vec![Some("é東京🙂"), None], vec![None], vec![]] {
+            let (_file, probe) = string_iceberg_probe(&DataType::Utf8);
+            let build = string_input(values, &DataType::Utf8);
+            let candidate = single_key_join_plans(build, probe, PartitionMode::CollectLeft)
+                .builder()
+                .with_type(join_type)
+                .build()
+                .unwrap();
+            let eligible = matches!(
+                join_type,
+                JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi
+            );
+            let wrapper =
+                DynamicFilterJoinExec::try_new(&candidate, &ConfigOptions::default()).unwrap();
+            assert_eq!(wrapper.is_some(), eligible, "{join_type}");
+            if let Some(wrapper) = wrapper {
+                let expected = collect(Arc::new(candidate), session.task_ctx())
+                    .await
+                    .unwrap();
+                let actual = collect(Arc::new(wrapper), session.task_ctx())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    batches_to_sort_string(&actual),
+                    batches_to_sort_string(&expected)
+                );
+            }
+        }
     }
 }

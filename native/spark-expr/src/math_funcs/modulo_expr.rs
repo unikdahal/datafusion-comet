@@ -27,6 +27,9 @@ use datafusion::common::{
 };
 use datafusion::config::ConfigOptions;
 use datafusion::execution::FunctionRegistry;
+use datafusion::logical_expr::{
+    ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 use datafusion::physical_expr::expressions::{lit, BinaryExpr};
 use datafusion::physical_expr::ScalarFunctionExpr;
 use datafusion::physical_expr_common::datum::{apply, apply_cmp_for_nested};
@@ -36,6 +39,47 @@ use datafusion::{
 };
 use std::cmp::max;
 use std::sync::Arc;
+
+/// A concrete identity for the built-in remainder kernel, including its error mode.
+/// Keep construction private so a same-named UDF cannot inherit its pruning contract.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct SparkModulo {
+    signature: Signature,
+    data_type: DataType,
+    fail_on_error: bool,
+}
+
+impl ScalarUDFImpl for SparkModulo {
+    fn name(&self) -> &str {
+        "spark_modulo"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(self.data_type.clone())
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        spark_modulo(&args.args, self.fail_on_error)
+    }
+}
+
+pub(crate) fn create_spark_modulo_udf(data_type: DataType, fail_on_error: bool) -> Arc<ScalarUDF> {
+    Arc::new(ScalarUDF::new_from_impl(SparkModulo {
+        signature: Signature::variadic_any(Volatility::Immutable),
+        data_type,
+        fail_on_error,
+    }))
+}
+
+/// Whether a UDF is Comet's built-in remainder implementation, rather than a
+/// function that merely shares its display or registry name.
+pub fn is_spark_modulo_function(fun: &ScalarUDF) -> bool {
+    fun.inner().is::<SparkModulo>()
+}
 
 /// Spark-compliant modulo function. If `fail_on_error` is true, then this function computes modulo
 /// in ANSI mode and returns an error on division by zero, otherwise it returns `NULL` for such
@@ -298,6 +342,16 @@ mod tests {
         for fail_on_error in [true, false] {
             test_fn(fail_on_error);
         }
+    }
+
+    #[test]
+    fn builtin_modulo_identity_includes_ansi_error_mode() {
+        let legacy = create_spark_modulo_udf(DataType::Int32, false);
+        let ansi = create_spark_modulo_udf(DataType::Int32, true);
+        assert!(is_spark_modulo_function(&legacy));
+        assert!(is_spark_modulo_function(&ansi));
+        assert_ne!(legacy, ansi);
+        assert_eq!(legacy, create_spark_modulo_udf(DataType::Int32, false));
     }
 
     pub fn verify_result<T>(

@@ -21,11 +21,12 @@ CREATE TABLE test_min_max(i int, d double, s string, grp string) USING parquet
 statement
 INSERT INTO test_min_max VALUES (1, 1.5, 'b', 'x'), (3, 3.5, 'a', 'x'), (2, 2.5, 'c', 'y'), (NULL, NULL, NULL, 'y'), (-1, -1.5, 'z', 'x')
 
--- min/max over StringType is not yet supported natively, so this falls back to Spark.
--- (Spark plans this global aggregate as SortAggregateExec because the string min/max buffer
--- is not hash-friendly; that operator is now supported, but the string aggregate itself is not.)
-query expect_fallback(Unsupported data type: StringType)
+-- Binary-collated string min/max executes natively, including Spark's sort aggregate plan.
+query
 SELECT min(i), max(i), min(d), max(d), min(s), max(s) FROM test_min_max
 
 query
-SELECT grp, min(i), max(i) FROM test_min_max GROUP BY grp ORDER BY grp
+SELECT grp, min(i), max(i), min(s), max(s) FROM test_min_max GROUP BY grp ORDER BY grp
+
+query
+SELECT min(s), max(s) FROM test_min_max WHERE i IS NULL

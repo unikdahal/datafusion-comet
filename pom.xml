@@ -923,6 +923,10 @@ under the License.
                     <arg>-Ywarn-numeric-widen</arg>
                     <arg>-Ywarn-value-discard</arg>
                     <arg>-Ywarn-unused:imports,patvars,privates,locals,-implicits</arg>
+                    <!-- These two shared managers suppress Spark 4.x private-type warnings.
+                         Scala 2.12 has no corresponding warning; keep the annotation for 2.13.
+                         All other unused annotations and warnings remain fatal. -->
+                    <arg>-Wconf:cat=unused-nowarn&amp;src=org/apache/spark/sql/comet/execution/shuffle/Comet(Celeborn)?ShuffleManager[.]scala:s</arg>
                     <arg>-Xfatal-warnings</arg>
                   </args>
                 </configuration>

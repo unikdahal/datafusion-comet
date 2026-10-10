@@ -32,7 +32,7 @@ import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.comet.{CometBatchScanExec, CometNativeExec}
+import org.apache.spark.sql.comet.{CometBatchScanExec, CometNativeExec, RuntimePruningKeyTypes}
 import org.apache.spark.sql.comet.shims.ShimDataSourceRDDPartition
 import org.apache.spark.sql.execution.datasources.v2.{BatchScanExec, DataSourceRDD, DataSourceRDDPartition}
 import org.apache.spark.sql.types._
@@ -50,6 +50,59 @@ import org.apache.comet.serde.QueryPlanSerde.serializeDataType
 object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] with Logging {
 
   override def enabledConfig: Option[ConfigEntry[Boolean]] = None
+
+  private[operator] def internFileMetrics(
+      contentFileClass: Class[_],
+      pool: mutable.Map[(String, Set[Int]), Int],
+      common: OperatorOuterClass.IcebergScanCommon.Builder,
+      path: String,
+      statistics: AnyRef,
+      fieldIds: Set[Int]): Int =
+    pool.getOrElseUpdate(
+      (path, fieldIds), {
+        val index = pool.size
+        common.addFileMetricsPool(fileMetrics(contentFileClass, statistics, fieldIds))
+        index
+      })
+
+  /** Retains manifest statistics without decoding bounds or mutating Iceberg ByteBuffers. */
+  private def fileMetrics(
+      contentFileClass: Class[_],
+      dataFile: AnyRef,
+      fieldIds: Set[Int]): OperatorOuterClass.IcebergFileMetrics = {
+    val metrics = OperatorOuterClass.IcebergFileMetrics.newBuilder()
+    metrics.setRecordCount(
+      IcebergReflection
+        .getMethod(contentFileClass, "recordCount")
+        .invoke(dataFile)
+        .asInstanceOf[Long])
+    def counts(name: String, put: (Integer, java.lang.Long) => Unit): Unit = {
+      val values = IcebergReflection
+        .getMethod(contentFileClass, name)
+        .invoke(dataFile)
+        .asInstanceOf[java.util.Map[Integer, java.lang.Long]]
+      if (values != null) values.asScala.foreach { case (id, count) =>
+        if (fieldIds.contains(id.intValue())) put(id, count)
+      }
+    }
+    def bounds(name: String, put: (Integer, com.google.protobuf.ByteString) => Unit): Unit = {
+      val values = IcebergReflection
+        .getMethod(contentFileClass, name)
+        .invoke(dataFile)
+        .asInstanceOf[java.util.Map[Integer, java.nio.ByteBuffer]]
+      if (values != null) values.asScala.foreach { case (id, value) =>
+        if (fieldIds.contains(id.intValue())) {
+          put(id, com.google.protobuf.ByteString.copyFrom(value.duplicate()))
+        }
+      }
+    }
+    counts("valueCounts", (id, value) => { metrics.putValueCounts(id, value); () })
+    counts("nullValueCounts", (id, value) => { metrics.putNullValueCounts(id, value); () })
+    counts("nanValueCounts", (id, value) => { metrics.putNanValueCounts(id, value); () })
+    bounds("lowerBounds", (id, value) => { metrics.putLowerBounds(id, value); () })
+    bounds("upperBounds", (id, value) => { metrics.putUpperBounds(id, value); () })
+    metrics.build()
+  }
 
   /**
    * Constants specific to Iceberg expression conversion (not in shared IcebergReflection).
@@ -985,6 +1038,12 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
     val nameMappingToPoolIndex = mutable.HashMap[String, Int]()
     val projectFieldIdsToPoolIndex = mutable.HashMap[Seq[Int], Int]()
     val partitionDataToPoolIndex = mutable.HashMap[String, Int]()
+    // Only exact runtime-filter key columns carry per-file statistics.
+    val runtimeFieldNames = metadata.runtimeStatisticsColumns
+    val runtimeMetricsEnabled = runtimeFieldNames.nonEmpty
+    // Task schemas (including historical/delete projections) determine the selected IDs.
+    // Reuse only the same file's same metrics subset, even across splits.
+    val fileMetricsToPoolIndex = mutable.HashMap[(String, Set[Int]), Int]()
     // Individual delete files are interned into a flat pool; deleteFilesToPoolIndex then dedups
     // the per-task sets as lists of indices into it, so a delete file that applies to many data
     // files (Iceberg's default partition delete granularity) is serialized once rather than once
@@ -1196,6 +1255,34 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
                           "or metadata field IDs. This indicates a bug in CometScanRule " +
                           "validation -- all output columns should be resolvable.")
                     }
+                }
+
+                if (runtimeMetricsEnabled) {
+                  // Serialize only the exact runtime-filter keys identified for this scan. If the
+                  // selective manifest re-plan was unavailable, omit file metrics entirely rather
+                  // than sending an empty/stat-stripped Spark DataFile.
+                  metadata.runtimeFileStatistics.get(taskBuilder.getDataFilePath).foreach {
+                    statistics =>
+                      val runtimeFieldIds = output
+                        .zip(projectFieldIds)
+                        .collect {
+                          case (attr, id)
+                              if runtimeFieldNames.contains(attr.name) &&
+                                RuntimePruningKeyTypes.isFileStatsAttribute(attr) =>
+                            id
+                        }
+                        .toSet
+                      if (runtimeFieldIds.nonEmpty) {
+                        val metricsIdx = internFileMetrics(
+                          contentFileClass,
+                          fileMetricsToPoolIndex,
+                          commonBuilder,
+                          taskBuilder.getDataFilePath,
+                          statistics,
+                          runtimeFieldIds)
+                        taskBuilder.setFileMetricsIdx(metricsIdx)
+                      }
+                  }
                 }
 
                 val projectFieldIdsIdx = projectFieldIdsToPoolIndex.getOrElseUpdate(
