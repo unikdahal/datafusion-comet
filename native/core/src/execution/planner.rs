@@ -4508,6 +4508,17 @@ fn partition_data_to_struct(
     Ok(iceberg::spec::Struct::from_iter(literals))
 }
 
+fn delete_file_coordinate(
+    value: Option<i64>,
+    field: &str,
+    file_path: &str,
+) -> Result<Option<u64>, ExecutionError> {
+    value
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| GeneralError(format!("Delete file '{file_path}' has a negative {field}")))
+}
+
 /// Decodes optional manifest bounds without rejecting a task on unusable statistics.
 fn parse_iceberg_file_metrics(
     metrics: &spark_operator::IcebergFileMetrics,
@@ -4653,33 +4664,21 @@ fn parse_file_scan_tasks_from_common(
                     ))
                 })?;
 
-            Ok(iceberg::scan::FileScanTaskDeleteFile {
-                // Passed RAW, like `data_file_path` below (same exact-string delete-matching
-                // constraint -- see there).
-                file_path,
-                file_type,
-                file_format,
-                // Not serialized; 0 means unknown and iceberg-rust sizes the file lazily.
-                file_size_in_bytes: 0,
-                partition_spec_id: del.partition_spec_id,
-                equality_ids: if del.equality_ids.is_empty() {
-                    None
-                } else {
-                    Some(del.equality_ids.clone())
-                },
-                // Deletion-vector coordinates, which the serde sets only when file_format is
-                // PUFFIN. referenced_data_file names the data file the vector applies to; the other
-                // two locate the deletion-vector-v1 blob in its Puffin file. file_format above is
-                // the discriminator, since Iceberg also populates referencedDataFile on
-                // file-scoped Parquet position deletes.
-                referenced_data_file: del.referenced_data_file.clone(),
-                content_offset: del.content_offset,
-                content_size_in_bytes: del.content_size_in_bytes,
-                record_count,
-                // Plaintext StandardKeyMetadata forwarded verbatim from the JVM; decoded by
-                // iceberg-rust with no KMS unwrap. None for unencrypted delete files.
-                key_metadata: del.key_metadata.clone().map(Vec::into_boxed_slice),
-            })
+            iceberg::scan::FileScanTaskDeleteFile::builder()
+                .with_file_path(file_path.clone())
+                .with_file_type(file_type)
+                .with_file_format(file_format)
+                // Zero resolves the unrecorded size lazily in the delete loader.
+                .with_file_size_in_bytes(0)
+                .with_partition_spec_id(del.partition_spec_id)
+                .with_equality_ids((!del.equality_ids.is_empty()).then(|| del.equality_ids.clone()))
+                .with_referenced_data_file(del.referenced_data_file.clone())
+                .with_content_offset(delete_file_coordinate(del.content_offset, "content_offset", &file_path)?)
+                .with_content_size_in_bytes(delete_file_coordinate(del.content_size_in_bytes, "content_size_in_bytes", &file_path)?)
+                .with_record_count(record_count)
+                .with_key_metadata(del.key_metadata.clone().map(Vec::into_boxed_slice))
+                .build()
+                .map_err(|error| GeneralError(format!("Invalid delete file '{file_path}': {error}")))
         })
         .collect::<Result<Vec<_>, ExecutionError>>()?;
 
@@ -5290,6 +5289,18 @@ fn needs_fields_coercion(sig: &TypeSignature) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delete_file_coordinates_reject_negative_values() {
+        for field in ["content_offset", "content_size_in_bytes"] {
+            assert_eq!(super::delete_file_coordinate(None, field, "dv.puffin").unwrap(), None);
+            assert_eq!(super::delete_file_coordinate(Some(0), field, "dv.puffin").unwrap(), Some(0));
+            assert_eq!(super::delete_file_coordinate(Some(i64::MAX), field, "dv.puffin").unwrap(), Some(i64::MAX as u64));
+            let error = super::delete_file_coordinate(Some(-1), field, "dv.puffin").unwrap_err();
+            assert!(error.to_string().contains(field));
+            assert!(error.to_string().contains("dv.puffin"));
+        }
+    }
+
     #[test]
     fn iceberg_file_metrics_decode_bounds_and_ignore_unusable_encodings() {
         use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
