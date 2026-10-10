@@ -5325,9 +5325,12 @@ mod tests {
         use iceberg::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
 
         let schema = Schema::builder()
-            .with_fields(vec![
-                NestedField::optional(1, "promoted", Type::Primitive(PrimitiveType::Long)).into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "promoted",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
             .build()
             .unwrap();
         for (lower, upper) in [(i32::MIN, -1_i32), (-10, -5), (-1, -1)] {
@@ -5402,14 +5405,15 @@ mod tests {
             }
         }
 
-        let physical_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("promoted", DataType::Int32, false).with_metadata(HashMap::from([
-                (
-                    parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
-                    "1".to_string(),
-                ),
-            ])),
-        ]));
+        let physical_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "promoted",
+            DataType::Int32,
+            false,
+        )
+        .with_metadata(HashMap::from([(
+            parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+            "1".to_string(),
+        )]))]));
         let batch = RecordBatch::try_new(
             Arc::clone(&physical_schema),
             vec![Arc::new(Int32Array::from(vec![-10, -5, -1]))],
@@ -5422,9 +5426,12 @@ mod tests {
         writer.close().unwrap();
         let schema = Arc::new(
             Schema::builder()
-                .with_fields(vec![
-                    NestedField::optional(1, "promoted", Type::Primitive(PrimitiveType::Long)).into(),
-                ])
+                .with_fields(vec![NestedField::optional(
+                    1,
+                    "promoted",
+                    Type::Primitive(PrimitiveType::Long),
+                )
+                .into()])
                 .build()
                 .unwrap(),
         );
@@ -5449,7 +5456,9 @@ mod tests {
             .build()
             .unwrap();
         let output_schema = Arc::new(ArrowSchema::new(vec![Field::new(
-            "promoted", DataType::Int64, true,
+            "promoted",
+            DataType::Int64,
+            true,
         )]));
         let session = SessionContext::new();
         for enabled in [false, true] {
@@ -5464,7 +5473,9 @@ mod tests {
             .unwrap();
             let scan = if enabled {
                 scan.with_runtime_predicate_provider(
-                    Arc::new(Provider(Reference::new("promoted").less_than(Datum::long(-5)))),
+                    Arc::new(Provider(
+                        Reference::new("promoted").less_than(Datum::long(-5)),
+                    )),
                     None,
                 )
             } else {
@@ -5481,7 +5492,13 @@ mod tests {
             let values: Vec<i64> = output
                 .iter()
                 .flat_map(|batch| {
-                    batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap().values().to_vec()
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .values()
+                        .to_vec()
                 })
                 .collect();
             assert_eq!(values, vec![-10], "runtime pruning enabled={enabled}");

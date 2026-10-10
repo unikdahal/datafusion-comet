@@ -55,7 +55,8 @@ class UtilsSuite extends CometTestBase {
     val indexType = new ArrowType.Int(32, true)
     val encoding = new DictionaryEncoding(7L, false, indexType)
     val struct = StructVector.empty("struct", allocator)
-    val indices = struct.addOrGet("key", new FieldType(true, indexType, encoding), classOf[IntVector])
+    val indices =
+      struct.addOrGet("key", new FieldType(true, indexType, encoding), classOf[IntVector])
     val values = new VarCharVector("values", allocator)
     val provider = new MapDictionaryProvider(new Dictionary(values, encoding))
     try {
@@ -70,9 +71,8 @@ class UtilsSuite extends CometTestBase {
       indices.set(0, 0)
       indices.set(1, 1)
       struct.setValueCount(2)
-      val batch = new ColumnarBatch(
-        Array[ColumnVector](CometVector.getVector(struct, provider)),
-        2)
+      val batch =
+        new ColumnarBatch(Array[ColumnVector](CometVector.getVector(struct, provider)), 2)
       val failure = intercept[IllegalArgumentException] {
         // Provider combination currently only visits top-level dictionary fields. A nested
         // dictionary therefore reaches the real writer constructor with no matching dictionary.
@@ -345,7 +345,8 @@ class UtilsSuite extends CometTestBase {
           case (Some(values), row) =>
             val start = original.startNewValue(row)
             values.zipWithIndex.foreach {
-              case (Some(value), index) => originalValues.setSafe(start + index, value.getBytes(UTF_8))
+              case (Some(value), index) =>
+                originalValues.setSafe(start + index, value.getBytes(UTF_8))
               case (None, index) => originalValues.setNull(start + index)
             }
             original.endValue(row, values.size)
@@ -362,9 +363,8 @@ class UtilsSuite extends CometTestBase {
         root.setRowCount(8)
         assert(sliced.getOffsetBuffer.getInt(0) > 0)
         val bytes = if (serializeWithUtils) {
-          val batch = new ColumnarBatch(
-            Array[ColumnVector](CometVector.getVector(sliced, provider)),
-            8)
+          val batch =
+            new ColumnarBatch(Array[ColumnVector](CometVector.getVector(sliced, provider)), 8)
           Utils.serializeBatches(Iterator(batch)).next()._2
         } else {
           val output = new ChunkedByteBufferOutputStream(1024, ByteBuffer.allocate)
@@ -431,9 +431,8 @@ class UtilsSuite extends CometTestBase {
         indices.set(0, 0)
         indices.setValueCount(1)
         val vector = if (dictionaryEncoded) indices else values
-        val batch = new ColumnarBatch(
-          Array[ColumnVector](CometVector.getVector(vector, provider)),
-          1)
+        val batch =
+          new ColumnarBatch(Array[ColumnVector](CometVector.getVector(vector, provider)), 1)
         Utils.serializeBatches(Iterator(batch)).next()._2
       } finally {
         indices.close()

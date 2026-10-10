@@ -27,7 +27,9 @@ use datafusion::common::{
 };
 use datafusion::config::ConfigOptions;
 use datafusion::execution::FunctionRegistry;
-use datafusion::logical_expr::{ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+};
 use datafusion::physical_expr::expressions::{lit, BinaryExpr};
 use datafusion::physical_expr::ScalarFunctionExpr;
 use datafusion::physical_expr_common::datum::{apply, apply_cmp_for_nested};

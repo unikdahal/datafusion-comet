@@ -211,9 +211,7 @@ pub fn create_comet_physical_fun_with_eval_mode(
             let func = Arc::new(spark_isnan);
             make_comet_scalar_udf!("isnan", func, without data_type)
         }
-        "spark_modulo" => {
-            Ok(create_spark_modulo_udf(data_type, fail_on_error))
-        }
+        "spark_modulo" => Ok(create_spark_modulo_udf(data_type, fail_on_error)),
         "abs" => {
             let func = Arc::new(abs);
             make_comet_scalar_udf!("abs", func, without data_type)

@@ -1152,7 +1152,13 @@ async fn direct_parquet_consumer_reset_detaches_old_reader_domain() {
         let filter = consumer.children()[0]
             .downcast_ref::<CometFilterExec>()
             .unwrap();
-        let reader = Arc::new(filter.input().downcast_ref::<DataSourceExec>().unwrap().clone());
+        let reader = Arc::new(
+            filter
+                .input()
+                .downcast_ref::<DataSourceExec>()
+                .unwrap()
+                .clone(),
+        );
         let old_predicate = produced_join_filter(&runtime.join);
         let domain = |key| {
             Arc::new(BinaryExpr::new(
@@ -1171,9 +1177,9 @@ async fn direct_parquet_consumer_reset_detaches_old_reader_domain() {
         // Refresh child queues first, as reset_plan_states does bottom-up.
         // DataSource reset retains the reader expression, so the regression
         // isolates stale pruning from an exhausted file queue.
-        let input = datafusion::physical_plan::execution_plan::reset_plan_states(
-            Arc::clone(consumer.children()[0]),
-        )
+        let input = datafusion::physical_plan::execution_plan::reset_plan_states(Arc::clone(
+            consumer.children()[0],
+        ))
         .unwrap();
         let consumer = consumer.with_new_children(vec![input]).unwrap();
         // Reset the actual attached consumer, keeping its old producer and plan
@@ -1822,7 +1828,9 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
     // A direct reset must detach the old reader restriction as well as the
     // producer's discovery expression, even if the old join is still owned.
     let reset = visible_consumer.reset_state().unwrap();
-    let reset_output = collect(Arc::clone(&reset), session.task_ctx()).await.unwrap();
+    let reset_output = collect(Arc::clone(&reset), session.task_ctx())
+        .await
+        .unwrap();
     assert_eq!(row_count(&reset_output), 7);
     // Reattach a disjoint domain to the reset reader. Its old {100, 103}
     // restriction must not survive alongside the new provider.
@@ -1837,16 +1845,20 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
             lit(99_i32),
         )))
         .unwrap();
-    let reattached = super::super::iceberg_reader::try_attach_iceberg_join_filter(
-        &reset,
-        predicate,
-    )
-    .unwrap()
-    .unwrap();
+    let reattached =
+        super::super::iceberg_reader::try_attach_iceberg_join_filter(&reset, predicate)
+            .unwrap()
+            .unwrap();
     let reset_output = collect(reattached, session.task_ctx()).await.unwrap();
     assert_eq!(row_count(&reset_output), 1);
-    let batch = reset_output.iter().find(|batch| batch.num_rows() != 0).unwrap();
-    assert_eq!(as_int32_array(batch.column(0).as_ref()).unwrap().value(0), 99);
+    let batch = reset_output
+        .iter()
+        .find(|batch| batch.num_rows() != 0)
+        .unwrap();
+    assert_eq!(
+        as_int32_array(batch.column(0).as_ref()).unwrap().value(0),
+        99
+    );
     assert_eq!(
         batches_to_sort_string(&actual),
         batches_to_sort_string(&expected)
