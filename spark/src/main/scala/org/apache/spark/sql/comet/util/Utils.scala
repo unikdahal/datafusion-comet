@@ -23,6 +23,7 @@ import java.io.{DataInputStream, DataOutputStream, File}
 import java.nio.ByteBuffer
 import java.nio.channels.Channels
 
+import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
 import org.apache.arrow.c.CDataDictionaryProvider
@@ -42,6 +43,7 @@ import org.apache.spark.sql.comet.execution.arrow.{ArrowReaderIterator, Constant
 import org.apache.spark.sql.execution.vectorized.ConstantColumnVector
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.util.{Utils => SparkUtils}
 import org.apache.spark.util.io.{ChunkedByteBuffer, ChunkedByteBufferOutputStream}
 
 import org.apache.comet.Constants.COMET_CONF_DIR_ENV
@@ -263,33 +265,49 @@ object Utils extends CometTypeShim with Logging {
       val cbbos = new ChunkedByteBufferOutputStream(BatchIpcChunkSize, ByteBuffer.allocate)
       val out = new DataOutputStream(codec.compressedOutputStream(cbbos))
 
-      val (fieldVectors, batchProviderOpt) = getBatchFieldVectors(batch)
-      val root = new VectorSchemaRoot(fieldVectors.asJava)
-      if (fieldVectors.isEmpty) {
-        // VSR cannot infer rowCount without field vectors
-        root.setRowCount(batch.numRows())
-      }
-      val provider = batchProviderOpt.getOrElse(dictionaryProvider)
-
-      val normalized = normalizeBatchOffsets(root)
-      val writer = new ArrowStreamWriter(normalized, provider, Channels.newChannel(out))
-      try {
-        writer.start()
-        writer.writeBatch()
-      } finally {
-        try {
-          writer.close()
-        } finally {
-          normalized.close()
-          root.clear()
+      SparkUtils.tryWithSafeFinally {
+        val (fieldVectors, batchProviderOpt) = getBatchFieldVectors(batch)
+        val root = new VectorSchemaRoot(fieldVectors.asJava)
+        if (fieldVectors.isEmpty) {
+          // VSR cannot infer rowCount without field vectors
+          root.setRowCount(batch.numRows())
         }
-      }
+        val provider = batchProviderOpt.getOrElse(dictionaryProvider)
+        writeBatch(root, provider, out)
 
-      if (out.size() > 0) {
-        (batch.numRows().toLong, cbbos.toChunkedByteBuffer)
-      } else {
-        (batch.numRows().toLong, new ChunkedByteBuffer(Array.empty[ByteBuffer]))
+        if (out.size() > 0) {
+          (batch.numRows().toLong, cbbos.toChunkedByteBuffer)
+        } else {
+          (batch.numRows().toLong, new ChunkedByteBuffer(Array.empty[ByteBuffer]))
+        }
+      } {
+        // ArrowWriter.close can throw before closing its channel, including when ending IPC.
+        out.close()
       }
+    }
+  }
+
+  /** Writes one batch, releasing its buffers even if normalization or writer construction fails. */
+  private[util] def writeBatch(
+      root: VectorSchemaRoot,
+      provider: DictionaryProvider,
+      out: DataOutputStream): Unit = {
+    SparkUtils.tryWithSafeFinally {
+      val normalized = normalizeBatchOffsets(root)
+      SparkUtils.tryWithSafeFinally {
+        val writer = new ArrowStreamWriter(normalized, provider, Channels.newChannel(out))
+        SparkUtils.tryWithSafeFinally {
+          writer.start()
+          writer.writeBatch()
+        } {
+          writer.close()
+        }
+      } {
+        normalized.close()
+      }
+    } {
+      // These vectors belong to the consumed batch, as on the successful serialization path.
+      root.clear()
     }
   }
 
@@ -460,11 +478,26 @@ object Utils extends CometTypeShim with Logging {
    * a prefix into the first appended value. Transfer pairs normalize offsets, including nested
    * vectors, while sharing the used data buffers. The caller owns the returned root.
    */
-  private def normalizeBatchOffsets(root: VectorSchemaRoot): VectorSchemaRoot = {
-    val normalized = root.slice(0, root.getRowCount)
-    // A zero-column root cannot infer its row count from vectors.
-    normalized.setRowCount(root.getRowCount)
-    normalized
+  private[util] def normalizeBatchOffsets(root: VectorSchemaRoot): VectorSchemaRoot = {
+    val vectors = ArrayBuffer.empty[FieldVector]
+    var completed = false
+    SparkUtils.tryWithSafeFinally {
+      root.getFieldVectors.asScala.foreach { vector =>
+        val pair = vector.getTransferPair(vector.getAllocator)
+        // Register the destination before the fallible transfer, so partial buffers are owned.
+        vectors += pair.getTo.asInstanceOf[FieldVector]
+        pair.splitAndTransfer(0, root.getRowCount)
+      }
+      val normalized = new VectorSchemaRoot(vectors.asJava)
+      // A zero-column root cannot infer its row count from vectors.
+      normalized.setRowCount(root.getRowCount)
+      completed = true
+      normalized
+    } {
+      if (!completed) {
+        org.apache.arrow.util.AutoCloseables.close(vectors.asJava)
+      }
+    }
   }
 
   /**
