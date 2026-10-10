@@ -46,7 +46,11 @@ jobs:
           cargo update --workspace
           cargo fmt --all
           cd ..
-          npx --yes prettier --write docs/runtime*.md benchmarks/iceberg-runtime-pruning/README.md .github/workflows/fork_hardening_format.yml
+          npx --yes prettier --write \
+            docs/source/contributor-guide/runtime*.md \
+            docs/source/contributor-guide/index.md \
+            docs/source/user-guide/latest/{configs.md,metrics.md,compatibility/operators.md,tuning/operators.md} \
+            benchmarks/iceberg-runtime-pruning/README.md .github/workflows/fork_hardening_format.yml
           git diff > hardening-format.patch
       - uses: actions/upload-artifact@v7
         with:

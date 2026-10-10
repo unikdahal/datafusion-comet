@@ -42,6 +42,7 @@ import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExcha
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{ArrayType, MetadataBuilder, StringType, StructType, TimestampType}
+import org.apache.spark.sql.types.{CharType, Metadata}
 
 import org.apache.comet.CometSparkSessionExtensions.{isSpark35Plus, isSpark40Plus, isSpark41Plus, isSpark42Plus}
 import org.apache.comet.iceberg.{IcebergReflection, RESTCatalogHelper}
@@ -178,20 +179,23 @@ class CometIcebergNativeSuite
         CometConf.COMET_EXEC_ENABLED.key -> "true",
         CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
 
-        // Each name ends with a metadata table name but is an ordinary data table.
-        for (table <- Seq("user_files", "snapshots", "order_history")) {
-          spark.sql(s"CREATE TABLE hadoop_catalog.db.$table (id INT, name STRING) USING iceberg")
-          spark.sql(s"INSERT INTO hadoop_catalog.db.$table VALUES (1, 'a'), (2, 'b')")
-          checkIcebergNativeScan(s"SELECT * FROM hadoop_catalog.db.$table ORDER BY id")
-        }
+        val tables = Seq("user_files", "snapshots", "order_history")
+        try {
+          // Each name ends with a metadata table name but is an ordinary data table.
+          for (table <- tables) {
+            spark.sql(s"CREATE TABLE hadoop_catalog.db.$table (id INT, name STRING) USING iceberg")
+            spark.sql(s"INSERT INTO hadoop_catalog.db.$table VALUES (1, 'a'), (2, 'b')")
+            checkIcebergNativeScan(s"SELECT * FROM hadoop_catalog.db.$table ORDER BY id")
+          }
 
-        // A real metadata table still falls back, and still answers correctly.
-        checkIcebergNativeScanFallback(
-          "SELECT count(*) FROM hadoop_catalog.db.user_files.files",
-          "Iceberg Metadata tables are not supported")
-
-        for (table <- Seq("user_files", "snapshots", "order_history")) {
-          spark.sql(s"DROP TABLE hadoop_catalog.db.$table")
+          // A real metadata table still falls back, and still answers correctly.
+          checkIcebergNativeScanFallback(
+            "SELECT count(*) FROM hadoop_catalog.db.user_files.files",
+            "Iceberg Metadata tables are not supported")
+        } finally {
+          for (table <- tables) {
+            spark.sql(s"DROP TABLE IF EXISTS hadoop_catalog.db.$table")
+          }
         }
       }
     }
@@ -1577,6 +1581,60 @@ class CometIcebergNativeSuite
     }
   }
 
+  test("Spark 4 preserved CHAR join disables Iceberg runtime pruning without metadata") {
+    assume(icebergAvailable, "Iceberg not available in classpath")
+    assume(isSpark40Plus, "Preserved CHAR types require Spark 4")
+    withTempIcebergDir { warehouseDir =>
+      withSQLConf(
+        "spark.sql.catalog.test_cat" -> "org.apache.iceberg.spark.SparkCatalog",
+        "spark.sql.catalog.test_cat.type" -> "hadoop",
+        "spark.sql.catalog.test_cat.warehouse" -> warehouseDir.getAbsolutePath,
+        "spark.sql.preserveCharVarcharTypeInfo" -> "true",
+        SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+        SQLConf.SHUFFLE_PARTITIONS.key -> "1",
+        CometConf.COMET_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_ENABLED.key -> "true",
+        CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true",
+        CometConf.COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED.key -> "true") {
+        val fact = "test_cat.db.preserved_char_probe"
+        val dim = "preserved_char_build"
+        val dimPath = new File(warehouseDir, dim).getAbsolutePath
+        try {
+          withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+            spark.sql(s"CREATE TABLE $fact (id STRING) USING iceberg")
+            spark.sql(s"INSERT INTO $fact VALUES ('a'), ('a '), ('a   '), ('中   '), (NULL)")
+            spark.sql(s"CREATE TABLE $dim (id CHAR(4)) USING parquet LOCATION '$dimPath'")
+            spark.sql(s"INSERT INTO $dim VALUES ('a'), ('中'), (NULL)")
+          }
+          withTempView("preserved_char_dim", "preserved_char_fact") {
+            val build = spark.table(dim).select(col("id").as("id", Metadata.empty))
+            assert(build.schema("id").dataType == CharType(4))
+            assert(!build.schema("id").metadata.contains("__CHAR_VARCHAR_TYPE_STRING"))
+            build.createOrReplaceTempView("preserved_char_dim")
+            spark.read
+              .format("iceberg")
+              .load(fact)
+              .createOrReplaceTempView("preserved_char_fact")
+            val query = "SELECT /*+ BROADCAST(d) */ f.id FROM preserved_char_fact f " +
+              "JOIN preserved_char_dim d ON f.id = d.id"
+            val (_, plan) = checkSparkAnswer(query)
+            val scans = collectIcebergNativeScans(plan)
+            assert(scans.size == 1, s"Expected native Iceberg CHAR probe scan: $plan")
+            assert(scans.head.metrics("iceberg_runtime_predicate_tasks").value == 0L)
+            assert(scans.head.metrics("iceberg_runtime_row_groups_pruned").value == 0L)
+            assert(scans.head.metrics("iceberg_runtime_file_tasks_pruned").value == 0L)
+            collect(plan) { case join: CometBroadcastHashJoinExec => join }.foreach { join =>
+              assert(!join.nativeOp.getHashJoin.getDynamicFilterEnabled)
+            }
+          }
+        } finally {
+          spark.sql(s"DROP TABLE IF EXISTS $dim")
+          spark.sql(s"DROP TABLE IF EXISTS $fact")
+        }
+      }
+    }
+  }
+
   test("join runtime filter prunes native Iceberg row groups and bytes") {
     assume(icebergAvailable, "Iceberg not available in classpath")
 
@@ -1822,6 +1880,7 @@ class CometIcebergNativeSuite
         CometConf.COMET_ENABLED.key -> "true",
         CometConf.COMET_EXEC_ENABLED.key -> "true",
         CometConf.COMET_BATCH_SIZE.key -> "1024",
+        CometConf.COMET_ICEBERG_DATA_FILE_CONCURRENCY_LIMIT.key -> "1",
         CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
         val table = "test_cat.db.runtime_minmax_test"
         spark.sql(s"""
@@ -1992,6 +2051,7 @@ class CometIcebergNativeSuite
         CometConf.COMET_EXEC_ENABLED.key -> "true",
         CometConf.COMET_EXEC_TOPK_FUSION_ENABLED.key -> "true",
         CometConf.COMET_BATCH_SIZE.key -> "1024",
+        CometConf.COMET_ICEBERG_DATA_FILE_CONCURRENCY_LIMIT.key -> "1",
         CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
         for (dictionary <- Seq(false, true)) {
           val table = s"test_cat.db.runtime_string_extrema_$dictionary"
@@ -2159,6 +2219,7 @@ class CometIcebergNativeSuite
         CometConf.COMET_EXEC_ENABLED.key -> "true",
         CometConf.COMET_EXEC_TOPK_FUSION_ENABLED.key -> "true",
         CometConf.COMET_BATCH_SIZE.key -> "1024",
+        CometConf.COMET_ICEBERG_DATA_FILE_CONCURRENCY_LIMIT.key -> "1",
         CometConf.COMET_ICEBERG_NATIVE_ENABLED.key -> "true") {
         val table = "test_cat.db.runtime_topk_test"
         spark.sql(s"""
