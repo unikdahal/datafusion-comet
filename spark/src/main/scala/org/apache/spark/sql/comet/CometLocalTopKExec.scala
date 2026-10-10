@@ -25,7 +25,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, NullsLast, SortOrde
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{SparkPlan, TakeOrderedAndProjectExec}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.types.{ByteType, DateType, IntegerType, LongType, ShortType, StringType, TimestampNTZType, TimestampType}
+import org.apache.spark.sql.types.StringType
 
 import com.google.common.base.Objects
 

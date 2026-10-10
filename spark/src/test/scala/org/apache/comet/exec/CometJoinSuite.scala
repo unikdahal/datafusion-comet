@@ -467,7 +467,7 @@ class CometJoinSuite extends CometTestBase {
                     "FROM decimal_narrow_build)",
                   true),
                 ("CAST(b.key AS DECIMAL(18,3))", "decimal_build", false))) {
-              val query = s"SELECT /*+ BROADCAST(b) */ p.payload, b.payload " +
+              val query = "SELECT /*+ BROADCAST(b) */ p.payload, b.payload " +
                 s"FROM decimal_probe p JOIN $table b ON p.key = $buildKey"
               val (_, plan) = checkSparkAnswerAndOperator(sql(query))
               val joins = nativeHashJoins(plan)

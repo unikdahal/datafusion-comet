@@ -50,7 +50,7 @@ import org.apache.comet.CometSparkSessionExtensions.{isCometLoaded, isSpark35Plu
 import org.apache.comet.iceberg.{CometIcebergNativeScanMetadata, IcebergReflection, IcebergStorageSchemes}
 import org.apache.comet.objectstore.NativeConfig
 import org.apache.comet.parquet.CometParquetUtils.{encryptionEnabled, isEncryptionConfigSupported, readFieldId}
-import org.apache.comet.serde.QueryPlanSerde.{hasCharPruningKey, isBinaryStringPruningType}
+import org.apache.comet.serde.QueryPlanSerde.hasCharPruningKey
 import org.apache.comet.serde.operator.{CometIcebergNativeScan, CometNativeScan}
 import org.apache.comet.shims.{CometTypeShim, ShimCometStreaming, ShimFileFormat, ShimSubqueryBroadcast}
 
