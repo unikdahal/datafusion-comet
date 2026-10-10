@@ -26,7 +26,7 @@ use datafusion::physical_expr::expressions::{
     BinaryExpr, Column, InListExpr, IsNotNullExpr, IsNullExpr, Literal,
 };
 use datafusion::physical_expr::{PhysicalExpr, ScalarFunctionExpr};
-use datafusion_comet_spark_expr::IfExpr;
+use datafusion_comet_spark_expr::{is_spark_modulo_function, IfExpr};
 use std::sync::Arc;
 
 /// Whether skipping input rows preserves both expression values and evaluation errors.
@@ -87,7 +87,11 @@ pub(super) fn is_safe_to_prune_before(
         is_safe_spark_modulo(func, schema)
     } else if let Some(if_expr) = expr.downcast_ref::<IfExpr>() {
         let children = if_expr.children();
-        children.len() == 3 && children[0].data_type(schema).ok() == Some(DataType::Boolean)
+        children.len() == 3
+            && children[0].data_type(schema).ok() == Some(DataType::Boolean)
+            && children[1].data_type(schema).ok().is_some_and(|data_type| {
+                children[2].data_type(schema).ok() == Some(data_type)
+            })
     } else {
         expr.is::<IsNullExpr>() || expr.is::<IsNotNullExpr>()
     };
@@ -99,7 +103,7 @@ pub(super) fn is_safe_to_prune_before(
 }
 
 fn is_safe_spark_modulo(func: &ScalarFunctionExpr, schema: &arrow::datatypes::Schema) -> bool {
-    if func.name() != "spark_modulo" && func.fun().name() != "spark_modulo" {
+    if !is_spark_modulo_function(func.fun()) {
         return false;
     }
     let args = func.args();
@@ -107,25 +111,54 @@ fn is_safe_spark_modulo(func: &ScalarFunctionExpr, schema: &arrow::datatypes::Sc
         return false;
     }
     let left_type = args[0].data_type(schema).ok();
-    if !left_type.as_ref().is_some_and(is_comparable_type) {
+    if !left_type.as_ref().is_some_and(is_modulo_type) {
         return false;
     }
-    if left_type != args[1].data_type(schema).ok() {
+    if left_type != args[1].data_type(schema).ok() || left_type != func.data_type(schema).ok() {
         return false;
     }
 
     let divisor = &args[1];
     // In non-ANSI mode, Comet wraps the divisor with `null_if_zero_primitive` (an `IfExpr`),
     // replacing zero with NULL so modulo evaluates to NULL without division-by-zero error.
-    // In ANSI mode, modulo can error on zero divisor; only a constant nonzero literal other
-    // than -1 is infallible.
-    is_non_ansi_zero_guard(divisor)
+    // Arrow's integer remainder checks zero and then uses mod_wrapping: MIN % -1 is zero.
+    // This differs from integer division, whose -1 divisor can overflow.
+    is_non_ansi_zero_guard(divisor, schema)
         || divisor
             .downcast_ref::<Literal>()
-            .is_some_and(|lit| is_safe_integer_divisor(lit.value()))
+            .is_some_and(|lit| is_safe_integer_divisor(lit.value()) || is_minus_one(lit.value()))
 }
 
-fn is_non_ansi_zero_guard(expr: &Arc<dyn PhysicalExpr>) -> bool {
+fn is_modulo_type(data_type: &arrow::datatypes::DataType) -> bool {
+    use arrow::datatypes::DataType;
+
+    match data_type {
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Float32
+        | DataType::Float64 => true,
+        // Equal valid decimal types require no scale multiplication in rem.
+        // Spark's valid mantissas cannot reach the native signed MIN / -1 overflow.
+        DataType::Decimal128(precision, scale) => {
+            (1..=38).contains(precision) && *scale >= 0 && *scale as u8 <= *precision
+        }
+        DataType::Decimal256(precision, scale) => {
+            (1..=76).contains(precision) && *scale >= 0 && *scale as u8 <= *precision
+        }
+        _ => false,
+    }
+}
+
+fn is_non_ansi_zero_guard(
+    expr: &Arc<dyn PhysicalExpr>,
+    schema: &arrow::datatypes::Schema,
+) -> bool {
     let Some(if_expr) = expr.downcast_ref::<IfExpr>() else {
         return false;
     };
@@ -148,13 +181,15 @@ fn is_non_ansi_zero_guard(expr: &Arc<dyn PhysicalExpr>) -> bool {
     let Some(zero_lit) = binary.right().downcast_ref::<Literal>() else {
         return false;
     };
-    if !is_zero(zero_lit.value()) {
+    // The checked divisor is evaluated again in the ELSE branch. Structural
+    // equality is sufficient only together with the recursive infallible,
+    // row-local whitelist, which rejects volatile and unknown expressions.
+    if !is_zero(zero_lit.value())
+        || !binary.left().eq(children[2])
+        || children[2].data_type(schema).ok() != Some(zero_lit.value().data_type())
+        || true_lit.value().data_type() != zero_lit.value().data_type()
+    {
         return false;
-    }
-    if let Some(lit) = children[2].downcast_ref::<Literal>() {
-        if is_minus_one(lit.value()) {
-            return false;
-        }
     }
     true
 }
@@ -409,22 +444,20 @@ mod tests {
             "ANSI spark_modulo by column can error and must not be safe to prune before"
         );
 
-        // 4. Modulo by zero or -1 in ANSI mode must not be safe
-        for bad_divisor in [lit(0_i32), lit(-1_i32)] {
-            let ansi_bad = create_modulo_expr(
-                Arc::clone(&value),
-                bad_divisor,
-                DataType::Int32,
-                Arc::clone(&schema),
-                true,
-                &session.state(),
-            )
-            .unwrap();
-            assert!(
-                !is_safe_to_prune_before(&ansi_bad, schema.as_ref()),
-                "ANSI spark_modulo by 0 or -1 must not be safe"
-            );
-        }
+        // 4. Zero remains fallible in ANSI mode. MIN % -1 is zero in Comet's kernel.
+        let ansi_zero = create_modulo_expr(
+            Arc::clone(&value),
+            lit(0_i32),
+            DataType::Int32,
+            Arc::clone(&schema),
+            true,
+            &session.state(),
+        )
+        .unwrap();
+        assert!(
+            !is_safe_to_prune_before(&ansi_zero, schema.as_ref()),
+            "ANSI spark_modulo by 0 must not be safe"
+        );
 
         // 5. Non-deterministic expressions (rand) remain boundaries
         let random_pred: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
@@ -436,5 +469,304 @@ mod tests {
             !is_safe_to_prune_before(&random_pred, schema.as_ref()),
             "random predicate must not be safe"
         );
+    }
+
+    fn modulo_function(
+        args: Vec<Arc<dyn PhysicalExpr>>,
+        data_type: arrow::datatypes::DataType,
+    ) -> Arc<dyn PhysicalExpr> {
+        use arrow::datatypes::Field;
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::prelude::SessionContext;
+        use datafusion_comet_spark_expr::create_comet_physical_fun;
+
+        Arc::new(ScalarFunctionExpr::new(
+            "spark_modulo",
+            create_comet_physical_fun(
+                "spark_modulo",
+                data_type.clone(),
+                &SessionContext::new().state(),
+                Some(true),
+            )
+            .unwrap(),
+            args,
+            Arc::new(Field::new("modulo", data_type, true)),
+            Arc::new(ConfigOptions::default()),
+        ))
+    }
+
+    #[test]
+    fn modulo_guard_must_check_the_same_typed_divisor() {
+        use arrow::array::{Int32Array, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int32, true),
+            Field::new("divisor", DataType::Int32, true),
+            Field::new("other", DataType::Int32, true),
+        ]));
+        let value: Arc<dyn PhysicalExpr> = Arc::new(Column::new("value", 0));
+        let divisor: Arc<dyn PhysicalExpr> = Arc::new(Column::new("divisor", 1));
+        let guard = |checked: Arc<dyn PhysicalExpr>, zero, null, returned| {
+            Arc::new(IfExpr::new(
+                Arc::new(BinaryExpr::new(checked, Operator::Eq, lit(zero))),
+                lit(null),
+                returned,
+            )) as Arc<dyn PhysicalExpr>
+        };
+        let unrelated = modulo_function(
+            vec![
+                Arc::clone(&value),
+                guard(
+                    Arc::new(Column::new("other", 2)),
+                    ScalarValue::Int32(Some(0)),
+                    ScalarValue::Int32(None),
+                    Arc::clone(&divisor),
+                ),
+            ],
+            DataType::Int32,
+        );
+        // This shape was previously admitted although it errors. Comet adds a
+        // matching guard in non-ANSI mode; an explicit ANSI IF divisor can retain
+        // an unrelated check through the supported remainder/IF builders.
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![10])),
+                Arc::new(Int32Array::from(vec![0])),
+                Arc::new(Int32Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+        assert!(unrelated.evaluate(&batch).is_err());
+        assert!(!is_safe_to_prune_before(&unrelated, &schema));
+
+        for (zero, null, returned) in [
+            (
+                ScalarValue::Int64(Some(0)),
+                ScalarValue::Int32(None),
+                Arc::clone(&divisor),
+            ),
+            (
+                ScalarValue::Int32(Some(0)),
+                ScalarValue::Int64(None),
+                Arc::clone(&divisor),
+            ),
+            (
+                ScalarValue::Int32(Some(0)),
+                ScalarValue::Int32(None),
+                lit(0_i64),
+            ),
+        ] {
+            let expression = modulo_function(
+                vec![
+                    Arc::clone(&value),
+                    guard(Arc::clone(&divisor), zero, null, returned),
+                ],
+                DataType::Int32,
+            );
+            assert!(!is_safe_to_prune_before(&expression, &schema));
+        }
+    }
+
+    #[test]
+    fn modulo_rejects_same_named_udfs_and_repeated_volatile_or_fallible_divisors() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::common::config::ConfigOptions;
+        use datafusion::logical_expr::{create_udf, Volatility};
+        use datafusion::physical_expr::expressions::CastExpr;
+        use datafusion::prelude::SessionContext;
+        use datafusion_comet_spark_expr::{create_modulo_expr, RandExpr};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int32, true),
+            Field::new("text", DataType::Utf8, true),
+        ]));
+        let value: Arc<dyn PhysicalExpr> = Arc::new(Column::new("value", 0));
+        let impostor = Arc::new(create_udf(
+            "spark_modulo",
+            vec![DataType::Int32, DataType::Int32],
+            DataType::Int32,
+            Volatility::Immutable,
+            Arc::new(|_| datafusion::common::exec_err!("same name, different contract")),
+        ));
+        let expr: Arc<dyn PhysicalExpr> = Arc::new(ScalarFunctionExpr::new(
+            "spark_modulo",
+            impostor,
+            vec![Arc::clone(&value), lit(3_i32)],
+            Arc::new(Field::new("modulo", DataType::Int32, true)),
+            Arc::new(ConfigOptions::default()),
+        ));
+        assert!(!is_safe_to_prune_before(&expr, &schema));
+
+        for divisor in [
+            Arc::new(RandExpr::new(42)) as Arc<dyn PhysicalExpr>,
+            Arc::new(CastExpr::new(
+                Arc::new(Column::new("text", 1)),
+                DataType::Int32,
+                None,
+            )),
+            Arc::new(BinaryExpr::new(
+                Arc::clone(&value),
+                Operator::Divide,
+                lit(0_i32),
+            )),
+        ] {
+            let data_type = divisor.data_type(&schema).unwrap();
+            let expr = create_modulo_expr(
+                lit(ScalarValue::try_from(&data_type).unwrap()),
+                divisor,
+                data_type,
+                Arc::clone(&schema),
+                false,
+                &SessionContext::new().state(),
+            )
+            .unwrap();
+            assert!(!is_safe_to_prune_before(&expr, &schema));
+        }
+    }
+
+    #[test]
+    fn canonical_modulo_evaluation_preserves_zero_null_and_minimum_semantics() {
+        use arrow::array::{Int32Array, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::common::cast::as_int32_array;
+        use datafusion::prelude::SessionContext;
+        use datafusion_comet_spark_expr::create_modulo_expr;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int32, true),
+            Field::new("divisor", DataType::Int32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![Some(i32::MIN), Some(7), None, Some(7)])),
+                Arc::new(Int32Array::from(vec![Some(-1), Some(0), Some(3), None])),
+            ],
+        )
+        .unwrap();
+        for fail_on_error in [false, true] {
+            let expr = create_modulo_expr(
+                Arc::new(Column::new("value", 0)),
+                Arc::new(Column::new("divisor", 1)),
+                DataType::Int32,
+                Arc::clone(&schema),
+                fail_on_error,
+                &SessionContext::new().state(),
+            )
+            .unwrap();
+            assert_eq!(is_safe_to_prune_before(&expr, &schema), !fail_on_error);
+            if fail_on_error {
+                assert!(expr.evaluate(&batch).is_err());
+            } else {
+                let result = expr.evaluate(&batch).unwrap().into_array(4).unwrap();
+                assert_eq!(
+                    as_int32_array(&result).unwrap(),
+                    &Int32Array::from(vec![Some(0), None, None, None])
+                );
+            }
+            // A constant -1 has no zero hazard even in ANSI mode.
+            let expr = create_modulo_expr(
+                Arc::new(Column::new("value", 0)),
+                lit(-1_i32),
+                DataType::Int32,
+                Arc::clone(&schema),
+                fail_on_error,
+                &SessionContext::new().state(),
+            )
+            .unwrap();
+            assert!(is_safe_to_prune_before(&expr, &schema));
+            let result = expr.evaluate(&batch).unwrap().into_array(4).unwrap();
+            assert_eq!(
+                as_int32_array(&result).unwrap(),
+                &Int32Array::from(vec![Some(0), Some(0), None, Some(0)])
+            );
+        }
+    }
+
+    #[test]
+    fn guarded_modulo_numeric_types_match_the_builtin_kernel_contract() {
+        use arrow::array::RecordBatch;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::prelude::SessionContext;
+        use datafusion_comet_spark_expr::create_modulo_expr;
+
+        for data_type in [
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Decimal128(18, 2),
+            DataType::Decimal256(50, 2),
+        ] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("value", data_type.clone(), true),
+                Field::new("divisor", data_type.clone(), true),
+            ]));
+            let dividend = match &data_type {
+                DataType::Int8 => ScalarValue::Int8(Some(i8::MIN)),
+                DataType::Int16 => ScalarValue::Int16(Some(i16::MIN)),
+                DataType::Int32 => ScalarValue::Int32(Some(i32::MIN)),
+                DataType::Int64 => ScalarValue::Int64(Some(i64::MIN)),
+                _ => ScalarValue::new_ten(&data_type).unwrap(),
+            };
+            let divisor = if matches!(
+                data_type,
+                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+            ) {
+                ScalarValue::new_negative_one(&data_type).unwrap()
+            } else {
+                ScalarValue::new_one(&data_type).unwrap()
+            };
+            let zero = ScalarValue::new_zero(&data_type).unwrap();
+            let null = ScalarValue::try_new_null(&data_type).unwrap();
+            for fail_on_error in [false, true] {
+                let expr = create_modulo_expr(
+                    Arc::new(Column::new("value", 0)),
+                    Arc::new(Column::new("divisor", 1)),
+                    data_type.clone(),
+                    Arc::clone(&schema),
+                    fail_on_error,
+                    &SessionContext::new().state(),
+                )
+                .unwrap();
+                assert_eq!(
+                    is_safe_to_prune_before(&expr, &schema),
+                    !fail_on_error,
+                    "{data_type}"
+                );
+                for (left, right, expected) in [
+                    (dividend.clone(), divisor.clone(), zero.clone()),
+                    (dividend.clone(), zero.clone(), null.clone()),
+                    (dividend.clone(), null.clone(), null.clone()),
+                    (null.clone(), divisor.clone(), null.clone()),
+                    (null.clone(), zero.clone(), null.clone()),
+                ] {
+                    let batch = RecordBatch::try_new(
+                        Arc::clone(&schema),
+                        vec![left.to_array().unwrap(), right.to_array().unwrap()],
+                    )
+                    .unwrap();
+                    let result = expr.evaluate(&batch);
+                    if fail_on_error && !left.is_null() && right == zero {
+                        assert!(result.is_err(), "{data_type}");
+                    } else {
+                        let array = result.unwrap().into_array(1).unwrap();
+                        assert_eq!(
+                            ScalarValue::try_from_array(&array, 0).unwrap(),
+                            expected,
+                            "{data_type}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
