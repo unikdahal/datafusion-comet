@@ -128,7 +128,8 @@ class PlanDataInjectorSuite extends AnyFunSuite {
 
   test("Iceberg file statistics and zero pool indices survive task plan injection") {
     val scan = icebergScanOp("s3://table/metadata/v1.json", scanHashCode = 111)
-    val lowerBound = com.google.protobuf.ByteString.copyFrom(Array[Byte](0xfe.toByte, 0xff.toByte))
+    val lowerBound =
+      com.google.protobuf.ByteString.copyFrom(Array[Byte](0xfe.toByte, 0xff.toByte))
     val metrics = OperatorOuterClass.IcebergFileMetrics
       .newBuilder()
       .setRecordCount(10L)

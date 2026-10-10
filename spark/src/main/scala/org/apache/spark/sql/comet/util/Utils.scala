@@ -287,7 +287,9 @@ object Utils extends CometTypeShim with Logging {
     }
   }
 
-  /** Writes one batch, releasing its buffers even if normalization or writer construction fails. */
+  /**
+   * Writes one batch, releasing its buffers even if normalization or writer construction fails.
+   */
   private[util] def writeBatch(
       root: VectorSchemaRoot,
       provider: DictionaryProvider,

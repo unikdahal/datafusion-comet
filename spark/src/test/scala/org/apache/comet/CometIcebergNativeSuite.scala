@@ -1253,10 +1253,12 @@ class CometIcebergNativeSuite
                         scan.copy(),
                         scan.clone().asInstanceOf[CometIcebergNativeScanExec],
                         scan.convertBlock()).foreach { copied =>
-                        assert(copied.nativeIcebergScanMetadata.runtimeFileStatistics eq statistics)
+                        assert(
+                          copied.nativeIcebergScanMetadata.runtimeFileStatistics eq statistics)
                         val copiedCommon =
                           OperatorOuterClass.IcebergScanCommon.parseFrom(copied.commonData)
-                        assert(copiedCommon.getFileMetricsPoolList == common.getFileMetricsPoolList)
+                        assert(
+                          copiedCommon.getFileMetricsPoolList == common.getFileMetricsPoolList)
                       }
                       assert(
                         scan.canonicalized

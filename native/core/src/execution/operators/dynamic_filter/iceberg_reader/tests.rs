@@ -1279,11 +1279,12 @@ fn filter_through_attaches_for_safe_deterministic_predicate() {
 
     // A guard on key cannot protect a different divisor, even with matching
     // types and otherwise infallible children. Keep the filter before pruning.
-    let unrelated_guard: Arc<dyn PhysicalExpr> = Arc::new(datafusion_comet_spark_expr::IfExpr::new(
-        Arc::new(BinaryExpr::new(Arc::clone(&key), Operator::Eq, lit(0_i32))),
-        lit(ScalarValue::Int32(None)),
-        Arc::clone(&value),
-    ));
+    let unrelated_guard: Arc<dyn PhysicalExpr> =
+        Arc::new(datafusion_comet_spark_expr::IfExpr::new(
+            Arc::new(BinaryExpr::new(Arc::clone(&key), Operator::Eq, lit(0_i32))),
+            lit(ScalarValue::Int32(None)),
+            Arc::clone(&value),
+        ));
     let modulo = create_modulo_expr(
         value,
         unrelated_guard,
@@ -1293,8 +1294,11 @@ fn filter_through_attaches_for_safe_deterministic_predicate() {
         &session.state(),
     )
     .unwrap();
-    let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(modulo, Operator::Eq, lit(0_i32)));
+    let predicate: Arc<dyn PhysicalExpr> =
+        Arc::new(BinaryExpr::new(modulo, Operator::Eq, lit(0_i32)));
     let filter: Arc<dyn ExecutionPlan> = Arc::new(FilterExec::try_new(predicate, scan).unwrap());
     assert!(!reaches_iceberg_reader(&filter));
-    assert!(try_attach_iceberg_reader_filter(&filter, dynamic, None).unwrap().is_none());
+    assert!(try_attach_iceberg_reader_filter(&filter, dynamic, None)
+        .unwrap()
+        .is_none());
 }

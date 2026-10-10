@@ -54,7 +54,8 @@ pub(super) fn reset_parquet_reader_filter(
             let Some(scan) = plan.downcast_ref::<DataSourceExec>() else {
                 return Ok(Transformed::no(plan));
             };
-            let Some((file_config, source)) = scan.downcast_to_file_source::<ParquetSource>() else {
+            let Some((file_config, source)) = scan.downcast_to_file_source::<ParquetSource>()
+            else {
                 return Ok(Transformed::no(plan));
             };
             let Some(filter) = source.filter() else {
@@ -74,9 +75,10 @@ pub(super) fn reset_parquet_reader_filter(
             }
             let mut file_config = file_config.clone();
             file_config.file_source = Arc::new(source.with_predicate(filter.data));
-            Ok(Transformed::yes(Arc::new(
-                scan.clone().with_data_source(Arc::new(file_config)),
-            ) as Arc<dyn ExecutionPlan>))
+            Ok(Transformed::yes(
+                Arc::new(scan.clone().with_data_source(Arc::new(file_config)))
+                    as Arc<dyn ExecutionPlan>,
+            ))
         })?
         .data;
     reset_plan_states(input)

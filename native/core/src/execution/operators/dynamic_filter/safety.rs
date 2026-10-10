@@ -89,9 +89,10 @@ pub(super) fn is_safe_to_prune_before(
         let children = if_expr.children();
         children.len() == 3
             && children[0].data_type(schema).ok() == Some(DataType::Boolean)
-            && children[1].data_type(schema).ok().is_some_and(|data_type| {
-                children[2].data_type(schema).ok() == Some(data_type)
-            })
+            && children[1]
+                .data_type(schema)
+                .ok()
+                .is_some_and(|data_type| children[2].data_type(schema).ok() == Some(data_type))
     } else {
         expr.is::<IsNullExpr>() || expr.is::<IsNotNullExpr>()
     };
@@ -155,10 +156,7 @@ fn is_modulo_type(data_type: &arrow::datatypes::DataType) -> bool {
     }
 }
 
-fn is_non_ansi_zero_guard(
-    expr: &Arc<dyn PhysicalExpr>,
-    schema: &arrow::datatypes::Schema,
-) -> bool {
+fn is_non_ansi_zero_guard(expr: &Arc<dyn PhysicalExpr>, schema: &arrow::datatypes::Schema) -> bool {
     let Some(if_expr) = expr.downcast_ref::<IfExpr>() else {
         return false;
     };
@@ -641,7 +639,12 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
-                Arc::new(Int32Array::from(vec![Some(i32::MIN), Some(7), None, Some(7)])),
+                Arc::new(Int32Array::from(vec![
+                    Some(i32::MIN),
+                    Some(7),
+                    None,
+                    Some(7),
+                ])),
                 Arc::new(Int32Array::from(vec![Some(-1), Some(0), Some(3), None])),
             ],
         )
