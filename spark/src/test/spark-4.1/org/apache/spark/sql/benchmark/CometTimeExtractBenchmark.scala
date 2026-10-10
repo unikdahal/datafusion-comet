@@ -181,7 +181,7 @@ object CometTimeExtractBenchmark extends CometBenchmarkBase {
   }
 
   // Written but never read: the volatile store keeps the JIT from dropping the measured work.
-  @volatile private var sink: Long = 0L
+  @volatile private var sink: Long = 0L // scalafix:ok RemoveUnused
 
   private def plan(query: String, arm: String): SparkPlan = {
     withSQLConf(
