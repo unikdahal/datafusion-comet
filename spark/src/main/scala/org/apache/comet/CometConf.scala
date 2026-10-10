@@ -134,11 +134,32 @@ object CometConf extends ShimCometConf {
       .category(CATEGORY_SCAN)
       .doc(
         "Maximum number of snapshot and runtime-key column combinations retained in the " +
-          "driver's least-recently-used Iceberg statistics cache. Each entry contains only " +
-          "selected data files and runtime-key column statistics.")
+          "driver's Iceberg statistics cache for this configuration. Configurations share a " +
+          "fixed 64 MiB estimated process budget and may evict each other's entries.")
       .intConf
       .checkValue(_ > 0, "Runtime statistics cache maximum entries must be positive")
       .createWithDefault(64)
+
+  val COMET_ICEBERG_RUNTIME_STATS_MAX_FILES: ConfigEntry[Int] =
+    conf("spark.comet.scan.icebergNative.runtimeStats.maxFiles")
+      .category(CATEGORY_SCAN)
+      .doc("Maximum distinct selected files collected per runtime statistics entry, including " +
+        "when caching is disabled. Larger scans retain row-group pruning only.")
+      .intConf
+      .checkValue(_ > 0, "Runtime statistics maximum files must be positive")
+      .createWithDefault(4096)
+
+  val COMET_ICEBERG_RUNTIME_STATS_MAX_BYTES: ConfigEntry[Long] =
+    conf("spark.comet.scan.icebergNative.runtimeStats.maxBytes")
+      .category(CATEGORY_SCAN)
+      .doc("Maximum estimated bytes collected per runtime statistics entry, including when " +
+        "caching is disabled. This is an approximate metadata budget, not a JVM heap limit. " +
+        "One collection runs at a time per driver; concurrent misses retain row-group pruning.")
+      .longConf
+      .checkValue(
+        value => value > 0 && value <= 64L * 1024 * 1024,
+        "Runtime statistics maximum bytes must be between 1 and 67108864")
+      .createWithDefault(8L * 1024 * 1024)
 
   val COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.write.iceberg.splitOperator.enabled")
