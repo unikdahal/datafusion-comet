@@ -51,6 +51,7 @@ log4rs = "1.4.0"
 prost = "0.14.3"
 jni = "0.22.4"
 rand = { workspace = true }
+roaring = { workspace = true }
 num = { workspace = true }
 tempfile = "3.26.0"
 itertools = "0.15.0"

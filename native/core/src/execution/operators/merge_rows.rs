@@ -21,7 +21,7 @@ use arrow::compute::{filter_record_batch, prep_null_mask_filter};
 use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::utils::memory::estimate_memory_size;
-use datafusion::common::{DataFusionError, HashSet, ScalarValue};
+use datafusion::common::{DataFusionError, HashMap, ScalarValue};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
@@ -39,6 +39,7 @@ use datafusion::{
 };
 use datafusion_comet_common::{cast_and_stamp_schema, SparkError};
 use futures::{Stream, StreamExt};
+use roaring::RoaringBitmap;
 use std::{
     pin::Pin,
     sync::Arc,
@@ -385,7 +386,7 @@ impl ExecutionPlan for MergeRowsExec {
             config: Arc::clone(&self.config),
             child_stream,
             schema: Arc::clone(&self.schema),
-            seen: HashSet::new(),
+            seen: MatchedRowIds::default(),
             reservation,
             baseline: BaselineMetrics::new(&self.metrics, partition),
             semantic_metrics,
@@ -410,24 +411,188 @@ pub struct MergeRowsStream {
     child_stream: SendableRecordBatchStream,
     schema: SchemaRef,
     // Partition-scoped so duplicate matches across Arrow batches are still detected.
-    seen: HashSet<i64>,
+    seen: MatchedRowIds,
     reservation: Option<MemoryReservation>,
     baseline: BaselineMetrics,
     semantic_metrics: Option<MergeSemanticMetrics>,
 }
 
-const SEEN_FIXED_BYTES: usize = std::mem::size_of::<HashSet<i64>>();
-// Covers hashbrown's mirrored control group and minimum small-table allocation.
-const SEEN_HASH_TABLE_SLACK_BYTES: usize = 64;
+/// Target row ids already matched in this partition, kept as Spark keeps them: 32-bit roaring
+/// bitmaps keyed by the high 32 bits of each id. This is a map of bitmaps rather than one
+/// `RoaringTreemap` because admission prices a batch from each touched container's current
+/// cardinality before inserting it, which needs a lookup by high bits that the treemap lacks.
+#[derive(Default)]
+struct MatchedRowIds {
+    partitions: HashMap<u32, RoaringBitmap>,
+    /// Upper bound of the bytes the bitmaps hold: `PARTITION_FIXED_BYTES` per bitmap plus
+    /// `container_bytes` of every container's cardinality.
+    bitmap_bytes: usize,
+    /// The current batch's ids, sorted. Reused across batches.
+    batch: Vec<u64>,
+}
 
-fn estimate_seen_memory_size(num_elements: usize) -> Result<usize, DataFusionError> {
-    estimate_memory_size::<i64>(num_elements, SEEN_FIXED_BYTES)?
-        .checked_add(SEEN_HASH_TABLE_SLACK_BYTES)
-        .ok_or_else(|| {
-            DataFusionError::ResourcesExhausted(
-                "MergeRows: cardinality memory estimate overflow".to_string(),
-            )
-        })
+// Priced from the roaring format, which every implementation shares, rather than from roaring-rs
+// internals. A container holds the values that share their high 16 bits, as a sorted array of u16
+// up to 4,096 values and as a 65,536-bit bitset beyond that. Array slots are charged double for Vec
+// growth, and each container and bitmap a generous fixed cost for its record and allocations.
+// Insertion never creates run containers: roaring-rs only builds them for ranges and `optimize`.
+const ARRAY_CONTAINER_LIMIT: u64 = 4096;
+const ARRAY_VALUE_BYTES: u64 = 4;
+const BITSET_CONTAINER_BYTES: u64 = 8 * 1024;
+const CONTAINER_FIXED_BYTES: u64 = 128;
+const PARTITION_FIXED_BYTES: u64 = 512;
+
+fn container_bytes(cardinality: u64) -> u64 {
+    match cardinality {
+        0 => 0,
+        c if c <= ARRAY_CONTAINER_LIMIT => CONTAINER_FIXED_BYTES + c * ARRAY_VALUE_BYTES,
+        _ => CONTAINER_FIXED_BYTES + BITSET_CONTAINER_BYTES,
+    }
+}
+
+fn cardinality_memory_overflow() -> DataFusionError {
+    DataFusionError::ResourcesExhausted(
+        "MergeRows: cardinality memory estimate overflow".to_string(),
+    )
+}
+
+fn to_usize(bytes: u64) -> Result<usize, DataFusionError> {
+    usize::try_from(bytes).map_err(|_| cardinality_memory_overflow())
+}
+
+/// What inserting a sorted, duplicate-free batch adds to `MatchedRowIds`.
+struct BatchGrowth {
+    /// Net change in the bytes the bitmaps keep. Negative when a full array becomes a smaller bitset.
+    bitmap_delta: i64,
+    /// What to admit: the sum of the growing containers, ignoring the ones that shrink, since a
+    /// store is allocated before the one it replaces is freed.
+    bitmap_growth: u64,
+    /// The largest single store rebuilt while inserting, briefly held next to its old copy.
+    transient_bytes: u64,
+    new_partitions: usize,
+}
+
+impl MatchedRowIds {
+    fn contains(&self, id: u64) -> bool {
+        self.partitions
+            .get(&((id >> 32) as u32))
+            .is_some_and(|bitmap| bitmap.contains(id as u32))
+    }
+
+    fn map_bytes(partitions: usize) -> Result<usize, DataFusionError> {
+        estimate_memory_size::<(u32, RoaringBitmap)>(partitions, 0)
+    }
+
+    /// Bytes to reserve for this state.
+    fn memory_size(&self) -> Result<usize, DataFusionError> {
+        Self::map_bytes(self.partitions.len())?
+            .checked_add(std::mem::size_of::<Self>())
+            .and_then(|bytes| bytes.checked_add(self.bitmap_bytes))
+            .and_then(|bytes| bytes.checked_add(self.batch.capacity() * std::mem::size_of::<u64>()))
+            .ok_or_else(cardinality_memory_overflow)
+    }
+
+    /// Prices inserting `self.batch` from the cardinality of each container it touches.
+    fn price_batch(&self) -> BatchGrowth {
+        let ids = &self.batch;
+        let mut growth = BatchGrowth {
+            bitmap_delta: 0,
+            bitmap_growth: 0,
+            transient_bytes: 0,
+            new_partitions: 0,
+        };
+        let mut index = 0;
+        while index < ids.len() {
+            let high = (ids[index] >> 32) as u32;
+            let bitmap = self.partitions.get(&high);
+            if bitmap.is_none() {
+                growth.new_partitions += 1;
+                growth.bitmap_delta += PARTITION_FIXED_BYTES as i64;
+                growth.bitmap_growth += PARTITION_FIXED_BYTES;
+            }
+            while index < ids.len() && (ids[index] >> 32) as u32 == high {
+                let container = ids[index] >> 16;
+                let mut end = index + 1;
+                while end < ids.len() && ids[end] >> 16 == container {
+                    end += 1;
+                }
+                let start = (container << 16) as u32;
+                let existing =
+                    bitmap.map_or(0, |bitmap| bitmap.range_cardinality(start..=start | 0xFFFF));
+                let projected = existing + (end - index) as u64;
+                let delta = container_bytes(projected) as i64 - container_bytes(existing) as i64;
+                growth.bitmap_delta += delta;
+                growth.bitmap_growth += delta.max(0) as u64;
+                growth.transient_bytes = growth.transient_bytes.max(container_bytes(projected));
+                index = end;
+            }
+        }
+        growth
+    }
+
+    /// Adds `ids` (`count` of them), or fails without changing what has been matched. A duplicate
+    /// is reported before any memory is requested, as Spark reports it, so the sort buffer (eight
+    /// bytes per row of one batch) is allocated before it is admitted. The bitmaps' growth is
+    /// reserved before they change, and the reservation then shrinks to what they keep.
+    fn insert_batch(
+        &mut self,
+        ids: impl Iterator<Item = i64>,
+        count: usize,
+        reservation: &mut MemoryReservation,
+    ) -> Result<(), DataFusionError> {
+        if count == 0 {
+            return Ok(());
+        }
+        self.batch.clear();
+        self.batch.reserve_exact(count);
+        // Casting is a bijection over the i64 bit patterns, so negative ids stay distinct.
+        self.batch.extend(ids.map(|id| id as u64));
+        self.batch.sort_unstable();
+        if self.batch.windows(2).any(|pair| pair[0] == pair[1])
+            || self.batch.iter().any(|&id| self.contains(id))
+        {
+            return Err(cardinality_violation());
+        }
+
+        let growth = self.price_batch();
+        let partitions = self.partitions.len();
+        let grown_partitions = partitions + growth.new_partitions;
+        let map_growth = Self::map_bytes(grown_partitions)? - Self::map_bytes(partitions)?;
+        // Growing the map rehashes into a new table while the old one is still allocated.
+        let map_transient = if grown_partitions > self.partitions.capacity() {
+            Self::map_bytes(partitions)?
+        } else {
+            0
+        };
+        let admitted = self
+            .memory_size()?
+            .checked_add(to_usize(growth.bitmap_growth)?)
+            .and_then(|bytes| bytes.checked_add(map_growth))
+            .and_then(|bytes| bytes.checked_add(map_transient))
+            .and_then(|bytes| bytes.checked_add(to_usize(growth.transient_bytes).ok()?))
+            .ok_or_else(cardinality_memory_overflow)?;
+        reservation.try_resize(admitted)?;
+
+        let mut index = 0;
+        while index < self.batch.len() {
+            let high = (self.batch[index] >> 32) as u32;
+            let bitmap = self.partitions.entry(high).or_default();
+            while index < self.batch.len() && (self.batch[index] >> 32) as u32 == high {
+                let inserted = bitmap.insert(self.batch[index] as u32);
+                debug_assert!(inserted, "duplicates were rejected before insertion");
+                index += 1;
+            }
+        }
+        self.bitmap_bytes = usize::try_from(self.bitmap_bytes as i64 + growth.bitmap_delta)
+            .expect("the bitmaps never hold a negative number of bytes");
+        reservation.resize(self.memory_size()?);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> u64 {
+        self.partitions.values().map(RoaringBitmap::len).sum()
+    }
 }
 
 /// Spark predicates treat NULL as false; Arrow boolean kernels preserve NULL.
@@ -545,36 +710,12 @@ fn cardinality_violation() -> DataFusionError {
     DataFusionError::External(Box::new(SparkError::MergeCardinalityViolation))
 }
 
-fn reserve_seen_growth(
-    seen: &mut HashSet<i64>,
-    reservation: &mut MemoryReservation,
-) -> Result<(), DataFusionError> {
-    let next_len = seen.len().checked_add(1).ok_or_else(|| {
-        DataFusionError::ResourcesExhausted(
-            "MergeRows: cardinality set length overflow".to_string(),
-        )
-    })?;
-    let projected_bytes = estimate_seen_memory_size(next_len)?;
-    let additional = projected_bytes.saturating_sub(reservation.size());
-    reservation.try_grow(additional)?;
-
-    if let Err(e) = seen.try_reserve(1) {
-        if additional != 0 {
-            reservation.shrink(additional);
-        }
-        return Err(DataFusionError::ResourcesExhausted(format!(
-            "MergeRows: failed to allocate cardinality set: {e}"
-        )));
-    }
-    Ok(())
-}
-
 /// Detects a target row matched by more than one source row.
 fn check_cardinality(
     batch: &RecordBatch,
     matched_mask: &BooleanArray,
     row_id_ordinal: usize,
-    seen: &mut HashSet<i64>,
+    seen: &mut MatchedRowIds,
     reservation: &mut MemoryReservation,
 ) -> Result<(), DataFusionError> {
     let row_ids = batch
@@ -584,35 +725,22 @@ fn check_cardinality(
         .ok_or_else(|| {
             DataFusionError::Internal("MergeRows: row id column must be Int64".to_string())
         })?;
-
-    for i in matched_mask.values().set_indices() {
-        // Spark's row-id read treats a null long slot as zero.
-        let id = if row_ids.is_null(i) {
+    let matched = matched_mask.values();
+    // Spark's row-id read treats a null long slot as zero.
+    let ids = matched.set_indices().map(|i| {
+        if row_ids.is_null(i) {
             0
         } else {
             row_ids.value(i)
-        };
-
-        if seen.len() < seen.capacity() {
-            if !seen.insert(id) {
-                return Err(cardinality_violation());
-            }
-        } else {
-            // Preserve Spark's error precedence: detect duplicates before memory admission.
-            if seen.contains(&id) {
-                return Err(cardinality_violation());
-            }
-            reserve_seen_growth(seen, reservation)?;
-            seen.insert(id);
         }
-    }
-    Ok(())
+    });
+    seen.insert_batch(ids, matched.count_set_bits(), reservation)
 }
 
 fn process_batch_with_metrics(
     batch: RecordBatch,
     config: &MergeConfig,
-    seen: &mut HashSet<i64>,
+    seen: &mut MatchedRowIds,
     reservation: Option<&mut MemoryReservation>,
     schema: &SchemaRef,
     metrics: Option<&MergeSemanticMetrics>,
@@ -666,7 +794,7 @@ fn process_batch_with_metrics(
 fn process_batch(
     batch: RecordBatch,
     config: &MergeConfig,
-    seen: &mut HashSet<i64>,
+    seen: &mut MatchedRowIds,
     reservation: Option<&mut MemoryReservation>,
     schema: &SchemaRef,
 ) -> Result<RecordBatch, DataFusionError> {
@@ -880,7 +1008,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -914,7 +1042,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -958,7 +1086,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -1001,7 +1129,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -1050,7 +1178,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -1088,7 +1216,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -1104,34 +1232,40 @@ mod tests {
         MemoryConsumer::new("test").register(&pool)
     }
 
-    fn run_cardinality(
-        n: usize,
+    fn run_cardinality_ids(
+        ids: &[i64],
         batch_rows: usize,
         reservation: &mut MemoryReservation,
-    ) -> Result<HashSet<i64>, DataFusionError> {
-        let mut seen = HashSet::new();
-        let mut next = 0i64;
-        while (next as usize) < n {
-            let end = ((next as usize) + batch_rows).min(n) as i64;
-            let ids: Vec<i64> = (next..end).collect();
-            let len = ids.len();
-            let batch = test_batch(ids, vec![0; len], vec![true; len], vec![true; len]);
+    ) -> Result<MatchedRowIds, DataFusionError> {
+        let mut seen = MatchedRowIds::default();
+        for chunk in ids.chunks(batch_rows) {
+            let len = chunk.len();
+            let batch = test_batch(
+                chunk.to_vec(),
+                vec![0; len],
+                vec![true; len],
+                vec![true; len],
+            );
             let mask = BooleanArray::from(vec![true; len]);
             check_cardinality(&batch, &mask, 0, &mut seen, reservation)?;
-            next = end;
         }
         Ok(seen)
     }
 
-    fn assert_seen_fully_reserved(seen: &HashSet<i64>, reservation: &MemoryReservation) {
-        let actual = seen.allocation_size().saturating_add(SEEN_FIXED_BYTES);
-        assert!(
-            reservation.size() >= actual,
-            "reserved {} bytes < actual HashSet footprint {} bytes (len={}, capacity={})",
+    fn run_cardinality(
+        n: usize,
+        batch_rows: usize,
+        reservation: &mut MemoryReservation,
+    ) -> Result<MatchedRowIds, DataFusionError> {
+        let ids: Vec<i64> = (0..n as i64).collect();
+        run_cardinality_ids(&ids, batch_rows, reservation)
+    }
+
+    fn assert_seen_fully_reserved(seen: &MatchedRowIds, reservation: &MemoryReservation) {
+        assert_eq!(
             reservation.size(),
-            actual,
-            seen.len(),
-            seen.capacity()
+            seen.memory_size().unwrap(),
+            "the reservation must match the measured cardinality state"
         );
     }
 
@@ -1207,79 +1341,198 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_reservation_covers_actual_hashbrown_allocations() {
-        for &(n, batch_rows) in &[
-            (1usize, 1usize),
-            (2, 1),
-            (3, 1),
-            (7, 1),
-            (8, 1),
-            (9, 1),
-            (17, 1),
-            (64, 8),
-            (200, 16),
+    fn cardinality_reservation_tracks_dense_sparse_and_spark_layouts() {
+        let dense: Vec<i64> = (0..70_000).collect();
+        let sparse: Vec<i64> = (0..20_000).map(|i| i * 200).collect();
+        // Spark's monotonically increasing ids: partition id << 33 plus a row counter.
+        let spark = |partitions: i64| -> Vec<i64> {
+            (0..20_000)
+                .map(|i| ((i % partitions) << 33) + i / partitions)
+                .collect()
+        };
+        let mut shuffled = dense.clone();
+        // A fixed permutation, so the ids arrive out of order.
+        shuffled.sort_by_key(|id| (id * 7_919) % 70_001);
+        let signed = vec![i64::MIN, -1, 0, 1, i64::MAX];
+        for (name, ids, batch_rows) in [
+            ("dense-single-row", dense[..300].to_vec(), 1usize),
+            ("dense", dense.clone(), 8192),
+            ("sparse", sparse, 257),
+            ("spark-200", spark(200), 8192),
+            ("spark-16k", spark(16_384), 8192),
+            ("shuffled", shuffled, 8192),
+            ("signed", signed, 2),
         ] {
             let mut reservation = test_reservation();
-            let seen = run_cardinality(n, batch_rows, &mut reservation).unwrap();
+            let seen = run_cardinality_ids(&ids, batch_rows, &mut reservation)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(seen.len(), ids.len() as u64, "{name}");
             assert_seen_fully_reserved(&seen, &reservation);
         }
     }
 
     #[test]
-    fn cardinality_state_cannot_exceed_a_bounded_pool() {
-        let n = 917_505;
-        let mut reservation = bounded_reservation(16 * 1024 * 1024);
-        let err = run_cardinality(n, 4096, &mut reservation).unwrap_err();
+    fn cardinality_pricing_handles_an_array_becoming_a_bitset() {
+        // A container priced as an array of 4,096 values costs more than the bitset it becomes at
+        // 4,097, so growth across that boundary is negative and must not be treated as a size.
         assert!(
-            matches!(err, DataFusionError::ResourcesExhausted(_)),
-            "expected the pool to reject the oversized cardinality table, got {err}"
+            container_bytes(ARRAY_CONTAINER_LIMIT) > container_bytes(ARRAY_CONTAINER_LIMIT + 1)
+        );
+        let ids: Vec<i64> = (0..8_192).collect();
+        for batch_rows in [4_096, 4_097, 8_192, 1] {
+            let mut reservation = test_reservation();
+            let seen = run_cardinality_ids(&ids, batch_rows, &mut reservation).unwrap();
+            assert_eq!(seen.len(), 8_192, "batches of {batch_rows}");
+            assert_seen_fully_reserved(&seen, &reservation);
+        }
+    }
+
+    #[test]
+    fn cardinality_insertion_never_creates_run_containers() {
+        // A full container and a long dense range are where run containers would pay off.
+        let ids: Vec<i64> = (0..200_000).collect();
+        let mut reservation = test_reservation();
+        let seen = run_cardinality_ids(&ids, 8192, &mut reservation).unwrap();
+        for bitmap in seen.partitions.values() {
+            assert_eq!(bitmap.statistics().n_run_containers, 0);
+        }
+    }
+
+    #[test]
+    fn cardinality_reservation_covers_real_allocations() {
+        use crate::alloc_accounting::current_balance;
+
+        // The accounting allocator settles each thread's balance in steps of up to 64 KiB.
+        const SLACK: usize = 512 * 1024;
+        let spread = |n: i64, shift: u32| -> Vec<i64> { (0..n).map(|i| i << shift).collect() };
+        let mut shuffled: Vec<i64> = (0..1_000_000).map(|i| i * 16).collect();
+        shuffled.sort_by_key(|id| (id / 16 * 7_919) % 1_000_003);
+        for (name, ids) in [
+            ("one id per container", spread(60_000, 16)),
+            ("one id per bitmap", spread(40_000, 32)),
+            ("dense", (0..4_000_000).collect()),
+            ("full arrays, shuffled", shuffled),
+        ] {
+            let base = current_balance();
+            let mut reservation = test_reservation();
+            let seen = run_cardinality_ids(&ids, 8192, &mut reservation).unwrap();
+            let heap = current_balance().saturating_sub(base);
+            assert!(
+                reservation.size() + SLACK >= heap,
+                "{name}: reserved {} bytes, but the state holds {heap}",
+                reservation.size()
+            );
+            drop(seen);
+        }
+    }
+
+    #[test]
+    fn cardinality_admission_failure_leaves_the_state_unchanged() {
+        let mut reservation = bounded_reservation(64 * 1024);
+        let mut seen =
+            run_cardinality_ids(&(0..1_000).collect::<Vec<i64>>(), 8192, &mut reservation).unwrap();
+        let (len, bytes, partitions, reserved) = (
+            seen.len(),
+            seen.bitmap_bytes,
+            seen.partitions.len(),
+            reservation.size(),
         );
 
-        let needed = estimate_seen_memory_size(n).unwrap();
-        let mut ok_reservation = bounded_reservation(needed + 8 * 1024 * 1024);
-        let seen = run_cardinality(n, 4096, &mut ok_reservation).unwrap();
-        assert_eq!(seen.len(), n);
+        // A thousand ids in containers of their own need far more than the pool has left.
+        let ids: Vec<i64> = (1..1_001).map(|i| i << 16).collect();
+        let batch = test_batch(ids, vec![0; 1_000], vec![true; 1_000], vec![true; 1_000]);
+        let err = check_cardinality(
+            &batch,
+            &BooleanArray::from(vec![true; 1_000]),
+            0,
+            &mut seen,
+            &mut reservation,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DataFusionError::ResourcesExhausted(_)),
+            "{err}"
+        );
+        assert_eq!(seen.len(), len);
+        assert_eq!(seen.bitmap_bytes, bytes);
+        assert_eq!(seen.partitions.len(), partitions);
+        assert_eq!(reservation.size(), reserved);
+    }
+
+    #[test]
+    fn cardinality_state_is_far_smaller_than_a_hash_set() {
+        let n = 1_000_000;
+        let mut reservation = test_reservation();
+        let seen = run_cardinality(n, 8192, &mut reservation).unwrap();
+        // 16 bitset containers, against about 16 MiB for a hash set of a million i64s.
+        assert!(
+            reservation.size() < 256 * 1024,
+            "dense ids reserved {} bytes",
+            reservation.size()
+        );
+        assert_seen_fully_reserved(&seen, &reservation);
+    }
+
+    #[test]
+    fn cardinality_state_cannot_exceed_a_bounded_pool() {
+        // Sparse ids, one per container, need far more than 64 KiB.
+        let ids: Vec<i64> = (0..10_000).map(|i| i << 16).collect();
+        let mut reservation = bounded_reservation(64 * 1024);
+        let err = run_cardinality_ids(&ids, 8192, &mut reservation)
+            .err()
+            .expect("the pool must reject the state");
+        assert!(
+            matches!(err, DataFusionError::ResourcesExhausted(_)),
+            "expected the pool to reject the cardinality state, got {err}"
+        );
+
+        let mut probe = test_reservation();
+        let needed = run_cardinality_ids(&ids, 8192, &mut probe)
+            .unwrap()
+            .memory_size()
+            .unwrap();
+        // Room for the store rebuilt while inserting, briefly held next to its old copy.
+        let mut ok_reservation = bounded_reservation(needed + 64 * 1024);
+        let seen = run_cardinality_ids(&ids, 8192, &mut ok_reservation).unwrap();
         assert_seen_fully_reserved(&seen, &ok_reservation);
     }
 
     #[test]
     fn cardinality_violation_wins_over_memory_exhaustion() {
-        let mut seen = HashSet::new();
-        let mut warmup_reservation = test_reservation();
-        let mut next_id = 1i64;
-
-        while seen.len() < seen.capacity().max(1) {
-            let batch = test_batch(vec![next_id], vec![0], vec![true], vec![true]);
-            check_cardinality(
-                &batch,
-                &BooleanArray::from(vec![true]),
-                0,
-                &mut seen,
-                &mut warmup_reservation,
-            )
-            .unwrap();
-            next_id += 1;
-        }
-        assert_eq!(seen.len(), seen.capacity(), "table must be full");
-
-        let duplicate = test_batch(vec![1], vec![0], vec![true], vec![true]);
-        let mut zero_budget = bounded_reservation(0);
-        let duplicate_err = check_cardinality(
-            &duplicate,
+        let mut seen = MatchedRowIds::default();
+        let first = test_batch(vec![1], vec![0], vec![true], vec![true]);
+        check_cardinality(
+            &first,
             &BooleanArray::from(vec![true]),
             0,
             &mut seen,
-            &mut zero_budget,
+            &mut test_reservation(),
         )
-        .unwrap_err();
-        assert!(
-            duplicate_err
-                .to_string()
-                .contains("MERGE_CARDINALITY_VIOLATION"),
-            "expected cardinality violation before pool admission, got {duplicate_err}"
-        );
+        .unwrap();
 
-        let new_id = test_batch(vec![next_id], vec![0], vec![true], vec![true]);
+        let mut zero_budget = bounded_reservation(0);
+        for (ids, what) in [
+            (vec![1], "across batches"),
+            (vec![2, 2], "within a batch"),
+            (vec![(7 << 32) + 5, (7 << 32) + 5], "in a new partition"),
+        ] {
+            let len = ids.len();
+            let batch = test_batch(ids, vec![0; len], vec![true; len], vec![true; len]);
+            let err = check_cardinality(
+                &batch,
+                &BooleanArray::from(vec![true; len]),
+                0,
+                &mut seen,
+                &mut zero_budget,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("MERGE_CARDINALITY_VIOLATION"),
+                "expected a cardinality violation {what} before pool admission, got {err}"
+            );
+        }
+
+        let new_id = test_batch(vec![3], vec![0], vec![true], vec![true]);
         let memory_err = check_cardinality(
             &new_id,
             &BooleanArray::from(vec![true]),
@@ -1290,7 +1543,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(memory_err, DataFusionError::ResourcesExhausted(_)),
-            "expected memory exhaustion for a new id at capacity, got {memory_err}"
+            "expected memory exhaustion for a new id, got {memory_err}"
         );
     }
 
@@ -1298,7 +1551,7 @@ mod tests {
     fn cardinality_violation_detected() {
         let batch = test_batch(vec![1, 1], vec![10, 20], vec![true, true], vec![true, true]);
         let matched_mask = BooleanArray::from(vec![true, true]);
-        let mut seen = HashSet::new();
+        let mut seen = MatchedRowIds::default();
         let result =
             check_cardinality(&batch, &matched_mask, 0, &mut seen, &mut test_reservation());
         assert!(result.is_err());
@@ -1320,7 +1573,7 @@ mod tests {
         let out = process_batch(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             Some(&mut test_reservation()),
             &out_schema(),
         )
@@ -1381,7 +1634,7 @@ mod tests {
         let output = process_batch_with_metrics(
             batch,
             &config,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             Some(&mut test_reservation()),
             &out_schema(),
             Some(&metrics),
@@ -1416,7 +1669,7 @@ mod tests {
             &batch,
             &matched_mask,
             0,
-            &mut HashSet::new(),
+            &mut MatchedRowIds::default(),
             &mut test_reservation(),
         );
         assert!(result.is_err());
@@ -1665,7 +1918,7 @@ mod tests {
 
     #[test]
     fn cardinality_violation_detected_across_batches() {
-        let mut seen = HashSet::new();
+        let mut seen = MatchedRowIds::default();
         let batch1 = test_batch(vec![1], vec![10], vec![true], vec![true]);
         let batch2 = test_batch(vec![1], vec![20], vec![true], vec![true]);
         let config = test_config(vec![keep_all()], vec![], vec![], Some(0));
