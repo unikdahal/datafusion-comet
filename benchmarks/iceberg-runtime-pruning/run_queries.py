@@ -105,7 +105,7 @@ def run(spark, name, sql, identity):
         "exec_ms": (finished - planned) * 1000.0,
         "total_ms": (finished - started) * 1000.0,
         "rows": len(rows),
-        "checksum": hashlib.sha256(result.encode()).hexdigest()[:16],
+        "checksum": hashlib.sha256(result.encode()).hexdigest(),
         "schema_json": df.schema.json(),
         **scan_metrics(plan),
     }
