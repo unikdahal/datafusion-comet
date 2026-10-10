@@ -194,7 +194,10 @@ impl ExecutionPlan for DynamicFilterExec {
             lit(true),
         ));
         Ok(Arc::new(Self {
-            input: Arc::clone(&self.input),
+            input: super::parquet_reader::reset_parquet_reader_filter(
+                Arc::clone(&self.input),
+                &self.predicate,
+            )?,
             predicate,
             metrics: ExecutionPlanMetricsSet::new(),
             metric_prefix: self.metric_prefix,

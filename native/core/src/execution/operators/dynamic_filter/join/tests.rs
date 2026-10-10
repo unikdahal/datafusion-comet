@@ -28,6 +28,7 @@ use crate::parquet::parquet_support::ObjectStoreBackend;
 use arrow::array::{ArrayRef, BooleanArray, Int32Array, Int64Array, Int8Array, RecordBatch};
 use arrow::compute::{cast, filter_record_batch};
 use arrow::datatypes::{Field, Schema};
+use datafusion::common::cast::as_int32_array;
 use datafusion::common::test_util::batches_to_sort_string;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::listing::PartitionedFile;
@@ -1123,6 +1124,85 @@ async fn run_parquet_join(values: Vec<i32>, enabled: bool) -> (usize, usize, usi
 }
 
 #[tokio::test]
+async fn direct_parquet_consumer_reset_detaches_old_reader_domain() {
+    fn only_key(output: &[RecordBatch]) -> i32 {
+        assert_eq!(row_count(output), 1);
+        let batch = output.iter().find(|batch| batch.num_rows() != 0).unwrap();
+        as_int32_array(batch.column(0).as_ref()).unwrap().value(0)
+    }
+
+    for row_filter in [false, true] {
+        let mut config = SessionConfig::new()
+            .with_target_partitions(1)
+            .with_parquet_page_index_pruning(false);
+        config.options_mut().execution.parquet.pushdown_filters = row_filter;
+        let session = Arc::new(SessionContext::new_with_config(config));
+        let (_file, scan) = parquet_probe((0..400).collect(), &session, 100);
+        let join = single_key_join_plans(
+            two_batch_build(),
+            filtered_probe(&scan),
+            PartitionMode::Partitioned,
+        );
+        let wrapper =
+            DynamicFilterJoinExec::new(&join, session.copied_config().options().as_ref().clone())
+                .unwrap();
+        let runtime = wrapper.build_runtime_join().unwrap();
+        assert!(runtime.reader_filter_attached);
+        let consumer = Arc::clone(runtime.join.right());
+        let filter = consumer.children()[0]
+            .downcast_ref::<CometFilterExec>()
+            .unwrap();
+        let reader = Arc::new(filter.input().downcast_ref::<DataSourceExec>().unwrap().clone());
+        let old_predicate = produced_join_filter(&runtime.join);
+        let domain = |key| {
+            Arc::new(BinaryExpr::new(
+                Arc::new(Column::new("key", 0)),
+                Operator::Eq,
+                lit(key),
+            )) as Arc<dyn PhysicalExpr>
+        };
+        old_predicate.update(domain(5_i32)).unwrap();
+        let output = collect(Arc::clone(&consumer), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(only_key(&output), 5);
+        assert!(pruning_metric(&reader, "row_groups_pruned_statistics") > 0);
+
+        // Refresh child queues first, as reset_plan_states does bottom-up.
+        // DataSource reset retains the reader expression, so the regression
+        // isolates stale pruning from an exhausted file queue.
+        let input = datafusion::physical_plan::execution_plan::reset_plan_states(
+            Arc::clone(consumer.children()[0]),
+        )
+        .unwrap();
+        let consumer = consumer.with_new_children(vec![input]).unwrap();
+        // Reset the actual attached consumer, keeping its old producer and plan
+        // alive. A new domain in a different row group must survive the reader.
+        let reset = consumer.reset_state().unwrap();
+        reset
+            .apply_expressions(&mut |expr| {
+                expr.downcast_ref::<DynamicFilterPhysicalExpr>()
+                    .unwrap()
+                    .update(domain(250_i32))?;
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        let output = collect(Arc::clone(&reset), session.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(only_key(&output), 250);
+        // Reset must not clear shared state in the original reader/producer.
+        assert!(old_predicate.current().unwrap().eq(&domain(5_i32)));
+        let (_, source) = reader.downcast_to_file_source::<ParquetSource>().unwrap();
+        let filter = source.filter().unwrap();
+        assert_eq!(
+            find_dynamic_filter(&filter).unwrap().expression_id(),
+            old_predicate.expression_id(),
+        );
+    }
+}
+
+#[tokio::test]
 async fn broadcast_filter_reaches_parquet_reader_after_complete_build() {
     let mut config = SessionConfig::new()
         .with_target_partitions(1)
@@ -1742,8 +1822,31 @@ async fn iceberg_reader_attachment_uses_join_for_exact_membership() {
     // A direct reset must detach the old reader restriction as well as the
     // producer's discovery expression, even if the old join is still owned.
     let reset = visible_consumer.reset_state().unwrap();
-    let reset_output = collect(reset, session.task_ctx()).await.unwrap();
+    let reset_output = collect(Arc::clone(&reset), session.task_ctx()).await.unwrap();
     assert_eq!(row_count(&reset_output), 7);
+    // Reattach a disjoint domain to the reset reader. Its old {100, 103}
+    // restriction must not survive alongside the new provider.
+    let predicate = Arc::new(DynamicFilterPhysicalExpr::new(
+        vec![Arc::new(Column::new("key", 0))],
+        lit(true),
+    ));
+    predicate
+        .update(Arc::new(BinaryExpr::new(
+            Arc::new(Column::new("key", 0)),
+            Operator::Eq,
+            lit(99_i32),
+        )))
+        .unwrap();
+    let reattached = super::super::iceberg_reader::try_attach_iceberg_join_filter(
+        &reset,
+        predicate,
+    )
+    .unwrap()
+    .unwrap();
+    let reset_output = collect(reattached, session.task_ctx()).await.unwrap();
+    assert_eq!(row_count(&reset_output), 1);
+    let batch = reset_output.iter().find(|batch| batch.num_rows() != 0).unwrap();
+    assert_eq!(as_int32_array(batch.column(0).as_ref()).unwrap().value(0), 99);
     assert_eq!(
         batches_to_sort_string(&actual),
         batches_to_sort_string(&expected)
