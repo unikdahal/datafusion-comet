@@ -30,7 +30,7 @@ import scala.jdk.CollectionConverters._
 import org.apache.arrow.c.CDataDictionaryProvider
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector.{BaseVariableWidthVector, FieldVector, IntVector, ValueVector, VarBinaryVector, VarCharVector, VectorSchemaRoot}
-import org.apache.arrow.vector.complex.ListVector
+import org.apache.arrow.vector.complex.{ListVector, StructVector}
 import org.apache.arrow.vector.dictionary.{Dictionary, DictionaryProvider}
 import org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider
 import org.apache.arrow.vector.ipc.ArrowStreamWriter
@@ -54,25 +54,38 @@ class UtilsSuite extends CometTestBase {
     val allocator = new RootAllocator(Long.MaxValue)
     val indexType = new ArrowType.Int(32, true)
     val encoding = new DictionaryEncoding(7L, false, indexType)
-    val indices = new IntVector("key", new FieldType(true, indexType, encoding), allocator)
-    val root = new VectorSchemaRoot(Arrays.asList[FieldVector](indices))
-    val provider = new CDataDictionaryProvider
-    val out = new DataOutputStream(new ByteArrayOutputStream)
+    val struct = StructVector.empty("struct", allocator)
+    val indices = struct.addOrGet("key", new FieldType(true, indexType, encoding), classOf[IntVector])
+    val values = new VarCharVector("values", allocator)
+    val provider = new MapDictionaryProvider(new Dictionary(values, encoding))
     try {
-      indices.allocateNew(2)
+      values.allocateNew()
+      values.setSafe(0, "alpha".getBytes(UTF_8))
+      values.setSafe(1, "beta".getBytes(UTF_8))
+      values.setValueCount(2)
+      val dictionaryBytes = allocator.getAllocatedMemory
+      struct.allocateNew()
+      struct.setIndexDefined(0)
+      struct.setIndexDefined(1)
       indices.set(0, 0)
       indices.set(1, 1)
-      root.setRowCount(2)
+      struct.setValueCount(2)
+      val batch = new ColumnarBatch(
+        Array[ColumnVector](CometVector.getVector(struct, provider)),
+        2)
       val failure = intercept[IllegalArgumentException] {
-        // Arrow resolves dictionary fields in its constructor, before start/writeBatch.
-        Utils.writeBatch(root, provider, out)
+        // Provider combination currently only visits top-level dictionary fields. A nested
+        // dictionary therefore reaches the real writer constructor with no matching dictionary.
+        // Preserve that existing error while releasing the consumed batch and normalized root.
+        Utils.serializeBatches(Iterator(batch)).next()
       }
       assert(failure.getMessage.contains("Could not find dictionary with ID 7"))
-      assert(allocator.getAllocatedMemory == 0L)
+      assert(allocator.getAllocatedMemory == dictionaryBytes)
+      assert(values.getObject(1).toString == "beta")
     } finally {
-      root.close()
+      struct.close()
       provider.close()
-      out.close()
+      assert(allocator.getAllocatedMemory == 0L)
       allocator.close()
     }
   }
