@@ -30,34 +30,12 @@ import os
 import time
 
 from pyspark.sql import SparkSession
+from workloads import QUERIES, sql_digest
 
 VARIANT = os.environ["BENCH_VARIANT"]
 ROUND = int(os.environ["BENCH_ROUND"])
 REPS = int(os.environ.get("BENCH_REPS", "3"))
 OUTPUT = os.environ["BENCH_OUTPUT"]
-
-JOIN = """
-SELECT /*+ BROADCAST(d) */ count(*), sum(f.value), sum(length(f.payload))
-FROM bench.db.{table} f JOIN bench.db.dim d ON f.id = d.id
-"""
-TOPK = "SELECT id, value, payload FROM bench.db.{table} ORDER BY id LIMIT 10"
-MIN = "SELECT min(id) FROM bench.db.{table}"
-
-QUERIES = [
-    ("join_sorted", JOIN.format(table="fact_sorted")),
-    ("join_position_deletes", JOIN.format(table="fact_pos_deletes")),
-    ("join_unsorted", JOIN.format(table="fact_unsorted")),
-    ("topk_sorted", TOPK.format(table="fact_sorted")),
-    ("topk_position_deletes", TOPK.format(table="fact_pos_deletes")),
-    ("topk_unsorted", TOPK.format(table="fact_unsorted")),
-    ("min_sorted", MIN.format(table="fact_sorted")),
-    ("min_unsorted", MIN.format(table="fact_unsorted")),
-    # No runtime producer: measures any overhead on an ordinary scan.
-    (
-        "scan_control",
-        "SELECT count(*), sum(value) FROM bench.db.fact_sorted WHERE payload LIKE 'ff%'",
-    ),
-]
 
 SCAN_METRICS = [
     "bytes_scanned",
@@ -103,6 +81,7 @@ def run(spark, name, sql):
     result = repr([tuple(row) for row in rows])
     return {
         "query": name,
+        "sql_sha256": sql_digest(sql),
         "plan_ms": (planned - started) * 1000.0,
         "exec_ms": (finished - planned) * 1000.0,
         "total_ms": (finished - started) * 1000.0,
