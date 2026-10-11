@@ -101,8 +101,9 @@ pruning. Integer, date and timestamp TopK can support either null ordering;
 eligibility still depends on the reader and every sort expression. Decimal
 join and file-statistics support does not imply Decimal TopK or MIN/MAX support.
 String MIN/MAX requires direct binary string lineage. JVM file-statistics
-eligibility and native per-consumer eligibility are separate contracts, with
-agreement tests for the shared cases.
+eligibility and native per-consumer eligibility are defined separately in Scala
+and Rust. Together they form a cross-language eligibility contract with agreement
+tests for the shared cases, not a single source of truth.
 
 Join reader attachment also retains a pass-through `ReaderFilterConsumerExec` exposing
 the predicate through the physical-plan expression visitor. DataFusion checks

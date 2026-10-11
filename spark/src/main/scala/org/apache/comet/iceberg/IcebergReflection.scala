@@ -753,77 +753,85 @@ object IcebergReflection extends Logging {
           count(RuntimeStatsMetrics.ContentionSkips)
           return result(Map.empty)
         }
+        count(RuntimeStatsMetrics.CacheMisses)
         val started = System.nanoTime()
-        try {
-          count(RuntimeStatsMetrics.CacheMisses)
-          val scanClass = loadClass("org.apache.iceberg.Scan")
-          // Do not fall back to includeColumnStats() without a column list: that would decode
-          // statistics for every column in the scan just to support one runtime-filter key.
-          val includeSelected =
-            findMethod(scanClass, "includeColumnStats", classOf[java.util.Collection[_]])
-          if (includeSelected.isEmpty) {
-            logDebug(
-              "Selective Iceberg column statistics are unavailable; " +
-                "retaining row-group pruning only")
-            count(RuntimeStatsMetrics.Failures)
-            return result(Map.empty)
+        // Build the result only after the collection time is recorded, so every outcome of a
+        // re-planning attempt, including a rejection or failure, reports its driver time.
+        val statistics =
+          try replan(key)
+          finally {
+            count(RuntimeStatsMetrics.CollectionTime, System.nanoTime() - started)
+            runtimeStatsCollection.release()
           }
-          val withStats =
-            includeSelected.get.invoke(icebergScan, java.util.Arrays.asList(columns: _*))
-          val planned = getMethod(scanClass, "planFiles").invoke(withStats)
-          try {
-            val collected = scala.collection.mutable.HashMap.empty[String, AnyRef]
-            val keyBytes = key
-              .map(k => 128L + k.metadataLocation.length.toLong * 2 + k.fieldIds.size.toLong * 24)
-              .getOrElse(128L)
-            var estimatedBytes = selectedBytes + keyBytes
-            val iterator = planned.asInstanceOf[java.lang.Iterable[_]].iterator()
-            while (iterator.hasNext) {
-              val file = fileMethod.invoke(iterator.next())
-              extractFileLocation(file)
-                .filter(path => selected.contains(path) && !collected.contains(path))
-                .foreach { path =>
-                  estimatedBytes += runtimeStatsFileBytes(file.asInstanceOf[AnyRef], path)
-                  if (estimatedBytes <= RuntimeStatsCollectionMaxBytes) {
-                    collected.put(path, file.asInstanceOf[AnyRef])
-                  }
-                }
-              if (estimatedBytes > RuntimeStatsCollectionMaxBytes) {
-                // Reject atomically and remember the rejected selection size, so selections at
-                // least this large skip replanning until eviction. A strictly smaller selection
-                // can still collect. Statistics already cached for this key are retained.
-                key.foreach { k =>
-                  val rejected = Option(runtimeStatsCache.getIfPresent(k)) match {
-                    case Some(entry) =>
-                      entry.copy(rejectedSelectionFiles =
-                        math.min(entry.rejectedSelectionFiles, selected.size))
-                    case None =>
-                      RuntimeStatsEntry(Map.empty, keyBytes, selected.size)
-                  }
-                  runtimeStatsCache.put(k, rejected)
-                }
-                count(RuntimeStatsMetrics.OverBudget)
-                return result(Map.empty)
-              }
-            }
-            val statistics = collected.toMap
-            // Do not cache an incomplete plan. A later scan needing additional paths must rescan.
-            if (selected.forall(statistics.contains)) {
-              key.foreach { k =>
-                val rejectedSelectionFiles = Option(runtimeStatsCache.getIfPresent(k))
-                  .map(_.rejectedSelectionFiles)
-                  .getOrElse(Int.MaxValue)
-                runtimeStatsCache.put(
-                  k,
-                  RuntimeStatsEntry(statistics, estimatedBytes, rejectedSelectionFiles))
-              }
-            }
-            result(statistics)
-          } finally { planned.asInstanceOf[AutoCloseable].close() }
-        } finally {
-          count(RuntimeStatsMetrics.CollectionTime, System.nanoTime() - started)
-          runtimeStatsCollection.release()
+        result(statistics)
+      }
+
+      // Re-plans the scan's manifests with selected column statistics. Requires a held permit.
+      def replan(key: Option[RuntimeStatsKey]): Map[String, AnyRef] = {
+        val scanClass = loadClass("org.apache.iceberg.Scan")
+        // Do not fall back to includeColumnStats() without a column list: that would decode
+        // statistics for every column in the scan just to support one runtime-filter key.
+        val includeSelected =
+          findMethod(scanClass, "includeColumnStats", classOf[java.util.Collection[_]])
+        if (includeSelected.isEmpty) {
+          logDebug(
+            "Selective Iceberg column statistics are unavailable; " +
+              "retaining row-group pruning only")
+          count(RuntimeStatsMetrics.Failures)
+          return Map.empty
         }
+        val withStats =
+          includeSelected.get.invoke(icebergScan, java.util.Arrays.asList(columns: _*))
+        val planned = getMethod(scanClass, "planFiles").invoke(withStats)
+        try {
+          val collected = scala.collection.mutable.HashMap.empty[String, AnyRef]
+          val keyBytes = key
+            .map(k => 128L + k.metadataLocation.length.toLong * 2 + k.fieldIds.size.toLong * 24)
+            .getOrElse(128L)
+          var estimatedBytes = selectedBytes + keyBytes
+          val iterator = planned.asInstanceOf[java.lang.Iterable[_]].iterator()
+          while (iterator.hasNext) {
+            val file = fileMethod.invoke(iterator.next())
+            extractFileLocation(file)
+              .filter(path => selected.contains(path) && !collected.contains(path))
+              .foreach { path =>
+                estimatedBytes += runtimeStatsFileBytes(file.asInstanceOf[AnyRef], path)
+                if (estimatedBytes <= RuntimeStatsCollectionMaxBytes) {
+                  collected.put(path, file.asInstanceOf[AnyRef])
+                }
+              }
+            if (estimatedBytes > RuntimeStatsCollectionMaxBytes) {
+              // Reject atomically and remember the rejected selection size, so selections at
+              // least this large skip replanning until eviction. A strictly smaller selection
+              // can still collect. Statistics already cached for this key are retained.
+              key.foreach { k =>
+                val rejected = Option(runtimeStatsCache.getIfPresent(k)) match {
+                  case Some(entry) =>
+                    entry.copy(rejectedSelectionFiles =
+                      math.min(entry.rejectedSelectionFiles, selected.size))
+                  case None =>
+                    RuntimeStatsEntry(Map.empty, keyBytes, selected.size)
+                }
+                runtimeStatsCache.put(k, rejected)
+              }
+              count(RuntimeStatsMetrics.OverBudget)
+              return Map.empty
+            }
+          }
+          val statistics = collected.toMap
+          // Do not cache an incomplete plan. A later scan needing additional paths must rescan.
+          if (selected.forall(statistics.contains)) {
+            key.foreach { k =>
+              val rejectedSelectionFiles = Option(runtimeStatsCache.getIfPresent(k))
+                .map(_.rejectedSelectionFiles)
+                .getOrElse(Int.MaxValue)
+              runtimeStatsCache.put(
+                k,
+                RuntimeStatsEntry(statistics, estimatedBytes, rejectedSelectionFiles))
+            }
+          }
+          statistics
+        } finally { planned.asInstanceOf[AutoCloseable].close() }
       }
 
       // Keyed single flight: one collection per key at a time. An identical request waits for

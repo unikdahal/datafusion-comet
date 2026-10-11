@@ -221,13 +221,16 @@ case class CometIcebergNativeScanExec(
   /**
    * Driver file-statistics outcome for this scan, see
    * [[org.apache.comet.iceberg.IcebergReflection.RuntimeStatsMetrics]]. Collection runs while
-   * Comet extracts the scan metadata, so the values are known here and are posted as driver
-   * metrics. Canonicalized instances carry no metadata and report zero.
+   * Comet extracts the scan metadata, so the values are known before execution. They are applied
+   * in [[sendDriverMetrics]], after Spark resets the plan's metrics for the action, and posted as
+   * driver metrics. Canonicalized instances carry no metadata and report zero.
    */
-  @transient private lazy val runtimeStatsMetrics: Map[String, SQLMetric] = {
-    val values = Option(nativeIcebergScanMetadata)
+  @transient private lazy val runtimeStatsValues: Map[String, Long] =
+    Option(nativeIcebergScanMetadata)
       .map(_.runtimeStatisticsMetrics)
       .getOrElse(Map.empty[String, Long])
+
+  @transient private lazy val runtimeStatsMetrics: Map[String, SQLMetric] = {
     val counters = Seq(
       RuntimeStatsMetrics.CacheHits -> "driver runtime statistics cache hits",
       RuntimeStatsMetrics.CacheMisses -> "driver runtime statistics cache misses",
@@ -240,10 +243,7 @@ case class CometIcebergNativeScanExec(
     }
     val collectionTime = RuntimeStatsMetrics.CollectionTime ->
       SQLMetrics.createNanoTimingMetric(sparkContext, "driver runtime statistics collection time")
-    (counters :+ collectionTime).map { case (name, metric) =>
-      values.get(name).foreach(value => metric.set(value))
-      name -> metric
-    }.toMap
+    (counters :+ collectionTime).toMap
   }
 
   override lazy val metrics: Map[String, SQLMetric] = {
@@ -307,6 +307,12 @@ case class CometIcebergNativeScanExec(
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
     if (executionId != null && executionId == postedExecutionId) {
       return
+    }
+    // Spark resets every plan metric before running an action (Dataset.withAction), so a value
+    // set when the metrics map was built would be lost. Apply the known outcome now, as
+    // CometScanExec.sendDriverMetrics does. Executor copies stay zero, so nothing double counts.
+    runtimeStatsValues.foreach { case (name, value) =>
+      runtimeStatsMetrics.get(name).foreach(_.set(value))
     }
     // No explicit planning force here: postDriverMetricUpdates reads each metric's value, and
     // LazyIcebergMetric.value resolves DPP subqueries and then forces serializedPartitionData

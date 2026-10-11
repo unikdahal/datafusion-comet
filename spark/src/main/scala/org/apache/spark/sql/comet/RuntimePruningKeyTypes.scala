@@ -33,6 +33,11 @@ import org.apache.comet.shims.CometTypeShim
  * strings. Native Parquet reader pushdown admits signed integer keys, including BYTE and SHORT,
  * which Iceberg schemas cannot produce. TopK and MIN/MAX exclude DECIMAL. Native code makes the
  * final reader-attachment decision.
+ *
+ * This is not a single shared definition: Scala and Rust each define key eligibility, linked by a
+ * cross-language eligibility contract with agreement tests (`RuntimePruningKeyTypesSuite` and
+ * `native/core/src/execution/operators/dynamic_filter/tests.rs`). A change to either side must
+ * update both and their agreement tests.
  */
 object RuntimePruningKeyTypes extends CometTypeShim {
 
