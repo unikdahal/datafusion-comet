@@ -599,7 +599,8 @@ private[comet] object IcebergPlanDataInjector extends PlanDataInjector {
           val localIndex = indices.getOrElseUpdate(
             task.getFileMetricsIdx, {
               val index = localCommon.getFileMetricsPoolCount
-              localCommon.addFileMetricsPool(common.full.getFileMetricsPool(task.getFileMetricsIdx))
+              localCommon.addFileMetricsPool(
+                common.full.getFileMetricsPool(task.getFileMetricsIdx))
               index
             })
           scanBuilder.addFileScanTasks(task.toBuilder.setFileMetricsIdx(localIndex))

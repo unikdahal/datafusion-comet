@@ -67,8 +67,8 @@ fn runtime_task_metrics_timing() {
         for _ in 0..21 {
             let started = Instant::now();
             for _ in 0..100 {
-                let decoded = spark_operator::IcebergScanCommon::decode(black_box(bytes.as_slice()))
-                    .unwrap();
+                let decoded =
+                    spark_operator::IcebergScanCommon::decode(black_box(bytes.as_slice())).unwrap();
                 assert_eq!(decoded.file_metrics_pool.len(), pool_size);
                 black_box(decoded);
             }
