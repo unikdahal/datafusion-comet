@@ -162,9 +162,12 @@ jobs:
             echo "RUSTFLAGS=$RUSTFLAGS"
             sha256sum dist/comet.jar native/target/release/libcomet.so native/Cargo.lock
           } > dist/build-provenance.txt
-      - name: Measure production task ordering in a release timing test
+      - name: Measure production task ordering and metrics transport in release timing tests
         if: matrix.side == 'branch' && inputs.profile == 'planning'
+        shell: bash
         run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="${JAVA_HOME}/lib/server:${LD_LIBRARY_PATH:-}"
           # Test-only registration in the CI checkout; no production source edit is committed.
           cat >> native/core/src/execution/operators/iceberg_scan.rs <<'RS'
 

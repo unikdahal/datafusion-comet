@@ -137,6 +137,18 @@ repetitions in `ordering.log`. The workflow registers the new test file only in
 its CI checkout after building the release jar; production source is unchanged
 in the committed patch. These synthetic CPU measurements exclude I/O, scheduling,
 first-bound publication, concurrent readers and delete-heavy task payloads.
+The release test also isolates metrics transport: prost decoding of 4/1k/10k
+one-column metrics entries, typed-bound decoding for four file tasks, and four
+predicate clone/binds. Times are milliseconds per Spark partition, with 21
+samples of 100 iterations. Clone/bind is an upper-bound comparison, not the
+reader's cached binding cost. `IcebergPlanDataInjector` compacts the stage's
+metrics pool to the indices referenced by each partition before JNI transport;
+repeated splits keep sharing one entry. Pool contents and task statistics do
+not change. Driver logs report elapsed runtime-statistics collection (including
+cache lookup and selected-path reflection) and common-message bytes. These logs
+do not isolate the manifest iterator's time. The timing step sets the JVM library
+path and propagates failures through its logging pipeline.
+
 The full-inventory Top-K queries measure net query latency under default guards,
 including the 4,096-selected-file statistics cap; inspect adoption counters.
 
