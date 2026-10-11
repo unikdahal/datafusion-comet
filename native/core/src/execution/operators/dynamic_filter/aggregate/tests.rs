@@ -627,6 +627,8 @@ async fn repeated_execution_of_one_wrapper_aggregates_metrics() {
             sum(&plan, "dynamic_filter_minmax_filters_attached"),
             execution
         );
-        assert_eq!(sum(&plan, "output_rows"), execution);
+        // `sum_by_name` never matches the built-in `OutputRows` variant; read it directly.
+        let output_rows = plan.metrics().and_then(|set| set.output_rows());
+        assert_eq!(output_rows, Some(execution));
     }
 }
