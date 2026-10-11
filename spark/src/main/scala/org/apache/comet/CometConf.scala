@@ -121,6 +121,26 @@ object CometConf extends ShimCometConf {
       .booleanConf
       .createWithDefault(true)
 
+  val COMET_ICEBERG_RUNTIME_STATS_ENABLED: ConfigEntry[Boolean] =
+    conf("spark.comet.scan.icebergNative.runtimeStats.enabled")
+      .category(CATEGORY_SCAN)
+      .doc(
+        "Whether to collect and cache runtime-filter column statistics on the driver for " +
+          "immutable Iceberg snapshots under internal estimated byte budgets. Disabling this " +
+          "keeps row-group pruning and skips advisory driver statistics collection.")
+      .booleanConf
+      .createWithDefault(true)
+
+  val COMET_ICEBERG_RUNTIME_STATS_MAX_FILES: ConfigEntry[Int] =
+    conf("spark.comet.scan.icebergNative.runtimeStats.maxFiles")
+      .category(CATEGORY_SCAN)
+      .doc(
+        "Maximum distinct selected files collected per runtime statistics entry. Larger scans " +
+          "retain row-group pruning only.")
+      .intConf
+      .checkValue(_ > 0, "Runtime statistics maximum files must be positive")
+      .createWithDefault(4096)
+
   val COMET_ICEBERG_WRITE_SPLIT_OPERATOR_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.write.iceberg.splitOperator.enabled")
       .category(CATEGORY_TESTING)
@@ -593,16 +613,32 @@ object CometConf extends ShimCometConf {
       .booleanConf
       .createWithDefault(false)
 
+  val COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED: ConfigEntry[Boolean] =
+    conf(s"$COMET_EXEC_CONFIG_PREFIX.aggregate.dynamicFilter.enabled")
+      .category(CATEGORY_EXEC)
+      .doc(
+        "Experimental opt-in: use a native MIN/MAX aggregate's improving bound to prune " +
+          "unread Iceberg row groups. Supports one direct INT, BIGINT, DATE, TIMESTAMP, " +
+          "TIMESTAMP_NTZ or UTF8_BINARY STRING argument, no GROUP BY, and one native input " +
+          "partition. CHAR and non-default string collations are excluded. Bounds are fresh " +
+          "for each execution and do not cross Spark exchanges. Unsupported aggregate shapes " +
+          "retain their existing path.")
+      .booleanConf
+      .createWithDefault(false)
+
   val COMET_EXEC_JOIN_DYNAMIC_FILTER_ENABLED: ConfigEntry[Boolean] =
     conf(s"$COMET_EXEC_CONFIG_PREFIX.join.dynamicFilter.enabled")
       .category(CATEGORY_EXEC)
       .doc(
         "Experimental opt-in: use a completed native hash join build's key domain to prune " +
-          "eligible native Parquet row groups and filter probe batches before the hash probe. " +
-          "Supports inner joins with one direct signed integer key and one native partition " +
-          "per input, including both Spark build sides. The probe filter remains active " +
-          "when reader pruning is unavailable. Unsupported joins retain their existing " +
-          "execution path. Filters do not cross Spark exchanges or JVM/Arrow boundaries.")
+          "eligible native Parquet or Iceberg row groups and filter probe batches before the " +
+          "hash probe. Supports inner and semi joins with one direct signed integer key and " +
+          "one native partition per input, including both Spark build sides. Iceberg also " +
+          "supports DATE, TIMESTAMP, TIMESTAMP_NTZ, DECIMAL with identical precision and " +
+          "scale on both sides, and UTF8_BINARY STRING. CHAR and non-default string collations " +
+          "are excluded. The probe filter remains active when reader pruning is unavailable. " +
+          "Unsupported joins retain their existing execution path. Filters do not cross Spark " +
+          "exchanges or JVM/Arrow boundaries.")
       .booleanConf
       .createWithDefault(false)
 
@@ -611,9 +647,11 @@ object CometConf extends ShimCometConf {
       .category(CATEGORY_EXEC)
       .doc(
         "Experimental opt-in: run an eligible local TopK in the same native execution as its " +
-          "Parquet scan. Supports one direct signed integer sort key. This changes the local " +
-          "execution pipeline and can reduce scan/TopK overlap, so it may be slower for some " +
-          "workloads.")
+          "Parquet or Iceberg scan. Supports one direct signed integer first sort key; Iceberg " +
+          "also accepts DATE, TIMESTAMP, TIMESTAMP_NTZ, UTF8_BINARY STRING and further direct " +
+          "sort keys. String TopK requires NULLS LAST. CHAR and non-default string collations " +
+          "are excluded. This changes the local execution pipeline and can reduce scan/TopK " +
+          "overlap, so it may be slower for some workloads.")
       .booleanConf
       .createWithDefault(false)
 
@@ -622,8 +660,9 @@ object CometConf extends ShimCometConf {
       .category(CATEGORY_EXEC)
       .doc(
         "Experimental opt-in: use a local TopK heap's improving threshold to prune " +
-          "eligible native Parquet input. Requires spark.comet.exec.topK.fusion.enabled. " +
-          "Supports one direct signed integer sort key. Thresholds are local to each " +
+          "eligible native Parquet or Iceberg input. " +
+          "Requires spark.comet.exec.topK.fusion.enabled. " +
+          "Supports the same sort keys as fusion. Thresholds are local to each " +
           "native execution and do not cross Spark exchanges or JVM/Arrow boundaries. " +
           "Unsupported readers retain ordinary TopK execution.")
       .booleanConf

@@ -22,7 +22,10 @@ package org.apache.comet.rules
 import scala.collection.mutable.ListBuffer
 import scala.util.Random
 
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.comet._
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive.QueryStageExec
@@ -36,6 +39,57 @@ import org.apache.comet.testing.{DataGenOptions, FuzzDataGenerator}
  * Test suite specifically for CometScanRule transformation logic.
  */
 class CometScanRuleSuite extends CometTestBase {
+
+  test("runtime statistics collection crosses only known infallible Catalyst expressions") {
+    import org.apache.spark.sql.catalyst.expressions._
+    val key = AttributeReference("key", IntegerType)()
+    val text = AttributeReference("text", StringType)()
+    val safe = Seq(
+      EqualTo(key, Literal(1)),
+      And(IsNotNull(key), GreaterThan(key, Literal(0))),
+      In(key, Seq(Literal(1), Literal(2))),
+      Alias(key, "renamed")())
+    safe.foreach(expression => assert(CometScanRule.isSafeRuntimeStatsExpression(expression)))
+    for (ansi <- Seq("true", "false")) {
+      withSQLConf(SQLConf.ANSI_ENABLED.key -> ansi) {
+        // Safe non-ANSI modulo still receives statistics; zero and variable divisors remain
+        // conservative collection boundaries even though native eligibility may admit more.
+        assert(CometScanRule.isSafeRuntimeStatsExpression(Remainder(key, Literal(3))))
+        val rejected = Seq(
+          EqualTo(Cast(text, IntegerType), Literal(1)),
+          EqualTo(Divide(key, Literal(0)), Literal(1.0)),
+          EqualTo(Remainder(key, Literal(0)), Literal(1)),
+          EqualTo(Remainder(key, key), Literal(1)),
+          EqualTo(Abs(key), Literal(1)),
+          LessThan(Rand(Literal(42L)), Literal(0.5)))
+        rejected.foreach { expression =>
+          assert(!CometScanRule.isSafeRuntimeStatsExpression(expression), expression.toString)
+        }
+      }
+    }
+  }
+
+  test("runtime pruning rejects preserved CHAR and traces CHAR metadata through aliases") {
+    import org.apache.spark.sql.catalyst.expressions._
+    import org.apache.comet.serde.QueryPlanSerde.hasCharPruningKey
+    val directChar = AttributeReference("char", CharType(8))()
+    val directInput = OutputOnlyLeafExec(Seq(directChar))
+    assert(hasCharPruningKey(directInput, Seq(directChar)))
+    assert(!CometScanRule.isSafeRuntimeStatsExpression(EqualTo(directChar, directChar)))
+
+    val metadata = new MetadataBuilder()
+      .putString("__CHAR_VARCHAR_TYPE_STRING", "char(8)")
+      .build()
+    val padded = AttributeReference("padded", StringType, metadata = metadata)()
+    val input = OutputOnlyLeafExec(Seq(padded))
+    val alias = Alias(padded, "renamed")(explicitMetadata = Some(Metadata.empty))
+    val project = ProjectExec(Seq(alias), input)
+    assert(hasCharPruningKey(project, Seq(alias.toAttribute)))
+
+    val binary = AttributeReference("binary", StringType)()
+    assert(!hasCharPruningKey(OutputOnlyLeafExec(Seq(binary)), Seq(binary)))
+    assert(CometScanRule.isSafeRuntimeStatsExpression(EqualTo(binary, binary)))
+  }
 
   /** Helper method to apply CometExecRule and return the transformed plan */
   private def applyCometScanRule(plan: SparkPlan): SparkPlan = {
@@ -260,4 +314,10 @@ class CometScanRuleSuite extends CometTestBase {
     assert(!DataTypeSupport.hasCaseInsensitiveDuplicateFieldNames(distinct))
   }
 
+}
+
+/** A planning-only leaf with a fixed output, constructible on every supported Spark version. */
+private case class OutputOnlyLeafExec(output: Seq[Attribute]) extends LeafExecNode {
+  override protected def doExecute(): RDD[InternalRow] =
+    throw new UnsupportedOperationException("planning-only test node")
 }

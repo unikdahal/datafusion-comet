@@ -36,6 +36,7 @@ import org.apache.spark.util.AccumulatorV2
 import com.google.common.base.Objects
 
 import org.apache.comet.iceberg.CometIcebergNativeScanMetadata
+import org.apache.comet.iceberg.IcebergReflection.RuntimeStatsMetrics
 import org.apache.comet.serde.OperatorOuterClass.Operator
 import org.apache.comet.serde.operator.CometIcebergNativeScan
 
@@ -217,10 +218,50 @@ case class CometIcebergNativeScanExec(
     }
   }
 
+  /**
+   * Driver file-statistics outcome for this scan, see
+   * [[org.apache.comet.iceberg.IcebergReflection.RuntimeStatsMetrics]]. Collection runs while
+   * Comet extracts the scan metadata, so the values are known before execution. They are applied
+   * in [[sendDriverMetrics]], after Spark resets the plan's metrics for the action, and posted as
+   * driver metrics. Canonicalized instances carry no metadata and report zero.
+   */
+  @transient private lazy val runtimeStatsValues: Map[String, Long] =
+    Option(nativeIcebergScanMetadata)
+      .map(_.runtimeStatisticsMetrics)
+      .getOrElse(Map.empty[String, Long])
+
+  @transient private lazy val runtimeStatsMetrics: Map[String, SQLMetric] = {
+    val counters = Seq(
+      RuntimeStatsMetrics.CacheHits -> "driver runtime statistics cache hits",
+      RuntimeStatsMetrics.CacheMisses -> "driver runtime statistics cache misses",
+      RuntimeStatsMetrics.NegativeCacheHits -> "driver runtime statistics negative cache hits",
+      RuntimeStatsMetrics.SharedWaits -> "driver runtime statistics shared collection waits",
+      RuntimeStatsMetrics.ContentionSkips -> "driver runtime statistics contention skips",
+      RuntimeStatsMetrics.OverBudget -> "driver runtime statistics over budget",
+      RuntimeStatsMetrics.Failures -> "driver runtime statistics failures").map {
+      case (name, description) => name -> SQLMetrics.createMetric(sparkContext, description)
+    }
+    val collectionTime = RuntimeStatsMetrics.CollectionTime ->
+      SQLMetrics.createNanoTimingMetric(sparkContext, "driver runtime statistics collection time")
+    (counters :+ collectionTime).toMap
+  }
+
   override lazy val metrics: Map[String, SQLMetric] = {
     val baseMetrics = Map(
       "output_rows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
       "bytes_scanned" -> SQLMetrics.createSizeMetric(sparkContext, "number of bytes scanned"),
+      "iceberg_runtime_file_tasks_pruned" ->
+        SQLMetrics.createMetric(sparkContext, "runtime file tasks pruned before opening"),
+      "iceberg_runtime_predicate_tasks" ->
+        SQLMetrics.createMetric(sparkContext, "runtime predicate file tasks"),
+      "iceberg_runtime_row_groups_pruned" ->
+        SQLMetrics.createMetric(sparkContext, "row groups pruned by runtime predicates"),
+      "iceberg_runtime_predicate_refreshes" ->
+        SQLMetrics.createMetric(sparkContext, "runtime predicate refreshes during scanning"),
+      "iceberg_runtime_row_groups_pruned_live" ->
+        SQLMetrics.createMetric(sparkContext, "row groups pruned by live runtime predicates"),
+      "iceberg_runtime_decoder_rebuilds" ->
+        SQLMetrics.createMetric(sparkContext, "decoder rebuilds for runtime predicates"),
       // Native read/decode time, aggregated across tasks. Fed by iceberg-rust's BaselineMetrics
       // (elapsed_compute, in nanoseconds) through the standard JNI metric path.
       "elapsed_compute" -> SQLMetrics.createNanoTimingMetric(sparkContext, "scan time"))
@@ -228,7 +269,8 @@ case class CometIcebergNativeScanExec(
     // Add num_splits as a runtime metric (incremented on the native side during execution)
     val numSplitsMetric = SQLMetrics.createMetric(sparkContext, "number of file splits processed")
 
-    baseMetrics ++ icebergPlanningMetrics + ("num_splits" -> numSplitsMetric)
+    baseMetrics ++ runtimeStatsMetrics ++ icebergPlanningMetrics +
+      ("num_splits" -> numSplitsMetric)
   }
 
   // Execution id this scan last posted its driver metrics under. Guards against a second post:
@@ -243,9 +285,10 @@ case class CometIcebergNativeScanExec(
    * total planning duration) to the SQL UI as driver metrics. Iceberg-Java produces these during
    * planFiles(); they live on the driver and are never updated by executor tasks, so without an
    * explicit post the SQL UI never receives their accumulator ids and the scan node shows
-   * nothing. Mirrors [[CometScanExec.sendDriverMetrics]] for the Parquet path. The native runtime
-   * metrics (output_rows, bytes_scanned, num_splits, elapsed_compute) travel the separate JNI
-   * path and are not posted here.
+   * nothing. The driver runtime-statistics outcome metrics are posted alongside them. Mirrors
+   * [[CometScanExec.sendDriverMetrics]] for the Parquet path. The native runtime metrics
+   * (output_rows, bytes_scanned, num_splits, elapsed_compute) travel the separate JNI path and
+   * are not posted here.
    *
    * Called from two places because a native leaf scan does not always run its own
    * doExecuteColumnar: when this scan is fused under a parent native operator (e.g. a CometFilter
@@ -257,20 +300,24 @@ case class CometIcebergNativeScanExec(
    * stays correct if that ever changes -- a re-post would otherwise double the summed counters.
    */
   override def sendDriverMetrics(): Unit = {
-    if (icebergPlanningMetrics.isEmpty) {
+    val driverMetrics = icebergPlanningMetrics.values.toSeq ++ runtimeStatsMetrics.values
+    if (driverMetrics.isEmpty) {
       return
     }
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
     if (executionId != null && executionId == postedExecutionId) {
       return
     }
+    // Spark resets every plan metric before running an action (Dataset.withAction), so a value
+    // set when the metrics map was built would be lost. Apply the known outcome now, as
+    // CometScanExec.sendDriverMetrics does. Executor copies stay zero, so nothing double counts.
+    runtimeStatsValues.foreach { case (name, value) =>
+      runtimeStatsMetrics.get(name).foreach(_.set(value))
+    }
     // No explicit planning force here: postDriverMetricUpdates reads each metric's value, and
     // LazyIcebergMetric.value resolves DPP subqueries and then forces serializedPartitionData
     // itself, keeping the "resolve DPP before planning" ordering in a single place.
-    SQLMetrics.postDriverMetricUpdates(
-      sparkContext,
-      executionId,
-      icebergPlanningMetrics.values.toSeq)
+    SQLMetrics.postDriverMetricUpdates(sparkContext, executionId, driverMetrics)
     postedExecutionId = executionId
   }
 

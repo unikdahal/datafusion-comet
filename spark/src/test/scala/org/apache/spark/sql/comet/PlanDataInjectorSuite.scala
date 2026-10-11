@@ -126,6 +126,75 @@ class PlanDataInjectorSuite extends AnyFunSuite {
     assert(result.getChildren(0).getPlanId == 2)
   }
 
+  test("Iceberg file statistics and zero pool indices survive task plan injection") {
+    val scan = icebergScanOp("s3://table/metadata/v1.json", scanHashCode = 111)
+    val lowerBound =
+      com.google.protobuf.ByteString.copyFrom(Array[Byte](0xfe.toByte, 0xff.toByte))
+    val metrics = OperatorOuterClass.IcebergFileMetrics
+      .newBuilder()
+      .setRecordCount(10L)
+      .putValueCounts(7, 10L)
+      .putNullValueCounts(7, 2L)
+      .putLowerBounds(7, lowerBound)
+      .build()
+    val common = scan.getIcebergScan.getCommon.toBuilder.addFileMetricsPool(metrics).build()
+    val task = OperatorOuterClass.IcebergFileScanTask
+      .newBuilder()
+      .setDataFilePath("s3://table/data.parquet")
+      .setStart(128L)
+      .setLength(256L)
+      .setFileMetricsIdx(0)
+      .build()
+    val tasks = OperatorOuterClass.IcebergScan.newBuilder().addFileScanTasks(task).build()
+    val key = IcebergPlanDataInjector.getKey(scan).get
+    // Task deserialization creates independent byte arrays. Statistics have already left the
+    // transient driver map and are carried only by these protobuf messages at this point.
+    val injected = PlanDataInjector.injectPlanData(
+      parseBasePlan(scan.toByteArray),
+      Map(key -> common.toByteArray.clone()),
+      Map(key -> tasks.toByteArray.clone()))
+    val decoded = Operator.parseFrom(PlanDataInjector.serializeOperator(injected)).getIcebergScan
+    assert(decoded.getCommon.getFileMetricsPoolCount == 1)
+    assert(decoded.getCommon.getFileMetricsPool(0) == metrics)
+    assert(decoded.getFileScanTasks(0).hasFileMetricsIdx)
+    assert(decoded.getFileScanTasks(0).getFileMetricsIdx == 0)
+    assert(decoded.getFileScanTasks(0).getStart == 128L)
+    assert(decoded.getFileScanTasks(0).getLength == 256L)
+    assert(decoded.getCommon.getFileMetricsPool(0).getLowerBoundsMap.get(7) == lowerBound)
+  }
+
+  test("Iceberg injection compacts metrics per partition and preserves split references") {
+    val scan = icebergScanOp("s3://table/metadata.json", 12)
+    val common = scan.getIcebergScan.getCommon.toBuilder
+    (0 until 1000).foreach { index =>
+      common.addFileMetricsPool(
+        OperatorOuterClass.IcebergFileMetrics.newBuilder().setRecordCount(index.toLong))
+    }
+    val tasks = OperatorOuterClass.IcebergScan.newBuilder()
+    Seq(Some(999), Some(20), Some(999), None).zipWithIndex.foreach { case (index, offset) =>
+      val task = OperatorOuterClass.IcebergFileScanTask.newBuilder().setStart(offset.toLong)
+      index.foreach(task.setFileMetricsIdx)
+      tasks.addFileScanTasks(task)
+    }
+    val prepared = IcebergPlanDataInjector.prepareCommon(common.build().toByteArray)
+    val injected = IcebergPlanDataInjector.inject(scan, prepared, tasks.build().toByteArray)
+    val decoded = Operator.parseFrom(injected.toByteArray).getIcebergScan
+    assert(decoded.getCommon.getFileMetricsPoolCount == 2)
+    assert(decoded.getCommon.getFileMetricsPool(0).getRecordCount == 999L)
+    assert(decoded.getCommon.getFileMetricsPool(1).getRecordCount == 20L)
+    assert(decoded.getFileScanTasks(0).getFileMetricsIdx == 0)
+    assert(decoded.getFileScanTasks(1).getFileMetricsIdx == 1)
+    assert(decoded.getFileScanTasks(2).getFileMetricsIdx == 0)
+    assert(!decoded.getFileScanTasks(3).hasFileMetricsIdx)
+    (0 until 4).foreach(index => assert(decoded.getFileScanTasks(index).getStart == index.toLong))
+    assert(prepared.full.getFileMetricsPoolCount == 1000)
+    val empty = IcebergPlanDataInjector.inject(
+      scan,
+      prepared,
+      OperatorOuterClass.IcebergScan.getDefaultInstance.toByteArray)
+    assert(empty.getIcebergScan.getCommon.getFileMetricsPoolCount == 0)
+  }
+
   test("each registered injector is reachable by its opStructCase") {
     // The O(1) lookup keys injectors by opStructCase, so two injectors sharing a kind would
     // silently shadow one another in the map. Guard that every registered injector resolves back

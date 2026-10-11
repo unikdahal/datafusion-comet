@@ -52,6 +52,8 @@ JVM Shuffle <jvm_shuffle>
 Native Shuffle <native_shuffle>
 Memory Management <memory_management>
 Iceberg Writes <iceberg-writes>
+Native Iceberg Runtime Pruning <runtime-pruning-design>
+Driver Runtime-Statistics Resource Bounds <runtime-statistics-bounds>
 ANSI Error Propagation <sql_error_propagation>
 S3 Credential Provider Design <s3-credential-provider-design>
 ```
