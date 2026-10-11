@@ -26,10 +26,14 @@ use datafusion::common::Result;
 use datafusion::datasource::physical_plan::{FileSource, ParquetSource};
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::physical_expr::expressions::DynamicFilterPhysicalExpr;
+use datafusion::physical_expr::PhysicalExpr;
+
+use crate::execution::operators::RuntimeScanOrder;
 use datafusion::physical_plan::ExecutionPlan;
 
+use super::super::iceberg_reader::{attach_iceberg_reader_filter, ReaderAttachment};
 use super::super::parquet_reader::{
-    is_direct_column_null_checks, try_attach_parquet_reader_filter,
+    is_direct_column_null_checks, is_parquet_reader_key, try_attach_parquet_reader_filter,
 };
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::parquet::ParquetFileReaderFactory;
@@ -40,11 +44,38 @@ use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::errors::Result as ParquetResult;
 use parquet::file::metadata::ParquetMetaData;
 
-pub(super) fn try_attach_topk_reader_filter(
+/// Attach the TopK threshold to a native Iceberg or Parquet reader. A refusal reports the
+/// reason the Iceberg walk stopped: `NoReader` for a Parquet scan the Parquet path declines,
+/// unless a limit, unsafe operator or computed key stops the walk first.
+pub(super) fn attach_topk_reader_filter(
+    input: &Arc<dyn ExecutionPlan>,
+    predicate: Arc<DynamicFilterPhysicalExpr>,
+    config: &ConfigOptions,
+    order: RuntimeScanOrder,
+) -> Result<ReaderAttachment> {
+    // Iceberg scans and Parquet DataSourceExec inputs are disjoint plan types,
+    // so trying Iceberg first never hides a Parquet attachment.
+    let iceberg = attach_iceberg_reader_filter(input, Arc::clone(&predicate), Some(order))?;
+    let refusal = match iceberg {
+        Ok(scan) => return Ok(Ok(scan)),
+        Err(refusal) => refusal,
+    };
+    Ok(try_attach_parquet_topk_filter(input, predicate, config)?.ok_or(refusal))
+}
+
+fn try_attach_parquet_topk_filter(
     input: &Arc<dyn ExecutionPlan>,
     predicate: Arc<DynamicFilterPhysicalExpr>,
     config: &ConfigOptions,
 ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    // The Parquet reader filters on a single signed integer key.
+    let children = predicate.children();
+    let [key] = children.as_slice() else {
+        return Ok(None);
+    };
+    if !is_parquet_reader_key(key, &input.schema()) {
+        return Ok(None);
+    }
     let Some(scan) = input.downcast_ref::<DataSourceExec>() else {
         return Ok(None);
     };

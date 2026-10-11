@@ -54,9 +54,113 @@ pub mod spark_config {
 #[cfg(test)]
 mod tests {
     use super::spark_operator::{
-        partition_writer, LocalPartitionWriter, PartitionWriter, RssPartitionWriter, ShuffleWriter,
+        partition_writer, HashAggregate, LocalPartitionWriter, PartitionWriter, RssPartitionWriter,
+        ShuffleWriter,
     };
     use prost::Message;
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct LegacyIcebergCommon {
+        #[prost(string, tag = "2")]
+        metadata_location: String,
+        #[prost(string, repeated, tag = "4")]
+        schema_pool: Vec<String>,
+        #[prost(message, repeated, tag = "8")]
+        project_field_ids_pool: Vec<super::spark_operator::ProjectFieldIdList>,
+        #[prost(message, repeated, tag = "10")]
+        delete_files_pool: Vec<super::spark_operator::DeleteFileList>,
+        #[prost(message, repeated, tag = "14")]
+        delete_file_pool: Vec<super::spark_operator::IcebergDeleteFile>,
+        #[prost(string, repeated, tag = "16")]
+        delete_file_path_pool: Vec<String>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct LegacyIcebergTask {
+        #[prost(string, tag = "1")]
+        data_file_path: String,
+        #[prost(uint64, tag = "2")]
+        start: u64,
+        #[prost(uint64, tag = "3")]
+        length: u64,
+        #[prost(uint64, optional, tag = "4")]
+        record_count: Option<u64>,
+        #[prost(uint64, tag = "5")]
+        file_size_in_bytes: u64,
+        #[prost(uint32, tag = "15")]
+        schema_idx: u32,
+        #[prost(uint32, tag = "19")]
+        project_field_ids_idx: u32,
+        #[prost(uint32, optional, tag = "21")]
+        delete_files_idx: Option<u32>,
+    }
+
+    #[test]
+    fn iceberg_pool_legacy_wire_roundtrip() {
+        use super::spark_operator::{
+            DeleteFileList, IcebergDeleteFile, IcebergFileMetrics, IcebergFileScanTask,
+            IcebergScanCommon, ProjectFieldIdList,
+        };
+
+        let legacy_common = LegacyIcebergCommon {
+            metadata_location: "file:///table/metadata.json".into(),
+            schema_pool: vec!["schema-0".into(), "schema-1".into()],
+            project_field_ids_pool: vec![ProjectFieldIdList {
+                field_ids: vec![1, 3],
+            }],
+            delete_files_pool: vec![DeleteFileList {
+                delete_file_indices: vec![0],
+            }],
+            delete_file_pool: vec![IcebergDeleteFile {
+                file_path_idx: 0,
+                content_type: "EQUALITY_DELETES".into(),
+                equality_ids: vec![3],
+                ..Default::default()
+            }],
+            delete_file_path_pool: vec!["file:///table/deletes.parquet".into()],
+        };
+        let legacy_task = LegacyIcebergTask {
+            data_file_path: "file:///table/data.parquet".into(),
+            start: 128,
+            length: 512,
+            record_count: Some(27),
+            file_size_in_bytes: 2048,
+            schema_idx: 1,
+            project_field_ids_idx: 0,
+            delete_files_idx: Some(0),
+        };
+        let mut common =
+            IcebergScanCommon::decode(legacy_common.encode_to_vec().as_slice()).unwrap();
+        let mut task = IcebergFileScanTask::decode(legacy_task.encode_to_vec().as_slice()).unwrap();
+        assert!(common.file_metrics_pool.is_empty());
+        assert_eq!(task.file_metrics_idx, None);
+        common.file_metrics_pool.push(IcebergFileMetrics {
+            record_count: Some(27),
+            lower_bounds: [(1, 10_i32.to_le_bytes().to_vec())].into(),
+            upper_bounds: [(1, 20_i32.to_le_bytes().to_vec())].into(),
+            ..Default::default()
+        });
+        // Some(0) must remain distinguishable from an absent pool reference.
+        task.file_metrics_idx = Some(0);
+        let common_bytes = common.encode_to_vec();
+        let task_bytes = task.encode_to_vec();
+        assert_eq!(
+            LegacyIcebergCommon::decode(common_bytes.as_slice()).unwrap(),
+            legacy_common,
+        );
+        assert_eq!(
+            LegacyIcebergTask::decode(task_bytes.as_slice()).unwrap(),
+            legacy_task,
+        );
+        assert_eq!(
+            IcebergScanCommon::decode(common_bytes.as_slice()).unwrap(),
+            common,
+        );
+        assert_eq!(
+            IcebergFileScanTask::decode(task_bytes.as_slice()).unwrap(),
+            task
+        );
+    }
 
     #[derive(Clone, PartialEq, prost::Message)]
     struct LegacyShuffleWriter {
@@ -64,6 +168,40 @@ mod tests {
         output_data_file: String,
         #[prost(string, tag = "4")]
         output_index_file: String,
+    }
+
+    // Main already assigns aggregate output ordering to tag 9. Runtime filtering must not
+    // reinterpret an existing ordered aggregate plan, or cause an older reader to invent ordering.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct LegacyAggregateOrdering {
+        #[prost(bool, tag = "9")]
+        ordered_by_grouping_keys: bool,
+    }
+
+    #[test]
+    fn runtime_filter_preserves_existing_aggregate_ordering_wire_field() {
+        let legacy = LegacyAggregateOrdering {
+            ordered_by_grouping_keys: true,
+        };
+        let decoded = HashAggregate::decode(legacy.encode_to_vec().as_slice()).unwrap();
+        assert!(decoded.ordered_by_grouping_keys);
+        assert!(!decoded.dynamic_filter_enabled);
+    }
+
+    #[test]
+    fn runtime_filter_does_not_advertise_aggregate_ordering_to_legacy_reader() {
+        let filtered = HashAggregate {
+            dynamic_filter_enabled: true,
+            ..Default::default()
+        };
+        let bytes = filtered.encode_to_vec();
+        let legacy = LegacyAggregateOrdering::decode(bytes.as_slice()).unwrap();
+        assert!(!legacy.ordered_by_grouping_keys);
+        assert!(
+            HashAggregate::decode(bytes.as_slice())
+                .unwrap()
+                .dynamic_filter_enabled
+        );
     }
 
     fn local_shuffle_writer() -> ShuffleWriter {

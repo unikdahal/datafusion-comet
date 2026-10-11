@@ -20,14 +20,20 @@
 package org.apache.comet.iceberg
 
 import java.lang.reflect.Method
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.{ConcurrentHashMap, CountDownLatch, Semaphore, TimeUnit}
+import java.util.concurrent.atomic.LongAdder
 
 import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.comet.RuntimePruningKeyTypes
+import org.apache.spark.sql.internal.SQLConf
 
+import com.google.common.cache.{CacheBuilder, Weigher}
+
+import org.apache.comet.CometConf
 import org.apache.comet.util.ClassLoaders
 
 /**
@@ -463,6 +469,417 @@ object IcebergReflection extends Logging {
    */
   def getTasks(scan: Any): Option[java.util.List[AnyRef]] =
     if (isStagedScan(scan)) tasksFromTaskGroups(scan) else tasksFromTasksAccessor(scan)
+
+  /**
+   * Top-level INT, BIGINT, DATE, microsecond TIMESTAMP, DECIMAL and STRING columns of `schema`:
+   * the key types the runtime predicate producers support, whose statistics can prune a file.
+   */
+  def runtimeKeyColumns(schema: Any): Seq[String] = {
+    import scala.jdk.CollectionConverters._
+    try {
+      getMethod(schema.getClass, "columns")
+        .invoke(schema)
+        .asInstanceOf[java.util.List[_]]
+        .asScala
+        .toSeq
+        .flatMap { column =>
+          val typeStr = getMethod(column.getClass, "type").invoke(column).toString
+          if (RuntimePruningKeyTypes.isFileStatsIcebergType(typeStr)) {
+            Some(getMethod(column.getClass, "name").invoke(column).asInstanceOf[String])
+          } else {
+            None
+          }
+        }
+    } catch {
+      case NonFatal(e) =>
+        logWarning(s"Runtime key columns unavailable: ${e.getMessage}")
+        Seq.empty
+    }
+  }
+
+  private case class RuntimeStatsPolicy(maxFiles: Int)
+
+  private case class RuntimeStatsKey(
+      metadataLocation: String,
+      snapshotId: Long,
+      fieldIds: Seq[Int],
+      policy: RuntimeStatsPolicy)
+
+  /**
+   * Cached statistics for one snapshot, field-ID set and policy. `rejectedSelectionFiles` is the
+   * smallest selected-file count whose collection exceeded the byte budget: selections at least
+   * that large are declined without replanning, while strictly smaller ones may still collect.
+   */
+  private case class RuntimeStatsEntry(
+      statistics: Map[String, AnyRef],
+      estimatedBytes: Long,
+      rejectedSelectionFiles: Int = Int.MaxValue)
+
+  /**
+   * Low-cardinality driver statistics outcome counters, reported as SQL metrics on the native
+   * Iceberg scan. A scan records at most one of the hit, miss, negative-hit and contention
+   * outcomes, plus an over-budget or failure counter when collection stopped for that reason.
+   */
+  object RuntimeStatsMetrics {
+    val CacheHits = "iceberg_runtime_stats_cache_hits"
+    val CacheMisses = "iceberg_runtime_stats_cache_misses"
+    val NegativeCacheHits = "iceberg_runtime_stats_negative_cache_hits"
+    val SharedWaits = "iceberg_runtime_stats_shared_waits"
+    val ContentionSkips = "iceberg_runtime_stats_contention_skips"
+    val OverBudget = "iceberg_runtime_stats_over_budget"
+    val Failures = "iceberg_runtime_stats_failures"
+    val CollectionTime = "iceberg_runtime_stats_collection_time"
+
+    val counters: Seq[String] = Seq(
+      CacheHits,
+      CacheMisses,
+      NegativeCacheHits,
+      SharedWaits,
+      ContentionSkips,
+      OverBudget,
+      Failures)
+  }
+
+  /** Selected-file statistics plus the driver outcome counters that produced them. */
+  case class RuntimeStatsResult(statistics: Map[String, AnyRef], metrics: Map[String, Long])
+
+  object RuntimeStatsResult {
+    val Empty: RuntimeStatsResult = RuntimeStatsResult(Map.empty, Map.empty)
+  }
+
+  // Process-owned immutable snapshot metrics, bounded by estimated bytes and a fixed entry
+  // floor. SQLConf policies never replace the cache or change the charge for other sessions.
+  // Keys retain no SQLConf, session, table, task, residual or delete file.
+  private[iceberg] val RuntimeStatsCacheMaxBytes = 64L * 1024 * 1024
+  private val RuntimeStatsEntryMinBytes = 1024L * 1024
+  private val RuntimeStatsCollectionMaxBytes = 8L * 1024 * 1024
+  // Distinct snapshot/field-ID/policy keys may collect concurrently up to this bound; further
+  // distinct misses fail open. Identical keys share one in-flight collection instead.
+  private[iceberg] val RuntimeStatsMaxConcurrentCollections = 4
+  private val RuntimeStatsSharedWaitMillis = 30000L
+  private val runtimeStatsCollection = new Semaphore(RuntimeStatsMaxConcurrentCollections)
+  private val runtimeStatsInFlight = new ConcurrentHashMap[RuntimeStatsKey, CountDownLatch]()
+  // Requests currently waiting for an identical in-flight collection (test observability).
+  private[iceberg] val runtimeStatsWaiters = new LongAdder()
+  private val runtimeStatsCache =
+    CacheBuilder
+      .newBuilder()
+      .concurrencyLevel(1)
+      .maximumWeight(RuntimeStatsCacheMaxBytes)
+      .weigher(new Weigher[RuntimeStatsKey, RuntimeStatsEntry] {
+        override def weigh(key: RuntimeStatsKey, value: RuntimeStatsEntry): Int = {
+          math.max(RuntimeStatsEntryMinBytes, value.estimatedBytes).toInt
+        }
+      })
+      .build[RuntimeStatsKey, RuntimeStatsEntry]()
+
+  private[iceberg] def runtimeStatsCacheUsage: (Long, Long) = {
+    import scala.jdk.CollectionConverters._
+    runtimeStatsCache.cleanUp()
+    val entries = runtimeStatsCache.asMap().asScala
+    val chargedBytes = entries.valuesIterator
+      .map(entry => math.max(RuntimeStatsEntryMinBytes, entry.estimatedBytes))
+      .sum
+    (chargedBytes, entries.valuesIterator.map(_.statistics.size.toLong).sum)
+  }
+
+  /** Direct lookups keep both coverage checking and extraction proportional to the selection. */
+  private[iceberg] def selectRuntimeStatistics(
+      selected: Set[String],
+      lookup: String => Option[AnyRef]): Option[Map[String, AnyRef]] = {
+    val result = Map.newBuilder[String, AnyRef]
+    val paths = selected.iterator
+    while (paths.hasNext) {
+      val path = paths.next()
+      lookup(path) match {
+        case Some(file) => result += path -> file
+        case None => return None
+      }
+    }
+    Some(result.result())
+  }
+
+  // Approximate retained objects, map entries and buffer backing storage rather than just file
+  // count: 512 bytes for the file/map headers, 64 per metric entry (node and boxed ID/value),
+  // UTF-16 path storage, buffer capacities and boxed split offsets. These are conservative
+  // accounting units, not a measured heap size; shared schemas and Iceberg planning buffers
+  // are outside this estimate. Account for variable-sized partition values as well.
+  private def runtimeStatsFileBytes(file: AnyRef, path: String): Long = {
+    val contentFile = loadClass(ClassNames.CONTENT_FILE)
+    var bytes = 512L + path.length.toLong * 2
+    Seq(
+      "columnSizes",
+      "valueCounts",
+      "nullValueCounts",
+      "nanValueCounts",
+      "lowerBounds",
+      "upperBounds").foreach { name =>
+      val values = getMethod(contentFile, name).invoke(file).asInstanceOf[java.util.Map[_, _]]
+      if (values != null) {
+        bytes += values.size().toLong * 64
+        val iterator = values.values().iterator()
+        while (iterator.hasNext) iterator.next() match {
+          case buffer: java.nio.ByteBuffer => bytes += buffer.capacity().toLong
+          case _ =>
+        }
+      }
+    }
+    val keyMetadata = getMethod(contentFile, "keyMetadata")
+      .invoke(file)
+      .asInstanceOf[java.nio.ByteBuffer]
+    if (keyMetadata != null) bytes += keyMetadata.capacity().toLong
+    val offsets = getMethod(contentFile, "splitOffsets")
+      .invoke(file)
+      .asInstanceOf[java.util.List[_]]
+    if (offsets != null) bytes += offsets.size().toLong * 24
+    val partition = getMethod(contentFile, "partition").invoke(file)
+    if (partition != null) {
+      val structLike = loadClass(ClassNames.STRUCT_LIKE)
+      val size = getMethod(structLike, "size").invoke(partition).asInstanceOf[Int]
+      val get = getMethod(structLike, "get", java.lang.Integer.TYPE, classOf[Class[_]])
+      bytes += size.toLong * 64
+      (0 until size).foreach { index =>
+        get.invoke(partition, Int.box(index), classOf[Object]) match {
+          case value: CharSequence => bytes += value.length().toLong * 2
+          case value: java.nio.ByteBuffer => bytes += value.capacity().toLong
+          case value: Array[Byte] => bytes += value.length.toLong
+          case _ =>
+        }
+      }
+    }
+    bytes
+  }
+
+  private def runtimeStatsKey(
+      icebergScan: Any,
+      scan: Any,
+      columns: Seq[String],
+      policy: RuntimeStatsPolicy): Option[RuntimeStatsKey] = {
+    for {
+      table <- getTable(scan)
+      location <- getMetadataLocation(table)
+      // Use the scan's pinned snapshot, never the table's current snapshot (time travel,
+      // branches and concurrent commits may make them different).
+      snapshot <- Option(getMethod(icebergScan.getClass, "snapshot").invoke(icebergScan))
+      schema = getMethod(icebergScan.getClass, "schema").invoke(icebergScan)
+      mapping = buildFieldIdMapping(schema)
+      if columns.forall(mapping.contains)
+    } yield {
+      RuntimeStatsKey(
+        location,
+        getMethod(snapshot.getClass, "snapshotId").invoke(snapshot).asInstanceOf[Long],
+        columns.map(mapping).distinct.sorted,
+        policy)
+    }
+  }
+
+  /**
+   * Spark strips column statistics from its FileScanTasks. Re-plan the same Iceberg scan with
+   * statistics retained for `columns` only, without replacing Spark's tasks or splits, and keep
+   * the data files Spark already selected. Absent metadata fails open. Staged scans, and scans
+   * without candidate key columns or with at most one task, keep row-group pruning only.
+   * Immutable snapshot metrics can be reused across filters only when every selected file is
+   * covered. Original Spark tasks still supply all splits, residuals and delete associations.
+   */
+  def runtimeFileStatistics(
+      scan: Any,
+      tasks: java.util.List[_],
+      columns: Seq[String]): Map[String, AnyRef] =
+    collectRuntimeFileStatistics(scan, tasks, columns).statistics
+
+  /** [[runtimeFileStatistics]] together with its [[RuntimeStatsMetrics]] outcome counters. */
+  def collectRuntimeFileStatistics(
+      scan: Any,
+      tasks: java.util.List[_],
+      columns: Seq[String]): RuntimeStatsResult = {
+    if (columns.isEmpty || tasks.size() <= 1 || isStagedScan(scan)) {
+      return RuntimeStatsResult.Empty
+    }
+    val counters = scala.collection.mutable.HashMap.empty[String, Long]
+    def count(name: String, value: Long = 1L): Unit =
+      counters(name) = counters.getOrElse(name, 0L) + value
+    def result(statistics: Map[String, AnyRef]): RuntimeStatsResult =
+      RuntimeStatsResult(statistics, counters.toMap)
+    try {
+      val conf = SQLConf.get
+      if (!CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.get(conf)) {
+        return RuntimeStatsResult.Empty
+      }
+      val policy = RuntimeStatsPolicy(CometConf.COMET_ICEBERG_RUNTIME_STATS_MAX_FILES.get(conf))
+      val fileMethod = getMethod(loadClass(ClassNames.CONTENT_SCAN_TASK), "file")
+      val selectedBuilder = scala.collection.mutable.HashSet.empty[String]
+      var selectedBytes = 0L
+      val taskIterator = tasks.iterator()
+      while (taskIterator.hasNext) {
+        extractFileLocation(fileMethod.invoke(taskIterator.next())).foreach { path =>
+          if (selectedBuilder.add(path)) selectedBytes += 64L + path.length.toLong * 2
+        }
+        if (selectedBuilder.size > policy.maxFiles ||
+          selectedBytes > RuntimeStatsCollectionMaxBytes) {
+          count(RuntimeStatsMetrics.OverBudget)
+          return result(Map.empty)
+        }
+      }
+      val selected = selectedBuilder.toSet
+      if (selected.isEmpty) return RuntimeStatsResult.Empty
+      val icebergScan = findMethodInHierarchy(scan.getClass, "scan")
+        .map(_.invoke(scan))
+        .orNull
+      if (icebergScan == null) return RuntimeStatsResult.Empty
+      // Missing identity/snapshot metadata disables caching, not statistics collection.
+      val cacheKey =
+        try { runtimeStatsKey(icebergScan, scan, columns, policy) }
+        catch { case NonFatal(_) => None }
+
+      // Positive coverage wins over a rejection threshold, so a broad rejection never hides
+      // statistics already collected for a smaller selection.
+      def fromCache(key: RuntimeStatsKey): Option[RuntimeStatsResult] =
+        Option(runtimeStatsCache.getIfPresent(key)).flatMap { entry =>
+          selectRuntimeStatistics(selected, entry.statistics.get) match {
+            case Some(stats) =>
+              count(RuntimeStatsMetrics.CacheHits)
+              Some(result(stats))
+            case None if selected.size >= entry.rejectedSelectionFiles =>
+              count(RuntimeStatsMetrics.NegativeCacheHits)
+              Some(result(Map.empty))
+            case None => None
+          }
+        }
+
+      def collect(key: Option[RuntimeStatsKey]): RuntimeStatsResult = {
+        // Advisory metadata must not multiply transient driver allocations across concurrent
+        // misses. Contention beyond the bound keeps row-group pruning and never waits.
+        if (!runtimeStatsCollection.tryAcquire()) {
+          count(RuntimeStatsMetrics.ContentionSkips)
+          return result(Map.empty)
+        }
+        count(RuntimeStatsMetrics.CacheMisses)
+        val started = System.nanoTime()
+        // Build the result only after the collection time is recorded, so every outcome of a
+        // re-planning attempt, including a rejection or failure, reports its driver time.
+        val statistics =
+          try replan(key)
+          finally {
+            count(RuntimeStatsMetrics.CollectionTime, System.nanoTime() - started)
+            runtimeStatsCollection.release()
+          }
+        result(statistics)
+      }
+
+      // Re-plans the scan's manifests with selected column statistics. Requires a held permit.
+      def replan(key: Option[RuntimeStatsKey]): Map[String, AnyRef] = {
+        val scanClass = loadClass("org.apache.iceberg.Scan")
+        // Do not fall back to includeColumnStats() without a column list: that would decode
+        // statistics for every column in the scan just to support one runtime-filter key.
+        val includeSelected =
+          findMethod(scanClass, "includeColumnStats", classOf[java.util.Collection[_]])
+        if (includeSelected.isEmpty) {
+          logDebug(
+            "Selective Iceberg column statistics are unavailable; " +
+              "retaining row-group pruning only")
+          count(RuntimeStatsMetrics.Failures)
+          return Map.empty
+        }
+        val withStats =
+          includeSelected.get.invoke(icebergScan, java.util.Arrays.asList(columns: _*))
+        val planned = getMethod(scanClass, "planFiles").invoke(withStats)
+        try {
+          val collected = scala.collection.mutable.HashMap.empty[String, AnyRef]
+          val keyBytes = key
+            .map(k => 128L + k.metadataLocation.length.toLong * 2 + k.fieldIds.size.toLong * 24)
+            .getOrElse(128L)
+          var estimatedBytes = selectedBytes + keyBytes
+          val iterator = planned.asInstanceOf[java.lang.Iterable[_]].iterator()
+          while (iterator.hasNext) {
+            val file = fileMethod.invoke(iterator.next())
+            extractFileLocation(file)
+              .filter(path => selected.contains(path) && !collected.contains(path))
+              .foreach { path =>
+                estimatedBytes += runtimeStatsFileBytes(file.asInstanceOf[AnyRef], path)
+                if (estimatedBytes <= RuntimeStatsCollectionMaxBytes) {
+                  collected.put(path, file.asInstanceOf[AnyRef])
+                }
+              }
+            if (estimatedBytes > RuntimeStatsCollectionMaxBytes) {
+              // Reject atomically and remember the rejected selection size, so selections at
+              // least this large skip replanning until eviction. A strictly smaller selection
+              // can still collect. Statistics already cached for this key are retained.
+              key.foreach { k =>
+                val rejected = Option(runtimeStatsCache.getIfPresent(k)) match {
+                  case Some(entry) =>
+                    entry.copy(rejectedSelectionFiles =
+                      math.min(entry.rejectedSelectionFiles, selected.size))
+                  case None =>
+                    RuntimeStatsEntry(Map.empty, keyBytes, selected.size)
+                }
+                runtimeStatsCache.put(k, rejected)
+              }
+              count(RuntimeStatsMetrics.OverBudget)
+              return Map.empty
+            }
+          }
+          val statistics = collected.toMap
+          // Do not cache an incomplete plan. A later scan needing additional paths must rescan.
+          if (selected.forall(statistics.contains)) {
+            key.foreach { k =>
+              val rejectedSelectionFiles = Option(runtimeStatsCache.getIfPresent(k))
+                .map(_.rejectedSelectionFiles)
+                .getOrElse(Int.MaxValue)
+              runtimeStatsCache.put(
+                k,
+                RuntimeStatsEntry(statistics, estimatedBytes, rejectedSelectionFiles))
+            }
+          }
+          statistics
+        } finally { planned.asInstanceOf[AutoCloseable].close() }
+      }
+
+      // Keyed single flight: one collection per key at a time. An identical request waits for
+      // it and then rechecks coverage for its own selection, which may differ from the
+      // leader's. It leads at most one further collection itself, else fails open.
+      def leadOrShare(key: RuntimeStatsKey, retries: Int): RuntimeStatsResult = {
+        val latch = new CountDownLatch(1)
+        val inFlight = runtimeStatsInFlight.putIfAbsent(key, latch)
+        if (inFlight == null) {
+          try collect(Some(key))
+          finally {
+            runtimeStatsInFlight.remove(key, latch)
+            latch.countDown()
+          }
+        } else {
+          count(RuntimeStatsMetrics.SharedWaits)
+          runtimeStatsWaiters.increment()
+          val completed =
+            try inFlight.await(RuntimeStatsSharedWaitMillis, TimeUnit.MILLISECONDS)
+            finally runtimeStatsWaiters.decrement()
+          if (!completed) {
+            count(RuntimeStatsMetrics.ContentionSkips)
+            result(Map.empty)
+          } else {
+            fromCache(key).getOrElse {
+              if (retries > 0) {
+                leadOrShare(key, retries - 1)
+              } else {
+                count(RuntimeStatsMetrics.ContentionSkips)
+                result(Map.empty)
+              }
+            }
+          }
+        }
+      }
+
+      cacheKey match {
+        case Some(key) => fromCache(key).getOrElse(leadOrShare(key, retries = 1))
+        case None => collect(None)
+      }
+    } catch {
+      case NonFatal(e) =>
+        logWarning(
+          s"Runtime file statistics unavailable; retaining row-group pruning: ${e.getMessage}")
+        count(RuntimeStatsMetrics.Failures)
+        result(Map.empty)
+    }
+  }
 
   private def tasksFromTasksAccessor(scan: Any): Option[java.util.List[AnyRef]] =
     findMethodInHierarchy(scan.getClass, "tasks") match {
@@ -2362,7 +2779,10 @@ case class CometIcebergNativeScanMetadata(
     globalFieldIdMapping: Map[String, Int],
     catalogProperties: Map[String, String],
     catalogName: Option[String],
-    fileFormat: String)
+    fileFormat: String,
+    @transient runtimeFileStatistics: Map[String, AnyRef] = Map.empty,
+    runtimeStatisticsColumns: Set[String] = Set.empty,
+    runtimeStatisticsMetrics: Map[String, Long] = Map.empty)
 
 object CometIcebergNativeScanMetadata extends Logging {
 
@@ -2382,6 +2802,9 @@ object CometIcebergNativeScanMetadata extends Logging {
    *   The scan's FileScanTasks (already extracted). Passed in rather than re-read via
    *   [[IcebergReflection.getTasks]], which for a staged scan rebuilds a flattened list of every
    *   task on each call.
+   * @param runtimeStatisticsColumns
+   *   Exact top-level runtime-filter key columns for this scan. Only these columns retain
+   *   manifest statistics for pruning before files are opened.
    * @return
    *   Some(metadata) if all reflection succeeds, None to trigger fallback
    */
@@ -2389,7 +2812,9 @@ object CometIcebergNativeScanMetadata extends Logging {
       scan: Any,
       metadataLocation: String,
       catalogProperties: Map[String, String],
-      tasks: java.util.List[_]): Option[CometIcebergNativeScanMetadata] = {
+      tasks: java.util.List[_],
+      runtimeStatisticsColumns: Set[String] = Set.empty)
+      : Option[CometIcebergNativeScanMetadata] = {
     import org.apache.comet.iceberg.IcebergReflection._
 
     for {
@@ -2408,6 +2833,13 @@ object CometIcebergNativeScanMetadata extends Logging {
       }
 
       val globalFieldIdMapping = buildFieldIdMapping(scanSchema)
+      val eligibleRuntimeStatisticsColumns =
+        runtimeStatisticsColumns.intersect(IcebergReflection.runtimeKeyColumns(scanSchema).toSet)
+
+      val runtimeStatistics = IcebergReflection.collectRuntimeFileStatistics(
+        scan,
+        tasks,
+        eligibleRuntimeStatisticsColumns.toSeq.sorted)
 
       // File format is always PARQUET,
       // validated in CometScanRule.validateIcebergFileScanTasks()
@@ -2422,7 +2854,10 @@ object CometIcebergNativeScanMetadata extends Logging {
         globalFieldIdMapping = globalFieldIdMapping,
         catalogProperties = catalogProperties,
         catalogName = IcebergReflection.deriveCatalogName(table),
-        fileFormat = FileFormats.PARQUET)
+        fileFormat = FileFormats.PARQUET,
+        runtimeFileStatistics = runtimeStatistics.statistics,
+        runtimeStatisticsColumns = eligibleRuntimeStatisticsColumns,
+        runtimeStatisticsMetrics = runtimeStatistics.metrics)
     }
   }
 

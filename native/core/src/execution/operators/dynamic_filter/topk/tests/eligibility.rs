@@ -53,18 +53,35 @@ fn rejects_unsupported_sort_shapes_types_and_configuration() {
         Operator::Plus,
         lit(1i32),
     ));
-    for expressions in [
-        vec![PhysicalSortExpr::new_default(computed)],
-        vec![
-            PhysicalSortExpr::new_default(Arc::clone(&column)),
-            PhysicalSortExpr::new_default(Arc::new(Column::new("other", 1))),
-        ],
+    // A computed first key cannot bound a reader; further keys after a direct one may.
+    for (expressions, eligible) in [
+        (
+            vec![PhysicalSortExpr::new_default(Arc::clone(&computed))],
+            false,
+        ),
+        (
+            vec![
+                PhysicalSortExpr::new_default(computed),
+                PhysicalSortExpr::new_default(Arc::clone(&column)),
+            ],
+            false,
+        ),
+        (
+            vec![
+                PhysicalSortExpr::new_default(Arc::clone(&column)),
+                PhysicalSortExpr::new_default(Arc::new(Column::new("other", 1))),
+            ],
+            true,
+        ),
     ] {
         let plan = SortExec::new(LexOrdering::new(expressions).unwrap(), Arc::clone(&input))
             .with_fetch(Some(1));
-        assert!(TopKReaderFilterExec::try_new(&plan, &config)
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            TopKReaderFilterExec::try_new(&plan, &config)
+                .unwrap()
+                .is_some(),
+            eligible
+        );
     }
     for key_type in [
         DataType::UInt32,
@@ -137,6 +154,10 @@ async fn supplied_file_statistics_skip_reader_attachment() {
     assert_eq!(keys(&batches), vec![Some(0)]);
     assert_eq!(
         count_metric(plan.as_ref(), "dynamic_filter_topk_filters_skipped"),
+        1
+    );
+    assert_eq!(
+        count_metric(plan.as_ref(), "dynamic_filter_topk_skipped_no_reader"),
         1
     );
 }

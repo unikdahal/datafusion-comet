@@ -21,6 +21,7 @@ package org.apache.comet.exec
 
 import java.util.concurrent.atomic.AtomicLong
 
+import scala.jdk.CollectionConverters._
 import scala.util.Random
 
 import org.apache.hadoop.fs.Path
@@ -32,15 +33,17 @@ import org.apache.spark.sql.catalyst.expressions.aggregate.{Final, Partial, Part
 import org.apache.spark.sql.catalyst.optimizer.EliminateSorts
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePartitioning}
 import org.apache.spark.sql.comet.{CometBaseAggregateExec, CometFilterExec, CometHashAggregateExec, CometNativeExec, CometProjectExec, CometSortAggregateExec, CometSortExec}
+import org.apache.spark.sql.comet.{CometLocalTopKExec, CometWindowExec}
 import org.apache.spark.sql.comet.execution.shuffle.CometShuffleExchangeExec
-import org.apache.spark.sql.execution.LocalTableScanExec
-import org.apache.spark.sql.execution.SQLExecution
+import org.apache.spark.sql.execution.{LocalTableScanExec, SQLExecution}
 import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AdaptiveSparkPlanHelper, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.aggregate.{BaseAggregateExec, ObjectHashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.execution.exchange.{ReusedExchangeExec, ShuffleExchangeExec}
+import org.apache.spark.sql.execution.window.WindowExec
 import org.apache.spark.sql.functions.{avg, col, collect_list, collect_set, count_distinct, expr, sort_array, sum}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{ArrayType, DataTypes, StructField, StructType}
+import org.apache.spark.sql.types.{CharType, Metadata}
 
 import org.apache.comet.CometConf
 import org.apache.comet.CometConf.COMET_EXEC_STRICT_FLOATING_POINT
@@ -59,6 +62,176 @@ class CometAggregateSuite extends CometTestBase with AdaptiveSparkPlanHelper {
   // ANSI-mode variants opt in to ANSI explicitly via withSQLConf.
   override protected def sparkConf: SparkConf =
     super.sparkConf.set(SQLConf.ANSI_ENABLED.key, "false")
+
+  test("binary string MIN MAX matches Spark across batches and aggregate engines") {
+    // U+FFFF precedes supplementary characters in UTF-8 byte order, but follows them in
+    // UTF-16 code-unit order. Include combining characters without normalizing their bytes.
+    val values: Seq[(Int, String)] = Seq(
+      (0, "é"),
+      (0, "中"),
+      (0, "\uFFFF"),
+      (0, "😀"),
+      (0, "𐀀"),
+      (1, ""),
+      (1, null),
+      (2, null),
+      (2, null),
+      (3, "e\u0301"),
+      (3, "é"),
+      (3, "東京"))
+    val data = (0 until 1024).flatMap(_ => values)
+    for (dictionary <- Seq(false, true)) {
+      withSQLConf(
+        SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
+        SQLConf.SHUFFLE_PARTITIONS.key -> "2",
+        CometConf.COMET_BATCH_SIZE.key -> "1024",
+        CometConf.COMET_SHUFFLE_ENABLED.key -> "true",
+        CometConf.COMET_SHUFFLE_MODE.key -> "jvm") {
+        withParquetFile(data, dictionary) { path =>
+          val files = spark.read.parquet(path).inputFiles
+          var rowCount = 0L
+          files.foreach { file =>
+            val reader = org.apache.parquet.hadoop.ParquetFileReader.open(
+              org.apache.parquet.hadoop.util.HadoopInputFile
+                .fromPath(new Path(file), spark.sessionState.newHadoopConf()))
+            try {
+              rowCount += reader.getRowGroups.asScala.map(_.getRowCount).sum
+              val encodings = reader.getRowGroups.asScala.flatMap { group =>
+                group.getColumns.asScala
+                  .filter(_.getPath.toDotString == "_2")
+                  .flatMap(_.getEncodings.asScala)
+              }
+              assert(
+                encodings.exists(_.usesDictionary()) == dictionary,
+                s"Unexpected string encodings: $encodings")
+            } finally {
+              reader.close()
+            }
+          }
+          assert(rowCount == 12288L)
+          withParquetTable(path, "string_extrema") {
+            for (nativeFinal <- Seq(true, false)) {
+              withSQLConf(
+                CometConf.COMET_ENABLE_FINAL_HASH_AGGREGATE.key -> nativeFinal.toString) {
+                val queries = Seq(
+                  "SELECT min(_2), max(_2) FROM string_extrema",
+                  "SELECT _1, min(_2), max(_2) FROM string_extrema GROUP BY _1",
+                  "SELECT min(_2), max(_2) FROM string_extrema WHERE _1 = 2",
+                  "SELECT min(_2), max(_2) FROM string_extrema WHERE _1 = -1",
+                  "SELECT _1, min(_2), max(_2) FROM string_extrema " +
+                    "WHERE _1 = -1 GROUP BY _1")
+                queries.foreach { query =>
+                  val (_, plan) = checkSparkAnswer(query)
+                  val aggregates = collect(plan) { case agg: CometBaseAggregateExec => agg }
+                  assert(aggregates.exists(_.modes.contains(Partial)), plan)
+                  assert(aggregates.exists(_.modes.contains(Final)) == nativeFinal, plan)
+                  if (!nativeFinal) {
+                    val finals = collect(plan) {
+                      case agg: BaseAggregateExec
+                          if agg.aggregateExpressions.exists(_.mode == Final) =>
+                        agg
+                    }
+                    assert(finals.nonEmpty, plan)
+                  }
+                }
+                checkAnswer(sql(queries.head), Row("", "😀"))
+                checkAnswer(
+                  sql(queries(1)),
+                  Seq(
+                    Row(0, "é", "😀"),
+                    Row(1, "", ""),
+                    Row(2, null, null),
+                    Row(3, "e\u0301", "東京")))
+                checkAnswer(sql(queries(2)), Row(null, null))
+                checkAnswer(sql(queries(3)), Row(null, null))
+                checkAnswer(sql(queries(4)), Seq.empty[Row])
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("windowed binary string MIN MAX falls back with Spark answers") {
+    withParquetTable(
+      Seq((0, "\uFFFF"), (0, "😀"), (0, "é"), (1, ""), (1, null), (2, null)),
+      "string_window") {
+      val query = "SELECT _1, _2, min(_2) OVER (PARTITION BY _1), " +
+        "max(_2) OVER (PARTITION BY _1) FROM string_window"
+      val (_, plan) =
+        checkSparkAnswerAndFallbackReason(query, "datatype StringType is not supported")
+      assert(collect(plan) { case window: WindowExec => window }.nonEmpty, plan)
+      assert(collect(plan) { case window: CometWindowExec => window }.isEmpty, plan)
+    }
+  }
+
+  test("Spark 4 collated string MIN MAX keeps Spark aggregate types and answers") {
+    assume(isSpark40Plus, "Collated strings require Spark 4")
+    withParquetTable(
+      Seq((0, "Z"), (0, "a"), (0, "é"), (1, "x "), (1, "x"), (2, null)),
+      "collated_extrema") {
+      for (collation <- Seq("UTF8_LCASE", "UTF8_BINARY_RTRIM", "UNICODE_CI")) {
+        val input = s"CAST(_2 AS STRING COLLATE $collation)"
+        for (grouped <- Seq(false, true)) {
+          val query = if (grouped) {
+            s"SELECT _1, min($input), max($input) FROM collated_extrema GROUP BY _1"
+          } else {
+            s"SELECT min($input), max($input) FROM collated_extrema"
+          }
+          val (_, plan) = checkSparkAnswerAndFallbackReason(query, "Unsupported data type")
+          assert(collect(plan) { case agg: CometBaseAggregateExec => agg }.isEmpty, plan)
+          val result = sql(query)
+          val inputType = sql(s"SELECT $input FROM collated_extrema").schema.head.dataType
+          assert(result.schema.fields.takeRight(2).forall(_.dataType == inputType))
+        }
+      }
+    }
+  }
+
+  test("Spark 4 preserved CHAR MIN MAX falls back without string metadata") {
+    assume(isSpark40Plus, "Preserved CHAR types require Spark 4")
+    withSQLConf(
+      "spark.sql.preserveCharVarcharTypeInfo" -> "true",
+      CometConf.COMET_EXEC_AGGREGATE_DYNAMIC_FILTER_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_TOPK_FUSION_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_TOPK_DYNAMIC_FILTER_ENABLED.key -> "true") {
+      withTempPath { path =>
+        val table = "preserved_char_extrema"
+        try {
+          sql(
+            s"CREATE TABLE $table (g INT, s CHAR(4)) USING parquet " +
+              s"LOCATION '${path.getCanonicalPath}'")
+          sql(s"INSERT INTO $table VALUES (0, 'a'), (0, 'a '), (0, '中'), (1, NULL)")
+          withTempView("char_extrema") {
+            // Strip the legacy annotation so the guard must inspect CharType itself.
+            val input = spark.table(table).select(col("g"), col("s").as("s", Metadata.empty))
+            assert(input.schema("s").dataType == CharType(4))
+            assert(!input.schema("s").metadata.contains("__CHAR_VARCHAR_TYPE_STRING"))
+            input.createOrReplaceTempView("char_extrema")
+            Seq(
+              "SELECT min(s), max(s) FROM char_extrema",
+              "SELECT g, min(s), max(s) FROM char_extrema GROUP BY g").foreach { query =>
+              val (_, plan) = checkSparkAnswer(query)
+              assert(collect(plan) { case agg: CometBaseAggregateExec => agg }.isEmpty, plan)
+              val actualSchema = sql(query).schema
+              withSQLConf(CometConf.COMET_ENABLED.key -> "false") {
+                assert(actualSchema == sql(query).schema)
+              }
+            }
+            val (_, plan) =
+              checkSparkAnswer("SELECT s FROM char_extrema ORDER BY s ASC NULLS LAST LIMIT 2")
+            collect(plan) { case topK: CometLocalTopKExec => topK }.foreach { topK =>
+              assert(!topK.dynamicFilterEnabled, plan)
+              assert(!topK.nativeOp.getSort.getDynamicFilterEnabled, plan)
+            }
+          }
+        } finally {
+          sql(s"DROP TABLE IF EXISTS $table")
+        }
+      }
+    }
+  }
 
   // TODO: To be addressed after DF 55 migration
   ignore("grouped aggregate metrics are forwarded without fabricating global metrics") {

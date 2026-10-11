@@ -22,8 +22,10 @@ pub use crate::errors::ExecutionError;
 pub use iceberg_scan::*;
 pub use scan::*;
 
-mod dynamic_filter;
-pub(crate) use dynamic_filter::{DynamicFilterJoinExec, TopKReaderFilterExec};
+pub(crate) mod dynamic_filter;
+pub(crate) use dynamic_filter::{
+    DynamicFilterJoinExec, IcebergMinMaxFilterExec, TopKReaderFilterExec,
+};
 pub(crate) mod iceberg_common;
 pub use iceberg_common::clear_file_io_cache;
 mod iceberg_dictionary;

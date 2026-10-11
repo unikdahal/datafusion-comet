@@ -19,7 +19,7 @@
 //!
 //! Comet does not run DataFusion's physical optimizer, which normally connects
 //! dynamic-filter producers and consumers. This targeted wiring filters probe
-//! batches and lets a direct Parquet reader use the same live predicate for
+//! batches and lets direct Parquet and Iceberg readers use safe constraints for
 //! pruning. The original join verifies matches, including hash collisions.
 //! This leaves Spark's operator tree and partitioning intact and does
 //! not cross Spark exchanges or JVM/Arrow boundaries.
@@ -37,16 +37,19 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::distribution_requirements::InputDistributionRequirements;
 use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::statistics::{ChildStats, StatisticsArgs};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties,
     PlanProperties, ReplaceChildrenOptions, SendableRecordBatchStream,
 };
+use datafusion_comet_operators::CometFilterExec;
 use futures::StreamExt;
 
-use super::parquet_reader::try_attach_parquet_reader_filter;
-use super::DynamicFilterExec;
+use super::iceberg_reader::{attach_iceberg_join_filter, reaches_iceberg_reader, ReaderRefusal};
+use super::parquet_reader::{is_parquet_reader_key, try_attach_parquet_reader_filter};
+use super::{DynamicFilterExec, MAX_IN_LIST_LITERALS};
 
 /// A permanent plan must not own a completed join's filter or build accumulator:
 /// those can retain the hash map after its stream-owned reservation is released.
@@ -60,10 +63,12 @@ pub(crate) struct DynamicFilterJoinExec {
 }
 
 /// Per-execution join state. The permanent plan keeps no live filter; this value
-/// records whether this execution also connected its filter to the Parquet reader.
+/// records whether this execution also connected its filter to a native reader.
 struct RuntimeDynamicFilterJoin {
     join: HashJoinExec,
     reader_filter_attached: bool,
+    /// Why the filter did not reach a native reader, when it did not.
+    reader_refusal: Option<ReaderRefusal>,
 }
 
 impl DynamicFilterJoinExec {
@@ -89,18 +94,42 @@ impl DynamicFilterJoinExec {
             vec![Arc::clone(&self.template.on()[0].1)],
             lit(true),
         ));
-        let reader = try_attach_parquet_reader_filter(
-            self.template.right(),
-            Arc::clone(&predicate),
-            &self.config,
-        )?;
-        let reader_filter_attached = reader.is_some();
-        let consumer = Arc::new(DynamicFilterExec::new(
-            reader.unwrap_or_else(|| Arc::clone(self.template.right())),
-            Arc::clone(&predicate),
-            self.metrics.clone(),
-            "dynamic_filter_join",
-        ));
+        let probe_key = &self.template.on()[0].1;
+        let parquet_reader = if is_parquet_reader_key(probe_key, &self.template.right().schema()) {
+            try_attach_parquet_reader_filter(
+                self.template.right(),
+                Arc::clone(&predicate),
+                &self.config,
+            )?
+        } else {
+            None
+        };
+        let (reader, iceberg_reader) = match parquet_reader {
+            Some(reader) => (Ok(reader), false),
+            None => {
+                let reader =
+                    attach_iceberg_join_filter(self.template.right(), Arc::clone(&predicate))?;
+                let attached = reader.is_ok();
+                (reader, attached)
+            }
+        };
+        let reader_refusal = reader.as_ref().err().copied();
+        let reader_filter_attached = reader_refusal.is_none();
+        let input = reader.unwrap_or_else(|_| Arc::clone(self.template.right()));
+        let consumer: Arc<dyn ExecutionPlan> = if iceberg_reader {
+            // The reader rejects files, row groups and pages before decoding.
+            // HashJoinExec then verifies the surviving rows exactly. A second
+            // membership lookup on decoded batches cannot save any further IO
+            // and would copy payload arrays only to probe the hash table again.
+            input
+        } else {
+            Arc::new(DynamicFilterExec::new(
+                input,
+                Arc::clone(&predicate),
+                self.metrics.clone(),
+                "dynamic_filter_join",
+            ))
+        };
         // In particular, do not share CollectLeft's cached build future with the
         // template, another execution, or a reset plan.
         let join = self
@@ -113,6 +142,7 @@ impl DynamicFilterJoinExec {
         Ok(RuntimeDynamicFilterJoin {
             join,
             reader_filter_attached,
+            reader_refusal,
         })
     }
 
@@ -122,19 +152,19 @@ impl DynamicFilterJoinExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // DataFusion can materialize one IN-list literal per build row,
-        // despite admitting the list by packed-array bytes and distinct-key count.
-        // Avoid that unreserved allocation. Map membership
-        // reuses the join's already-reserved hash table and preserves duplicates.
+        // DataFusion materializes one IN-list literal per build row, although it admits the
+        // list by packed-array bytes and distinct-key count. Duplicate literals can exceed
+        // the reader's literal cap, in which case the reader declines membership extraction.
+        // Builds exceeding either producer budget reuse the already-reserved hash table.
         let mut config = context.session_config().clone();
         config
             .options_mut()
             .optimizer
-            .hash_join_inlist_pushdown_max_size = 0;
+            .hash_join_inlist_pushdown_max_size = IN_LIST_PUSHDOWN_MAX_BYTES;
         config
             .options_mut()
             .optimizer
-            .hash_join_inlist_pushdown_max_distinct_values = 0;
+            .hash_join_inlist_pushdown_max_distinct_values = MAX_IN_LIST_LITERALS;
         let context = Arc::new(TaskContext::new(
             context.task_id(),
             context.session_id(),
@@ -245,6 +275,11 @@ impl ExecutionPlan for DynamicFilterJoinExec {
         } else {
             "dynamic_filter_join_filters_skipped"
         };
+        if let Some(reason) = runtime.reader_refusal {
+            MetricBuilder::new(&self.metrics)
+                .counter(reason.metric_name("dynamic_filter_join"), partition)
+                .add(1);
+        }
         MetricBuilder::new(&self.metrics)
             .counter(attachment_metric, partition)
             .add(1);
@@ -268,16 +303,25 @@ impl ExecutionPlan for DynamicFilterJoinExec {
     }
 }
 
+/// Largest source key array DataFusion may turn into an IN list (16 KiB).
+/// The separate 1,024-distinct-key cap does not bound duplicate literal count.
+const IN_LIST_PUSHDOWN_MAX_BYTES: usize = 16 * 1024;
+
 fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Option<&'static str>> {
     if !config.optimizer.enable_dynamic_filter_pushdown
         || !config.optimizer.enable_join_dynamic_filter_pushdown
     {
         return Ok(Some("disabled by DataFusion session options"));
     }
-    if join.join_type() != &JoinType::Inner
-        || join.null_equality() != NullEquality::NullEqualsNothing
+    // The build side is the left input here. A probe row without a build match never reaches
+    // the output of these join types, so dropping it early cannot change the result. Outer
+    // and anti joins on the probe side emit such rows and stay unfiltered.
+    if !matches!(
+        join.join_type(),
+        JoinType::Inner | JoinType::LeftSemi | JoinType::RightSemi
+    ) || join.null_equality() != NullEquality::NullEqualsNothing
     {
-        return Ok(Some("only ordinary inner equijoins are supported"));
+        return Ok(Some("only inner and semi equijoins are supported"));
     }
     if !matches!(
         join.partition_mode(),
@@ -306,15 +350,88 @@ fn ineligible_reason(join: &HashJoinExec, config: &ConfigOptions) -> Result<Opti
     }
     let build_type = build_key.data_type(join.left().schema().as_ref())?;
     let probe_type = probe_key.data_type(join.right().schema().as_ref())?;
-    if build_type != probe_type
-        || !matches!(
-            build_type,
-            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
-        )
+    if build_type != probe_type || !super::is_supported_join_key_type(&build_type) {
+        return Ok(Some(
+            "requires matching integer, date, timestamp, decimal or string keys",
+        ));
+    }
+    if (matches!(build_type, DataType::Decimal128(_, _)) || is_string_key_type(&build_type))
+        && (!is_direct_pruning_key(join.left(), build_key)
+            || !is_direct_pruning_key(join.right(), probe_key))
     {
-        return Ok(Some("requires matching signed integer keys"));
+        return Ok(Some(
+            "computed or annotated decimal/string join keys are not supported",
+        ));
+    }
+    // Decimal batches support exact bounds and membership on every probe backend.
+    // Date, timestamp and string keys require native Iceberg probes.
+    if !is_parquet_reader_key(probe_key, &join.right().schema())
+        && !matches!(probe_type, DataType::Decimal128(_, _))
+        && !reaches_iceberg_reader(join.right())
+    {
+        return Ok(Some(
+            "date, timestamp and string keys require a native Iceberg probe",
+        ));
     }
     Ok(None)
+}
+
+/// String dictionary values compare by their bytes, never by dictionary indices.
+/// Keep the exact Arrow type match above, including the dictionary key/value types;
+/// Utf8/Utf8View coercions must be materialized before the join, not inferred here.
+pub(super) fn is_string_key_type(data_type: &DataType) -> bool {
+    super::is_runtime_pruning_string_key_type(data_type)
+}
+
+/// A cast or padding expression in a projection is still a computed pruning key,
+/// even when the join itself sees only the projection's output column.
+/// Spark exchange/JVM inputs are already materialized columns in the join's domain.
+/// Reader attachment stops at those boundaries; it cannot reach a pre-cast scan.
+/// In particular, a lossless build upcast below a broadcast exchange cannot change
+/// the probe reader's scale, so Spark-side lineage tracking adds no safety here.
+pub(super) fn is_direct_pruning_key(
+    input: &Arc<dyn ExecutionPlan>,
+    key: &Arc<dyn PhysicalExpr>,
+) -> bool {
+    use datafusion::physical_plan::filter::FilterExec;
+
+    let Some(column) = key.downcast_ref::<Column>() else {
+        return false;
+    };
+    // Spark rejects collations/CHAR before serde; Arrow has no collation ID.
+    // If an external/native schema supplies semantic annotations, fail closed.
+    let schema = input.schema();
+    let field = schema.field(column.index());
+    if is_string_key_type(field.data_type()) {
+        let metadata = field.metadata();
+        let annotated_comparison = ["__COLLATIONS", "ARROW:extension:name"]
+            .iter()
+            .any(|name| metadata.contains_key(*name));
+        // VARCHAR constrains writes but does not pad comparisons. CHAR and unknown
+        // raw type annotations cannot prove byte equality of the stored values.
+        let padded_or_unknown = metadata
+            .get("__CHAR_VARCHAR_TYPE_STRING")
+            .is_some_and(|raw_type| !raw_type.to_ascii_lowercase().starts_with("varchar("));
+        if annotated_comparison || padded_or_unknown {
+            return false;
+        }
+    }
+    if let Some(projection) = input.downcast_ref::<ProjectionExec>() {
+        return projection
+            .expr()
+            .get(column.index())
+            .is_some_and(|projected| {
+                projected.expr.is::<Column>()
+                    && is_direct_pruning_key(projection.input(), &projected.expr)
+            });
+    }
+    if let Some(filter) = input.downcast_ref::<CometFilterExec>() {
+        return !filter.has_projection() && is_direct_pruning_key(filter.input(), key);
+    }
+    if let Some(filter) = input.downcast_ref::<FilterExec>() {
+        return filter.projection().is_none() && is_direct_pruning_key(filter.input(), key);
+    }
+    true
 }
 
 #[cfg(test)]
