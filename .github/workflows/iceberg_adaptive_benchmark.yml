@@ -174,7 +174,7 @@ jobs:
           RS
           rustfmt --edition 2021 native/core/src/execution/operators/iceberg_scan_order_timing_tests.rs
           cd native
-          cargo test --release --locked -p datafusion-comet --lib runtime_task_order_timing -- --ignored --nocapture --test-threads=1 | tee ../dist/ordering.log
+          cargo test --release --locked -p datafusion-comet --lib runtime_task_ -- --ignored --nocapture --test-threads=1 | tee ../dist/ordering.log
       - uses: actions/upload-artifact@v7
         with:
           name: comet-${{ matrix.side }}

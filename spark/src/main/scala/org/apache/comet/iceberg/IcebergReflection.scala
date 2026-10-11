@@ -641,6 +641,7 @@ object IcebergReflection extends Logging {
       tasks: java.util.List[_],
       columns: Seq[String]): Map[String, AnyRef] = {
     if (columns.isEmpty || tasks.size() <= 1 || isStagedScan(scan)) return Map.empty
+    val started = System.nanoTime()
     try {
       val conf = SQLConf.get
       if (!CometConf.COMET_ICEBERG_RUNTIME_STATS_ENABLED.get(conf)) return Map.empty
@@ -734,6 +735,10 @@ object IcebergReflection extends Logging {
         logWarning(
           s"Runtime file statistics unavailable; retaining row-group pruning: ${e.getMessage}")
         Map.empty
+    } finally {
+      logInfo(
+        s"Iceberg runtime statistics: tasks=${tasks.size()}, " +
+          s"elapsed_ms=${(System.nanoTime() - started) / 1000000.0}")
     }
   }
 

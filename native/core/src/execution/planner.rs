@@ -8644,3 +8644,7 @@ mod tests {
         assert_eq!(out.data_type(), &promised);
     }
 }
+
+#[cfg(test)]
+#[path = "iceberg_metrics_timing_tests.rs"]
+mod iceberg_metrics_timing_tests;

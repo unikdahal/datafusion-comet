@@ -547,7 +547,11 @@ private[comet] object PlanDataInjector extends Logging {
  */
 private[comet] object IcebergPlanDataInjector extends PlanDataInjector {
 
-  override type Prepared = OperatorOuterClass.IcebergScanCommon
+  case class PreparedIcebergCommon(
+      full: OperatorOuterClass.IcebergScanCommon,
+      withoutMetrics: OperatorOuterClass.IcebergScanCommon)
+
+  override type Prepared = PreparedIcebergCommon
 
   override val opStructCase: Operator.OpStructCase = Operator.OpStructCase.ICEBERG_SCAN
 
@@ -564,8 +568,13 @@ private[comet] object IcebergPlanDataInjector extends PlanDataInjector {
   }
 
   // Parsed once per stage or shuffle by injectPlanData's memo, never per partition.
-  override def prepareCommon(commonBytes: Array[Byte]): Prepared =
-    OperatorOuterClass.IcebergScanCommon.parseFrom(commonBytes)
+  override def prepareCommon(commonBytes: Array[Byte]): Prepared = {
+    val common = OperatorOuterClass.IcebergScanCommon.parseFrom(commonBytes)
+    val withoutMetrics =
+      if (common.getFileMetricsPoolCount == 0) common
+      else common.toBuilder.clearFileMetricsPool().build()
+    PreparedIcebergCommon(common, withoutMetrics)
+  }
 
   override def inject(op: Operator, common: Prepared, partitionBytes: Array[Byte]): Operator = {
     val scan = op.getIcebergScan
@@ -573,8 +582,33 @@ private[comet] object IcebergPlanDataInjector extends PlanDataInjector {
     val tasksOnly = OperatorOuterClass.IcebergScan.parseFrom(partitionBytes)
 
     val scanBuilder = scan.toBuilder
-    scanBuilder.setCommon(common)
-    scanBuilder.addAllFileScanTasks(tasksOnly.getFileScanTasksList)
+    // Native plans are serialized and prost-decoded separately for every Spark partition.
+    // Carry only referenced metrics across that boundary; the stage-wide pool can contain
+    // thousands of files while this partition reads only a handful. Remap by old index so
+    // splits share one entry and preserve the exact statistics (including absent bounds).
+    if (common.full.getFileMetricsPoolCount == 0) {
+      scanBuilder.setCommon(common.full)
+      scanBuilder.addAllFileScanTasks(tasksOnly.getFileScanTasksList)
+    } else {
+      val localCommon = common.withoutMetrics.toBuilder
+      val indices = scala.collection.mutable.HashMap.empty[Int, Int]
+      val tasks = tasksOnly.getFileScanTasksList.iterator()
+      while (tasks.hasNext) {
+        val task = tasks.next()
+        if (task.hasFileMetricsIdx) {
+          val localIndex = indices.getOrElseUpdate(
+            task.getFileMetricsIdx, {
+              val index = localCommon.getFileMetricsPoolCount
+              localCommon.addFileMetricsPool(common.full.getFileMetricsPool(task.getFileMetricsIdx))
+              index
+            })
+          scanBuilder.addFileScanTasks(task.toBuilder.setFileMetricsIdx(localIndex))
+        } else {
+          scanBuilder.addFileScanTasks(task)
+        }
+      }
+      scanBuilder.setCommon(localCommon)
+    }
 
     op.toBuilder.setIcebergScan(scanBuilder).build()
   }

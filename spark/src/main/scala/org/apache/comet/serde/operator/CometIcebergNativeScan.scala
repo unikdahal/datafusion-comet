@@ -1475,6 +1475,9 @@ object CometIcebergNativeScan extends CometOperatorSerde[CometBatchScanExec] wit
         s"total=$perPartitionTotal bytes, max=$perPartitionMax bytes")
 
     val commonBytes = commonBuilder.build().toByteArray
+    logInfo(
+      s"Iceberg runtime metrics transport: entries=${commonBuilder.getFileMetricsPoolCount}, " +
+        s"common_bytes=${commonBytes.length}")
     val perPartitionBytes = perPartitionBuilders.map(_.toByteArray).toArray
 
     (commonBytes, perPartitionBytes)
