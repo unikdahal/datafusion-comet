@@ -53,6 +53,47 @@ pub trait ShufflePartitionPusher: Send + Sync {
 
     /// Sends one complete, length-prefixed Arrow IPC shuffle block.
     fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()>;
+
+    /// Returns how many frame-sized buffers can be alive at once for one pushed frame, counting
+    /// the encoder's output. The writer admits that many frames before it starts encoding.
+    fn frame_copies(&self) -> usize {
+        3
+    }
+
+    /// Returns whether frames should be handed over with [`Self::push_owned_partition_data`]
+    /// instead of being lent with [`Self::push_partition_data`].
+    fn accepts_owned_frames(&self) -> bool {
+        false
+    }
+
+    /// Sends one complete frame, taking ownership of its buffer so that an implementation can
+    /// keep it alive until its transport finishes instead of copying it.
+    fn push_owned_partition_data(&self, partition_id: i32, frame: Vec<u8>) -> Result<()> {
+        self.push_partition_data(partition_id, &frame)
+    }
+}
+
+/// An encoded frame lent to the JVM through a direct `ByteBuffer`.
+///
+/// The JVM receives an opaque handle along with the buffer and must pass it to
+/// [`release_native_frame`] exactly once, after the last reference to the buffer is gone.
+struct NativeFrame(Vec<u8>);
+
+impl NativeFrame {
+    fn into_handle(self) -> i64 {
+        Box::into_raw(Box::new(self)) as i64
+    }
+}
+
+/// Frees a frame lent to the JVM by [`JavaShufflePartitionPusher::push_owned_partition_data`].
+///
+/// # Safety
+///
+/// `handle` must have been returned by that method and must not have been released before.
+pub unsafe fn release_native_frame(handle: i64) {
+    if handle != 0 {
+        drop(Box::from_raw(handle as *mut NativeFrame));
+    }
 }
 
 /// Invokes a task-owned JVM shuffle callback from any native execution thread.
@@ -65,6 +106,9 @@ pub struct JavaShufflePartitionPusher {
     push_method: JMethodID,
     reserve_method: JMethodID,
     release_method: JMethodID,
+    /// Present when the callback accepts frames that stay in native memory.
+    push_frame_method: Option<JMethodID>,
+    frame_copies: usize,
     max_frame_size: usize,
     max_reservation_size: usize,
 }
@@ -162,6 +206,69 @@ impl JavaShufflePartitionPusher {
                 "Remote shuffle maximum encoding reservation must be positive".to_string(),
             ));
         }
+        let accepts_frames_method = env
+            .get_method_id(
+                &callback_class,
+                jni::jni_str!("acceptsNativeFrames"),
+                jni::jni_sig!("()Z"),
+            )
+            .map_err(CometError::from)?;
+        // SAFETY: the ID was resolved on this callback class with a no-argument boolean ABI.
+        let accepts_native_frames = unsafe {
+            env.call_method_unchecked(
+                callback,
+                accepts_frames_method,
+                ReturnType::Primitive(Primitive::Boolean),
+                &[],
+            )
+        };
+        if let Some(exception) = check_exception(env)? {
+            return Err(exception.into());
+        }
+        let accepts_native_frames = accepts_native_frames
+            .map_err(CometError::from)?
+            .z()
+            .map_err(CometError::from)?;
+        let push_frame_method = if accepts_native_frames {
+            Some(
+                env.get_method_id(
+                    &callback_class,
+                    jni::jni_str!("pushNativeFrame"),
+                    jni::jni_sig!("(ILjava/nio/ByteBuffer;JI)V"),
+                )
+                .map_err(CometError::from)?,
+            )
+        } else {
+            None
+        };
+        let frame_copies_method = env
+            .get_method_id(
+                &callback_class,
+                jni::jni_str!("frameCopies"),
+                jni::jni_sig!("()I"),
+            )
+            .map_err(CometError::from)?;
+        // SAFETY: the ID was resolved on this callback class with a no-argument int ABI.
+        let frame_copies = unsafe {
+            env.call_method_unchecked(
+                callback,
+                frame_copies_method,
+                ReturnType::Primitive(Primitive::Int),
+                &[],
+            )
+        };
+        if let Some(exception) = check_exception(env)? {
+            return Err(exception.into());
+        }
+        let frame_copies = frame_copies
+            .map_err(CometError::from)?
+            .i()
+            .map_err(CometError::from)?;
+        if !(1..=3).contains(&frame_copies) {
+            return Err(DataFusionError::Execution(format!(
+                "Remote shuffle frame copy count must be between 1 and 3, got {frame_copies}"
+            )));
+        }
         let callback = env.new_global_ref(callback).map_err(CometError::from)?;
 
         Ok(Self {
@@ -169,6 +276,8 @@ impl JavaShufflePartitionPusher {
             push_method,
             reserve_method,
             release_method,
+            push_frame_method,
+            frame_copies: frame_copies as usize,
             max_frame_size: configured_maximum as usize,
             max_reservation_size: reservation_maximum as usize,
         })
@@ -246,6 +355,64 @@ impl ShufflePartitionPusher for JavaShufflePartitionPusher {
 
     fn max_reservation_size(&self) -> usize {
         self.max_reservation_size
+    }
+
+    fn frame_copies(&self) -> usize {
+        self.frame_copies
+    }
+
+    fn accepts_owned_frames(&self) -> bool {
+        self.push_frame_method.is_some()
+    }
+
+    fn push_owned_partition_data(&self, partition_id: i32, frame: Vec<u8>) -> Result<()> {
+        let Some(push_frame_method) = self.push_frame_method else {
+            return self.push_partition_data(partition_id, &frame);
+        };
+        Self::checked_payload_length(partition_id, frame.len())?;
+        let retained = i32::try_from(frame.capacity()).map_err(|_| {
+            DataFusionError::Execution(format!(
+                "Remote shuffle frame capacity {} exceeds the JVM integer limit",
+                frame.capacity()
+            ))
+        })?;
+        let mut frame = NativeFrame(frame);
+        let data = frame.0.as_mut_ptr();
+        let length = frame.0.len();
+
+        JVMClasses::with_env(|env| {
+            // SAFETY: `data` points to `length` initialized bytes of a heap allocation that moves
+            // into the handle below without being reallocated, and stays alive until the JVM
+            // releases the handle.
+            let buffer = match unsafe { env.new_direct_byte_buffer(data, length) } {
+                Ok(buffer) => buffer,
+                // The JVM never saw the frame, so it is still owned here and dropped on return.
+                Err(error) => return Err(CometError::from(error).into()),
+            };
+            // From this call on, the JVM owns the frame and releases it exactly once, even if the
+            // call throws.
+            let handle = frame.into_handle();
+            // SAFETY: the method ID was resolved on this callback class with the
+            // `(ILjava/nio/ByteBuffer;JI)V` signature.
+            let result = unsafe {
+                env.call_method_unchecked(
+                    self.callback.as_obj(),
+                    push_frame_method,
+                    ReturnType::Primitive(Primitive::Void),
+                    &[
+                        JValue::Int(partition_id).as_jni(),
+                        JValue::Object(&buffer).as_jni(),
+                        JValue::Long(handle).as_jni(),
+                        JValue::Int(retained).as_jni(),
+                    ],
+                )
+            };
+            if let Some(exception) = check_exception(env)? {
+                return Err(exception.into());
+            }
+            result.map_err(CometError::from)?;
+            Ok(())
+        })
     }
 
     fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()> {
