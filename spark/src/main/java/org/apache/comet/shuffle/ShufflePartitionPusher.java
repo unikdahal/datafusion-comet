@@ -20,6 +20,7 @@
 package org.apache.comet.shuffle;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 /**
  * Receives complete encoded shuffle blocks from a native partition writer.
@@ -52,4 +53,37 @@ public interface ShufflePartitionPusher {
 
   /** Pushes one complete, length-prefixed Arrow IPC block for the given output partition. */
   void pushPartitionData(int partitionId, byte[] data, int length) throws IOException;
+
+  /**
+   * Returns how many frame-sized buffers can be alive at once for one pushed frame, counting the
+   * native encoder's output. Native writers admit that many frames before encoding one.
+   */
+  default int frameCopies() {
+    return 3;
+  }
+
+  /** Returns whether native writers should push frames through {@link #pushNativeFrame}. */
+  default boolean acceptsNativeFrames() {
+    return false;
+  }
+
+  /**
+   * Pushes one complete frame that remains in native memory, taking ownership of it.
+   *
+   * <p>{@code frame} is a direct buffer over the native frame. Implementations must call {@link
+   * NativeShuffleFrames#release} with {@code releaseHandle} exactly once, after the last reference
+   * to {@code frame} is gone, including when this method throws. The frame then keeps {@code
+   * retainedBytes} of native memory, which an implementation that bounds in-flight memory should
+   * account for until it is released.
+   */
+  default void pushNativeFrame(
+      int partitionId, ByteBuffer frame, long releaseHandle, int retainedBytes) throws IOException {
+    try {
+      byte[] data = new byte[frame.remaining()];
+      frame.duplicate().get(data);
+      pushPartitionData(partitionId, data, data.length);
+    } finally {
+      NativeShuffleFrames.release(releaseHandle);
+    }
+  }
 }
