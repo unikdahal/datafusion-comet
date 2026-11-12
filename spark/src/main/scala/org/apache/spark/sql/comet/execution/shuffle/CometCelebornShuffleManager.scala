@@ -38,7 +38,7 @@ import org.apache.spark.sql.comet.PlanDataInjector
 import org.apache.spark.util.RpcUtils
 
 import org.apache.comet.CometConf
-import org.apache.comet.shuffle.{CelebornShufflePartitionPusher, CelebornShufflePusherFactory, ResolvedCelebornShufflePusher}
+import org.apache.comet.shuffle.{CelebornMapOutputPusher, CelebornRawPushPartitionPusher, CelebornShufflePartitionPusher, CelebornShufflePusherFactory, ResolvedCelebornShufflePusher}
 import org.apache.comet.util.ClassLoaders
 
 /**
@@ -609,9 +609,8 @@ private[shuffle] object CometCelebornShuffleManager {
       conf: SparkConf,
       loadCelebornConf: SparkConf => AnyRef = reflectedCelebornConf,
       pushCompletionUnavailableReason: () => Option[String] = () =>
-        Option(
-          CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(
-            ClassLoaders.loadClass("org.apache.celeborn.client.ShuffleClientImpl"))))
+        nativePushUnavailableReason(
+          ClassLoaders.loadClass("org.apache.celeborn.client.ShuffleClientImpl")))
       : CelebornNativeShufflePlanningSupport = {
     if (conf.getBoolean("spark.io.encryption.enabled", false)) {
       return CelebornNativeShufflePlanningSupport(
@@ -656,9 +655,20 @@ private[shuffle] object CometCelebornShuffleManager {
     }
   }
 
+  /**
+   * Returns why native shuffle cannot track push completion with this Celeborn client, if it
+   * cannot. Clients that push caller-owned buffers report completion through a public API.
+   */
+  private[shuffle] def nativePushUnavailableReason(clientClass: Class[_]): Option[String] = {
+    val rawPushUnavailable = Option(CelebornRawPushPartitionPusher.unavailableReason(clientClass))
+    rawPushUnavailable.filter { _ =>
+      CelebornShufflePartitionPusher.nativePushCompletionUnavailableReason(clientClass) != null
+    }
+  }
+
   private[shuffle] def maxNativeFrameBytes(
       configuredMaxFrameBytes: Int,
-      pusher: CelebornShufflePartitionPusher): Int =
+      pusher: CelebornMapOutputPusher): Int =
     math.min(configuredMaxFrameBytes, pusher.maxFrameBytes())
 
   private[shuffle] def isCelebornHandle(handle: ShuffleHandle): Boolean =

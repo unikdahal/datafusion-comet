@@ -207,7 +207,9 @@ pub use comet_task_memory_manager::*;
 use comet_udf_bridge::CometUdfBridge;
 pub use output_stream_sink::{JavaOutputStreamSink, OutputStreamSink};
 use shuffle_block_iterator::CometShuffleBlockIterator;
-pub use shuffle_partition_pusher::{JavaShufflePartitionPusher, ShufflePartitionPusher};
+pub use shuffle_partition_pusher::{
+    release_native_frame, JavaShufflePartitionPusher, ShufflePartitionPusher,
+};
 
 /// The JVM classes that are used in the JNI calls.
 #[allow(dead_code)] // we need to keep references to Java items to prevent GC

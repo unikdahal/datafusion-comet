@@ -453,3 +453,117 @@ fn explicit_local_destination_writes_data_and_publishes_offsets() {
     assert_eq!(published[0], 0);
     assert_eq!(published[1] as usize, frame.len());
 }
+
+/// Accepts frames by ownership, as a transport that sends native memory without copying it.
+#[derive(Default)]
+struct OwnedFramePusher {
+    frames: Mutex<Vec<RecordedFrame>>,
+    capacities: Mutex<Vec<usize>>,
+    reservations: Mutex<Vec<usize>>,
+}
+
+impl ShufflePartitionPusher for OwnedFramePusher {
+    fn reserve_partition_data(&self, reservation_bytes: usize) -> Result<()> {
+        self.reservations.lock().unwrap().push(reservation_bytes);
+        Ok(())
+    }
+
+    fn frame_copies(&self) -> usize {
+        1
+    }
+
+    fn accepts_owned_frames(&self) -> bool {
+        true
+    }
+
+    fn push_partition_data(&self, _partition_id: i32, _data: &[u8]) -> Result<()> {
+        panic!("a pusher that accepts owned frames must not receive borrowed frames");
+    }
+
+    fn push_owned_partition_data(&self, partition_id: i32, frame: Vec<u8>) -> Result<()> {
+        self.capacities.lock().unwrap().push(frame.capacity());
+        self.frames.lock().unwrap().push((partition_id, frame));
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ReservationRecordingPusher {
+    frames: Mutex<Vec<RecordedFrame>>,
+    reservations: Mutex<Vec<usize>>,
+}
+
+impl ShufflePartitionPusher for ReservationRecordingPusher {
+    fn reserve_partition_data(&self, reservation_bytes: usize) -> Result<()> {
+        self.reservations.lock().unwrap().push(reservation_bytes);
+        Ok(())
+    }
+
+    fn push_partition_data(&self, partition_id: i32, data: &[u8]) -> Result<()> {
+        self.frames
+            .lock()
+            .unwrap()
+            .push((partition_id, data.to_vec()));
+        Ok(())
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn rss_owned_frames_match_copied_frames_with_smaller_reservations() {
+    let batches: Vec<RecordBatch> = (0..8).map(|i| int_batch(i * 4096, 4096)).collect();
+    let schema = batches[0].schema();
+    let partitioning = CometPartitioning::Hash(vec![Arc::new(Column::new("value", 0))], 4);
+
+    let owned = Arc::new(OwnedFramePusher::default());
+    run_execution(&rss_execution(
+        batches.clone(),
+        Arc::clone(&schema),
+        partitioning.clone(),
+        owned.clone(),
+        CompressionCodec::Zstd(1),
+        8 * 1024 * 1024,
+        None,
+    ))
+    .unwrap();
+
+    let copied = Arc::new(ReservationRecordingPusher::default());
+    run_execution(&rss_execution(
+        batches,
+        schema,
+        partitioning,
+        copied.clone(),
+        CompressionCodec::Zstd(1),
+        8 * 1024 * 1024,
+        None,
+    ))
+    .unwrap();
+
+    let owned_frames = owned.frames.lock().unwrap().clone();
+    let copied_frames = copied.frames.lock().unwrap().clone();
+    assert!(!owned_frames.is_empty());
+    assert_eq!(
+        owned_frames, copied_frames,
+        "handing over a frame must not change its bytes"
+    );
+
+    // Compressed frames are much smaller than their uncompressed encoding bound; a frame kept
+    // alive by the transport must not pin that unused capacity.
+    for ((_, frame), capacity) in owned_frames
+        .iter()
+        .zip(owned.capacities.lock().unwrap().iter())
+    {
+        assert!(
+            *capacity <= frame.len() + frame.len() / 4,
+            "frame of {} bytes retained {capacity} bytes of capacity",
+            frame.len()
+        );
+    }
+
+    let owned_total: usize = owned.reservations.lock().unwrap().iter().sum();
+    let copied_total: usize = copied.reservations.lock().unwrap().iter().sum();
+    assert!(
+        owned_total < copied_total,
+        "one frame copy must reserve less than three: {owned_total} vs {copied_total}"
+    );
+}

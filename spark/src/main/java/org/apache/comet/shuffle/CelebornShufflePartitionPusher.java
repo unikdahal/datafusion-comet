@@ -31,7 +31,6 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -40,7 +39,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 /** Adapts complete Comet shuffle frames to an existing, task-owned Celeborn shuffle client. */
-public final class CelebornShufflePartitionPusher implements ShufflePartitionPusher {
+public final class CelebornShufflePartitionPusher implements CelebornMapOutputPusher {
 
   private static final int CELEBORN_BATCH_HEADER_BYTES = 4 * Integer.BYTES;
   private static final int MINIMUM_COMET_FRAME_BYTES = 2 * Long.BYTES;
@@ -63,7 +62,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   private final Field inFlightRequestTracker;
   private final Field totalInFlightRequests;
   private final Field pushStateException;
-  private final Field cryptoHandler;
+  private final CelebornClientEncryption encryption;
   private final ExecutorShufflePushAdmission admission;
   private final CelebornTransportCallbackTracker transportCallbacks;
   private final Object submissionLock = new Object();
@@ -375,8 +374,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     this.inFlightRequestTracker = trackerField;
     this.totalInFlightRequests = requestCountField;
     this.pushStateException = exceptionField;
-    this.cryptoHandler = optionalCryptoHandler(shuffleClient);
-    requireUnencryptedClient();
+    this.encryption = new CelebornClientEncryption(shuffleClient);
     this.admission = ExecutorShufflePushAdmission.forClient(shuffleClient, maxInFlightBytes);
     this.transportCallbacks =
         getPushState == null ? null : admission.transportCallbacks(shuffleClient);
@@ -424,44 +422,9 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
     throw new NoSuchFieldException(owner.getName() + "." + name);
   }
 
-  private static Field optionalCryptoHandler(Object client) {
-    try {
-      Field field = declaredField(client.getClass(), "cryptoHandler");
-      if (Modifier.isStatic(field.getModifiers()) || field.getType() != Optional.class) {
-        throw new IllegalArgumentException("Cannot inspect the Celeborn client's encryption state");
-      }
-      field.setAccessible(true);
-      return field;
-    } catch (NoSuchFieldException absent) {
-      // Celeborn 0.6 has no encryption handler. Normal Spark construction is also guarded by
-      // spark.io.encryption.enabled in the factory, including legacy client APIs.
-      return null;
-    }
-  }
-
-  private void requireUnencryptedClient() {
-    if (cryptoHandler == null) {
-      return;
-    }
-    try {
-      Object handler = cryptoHandler.get(shuffleClient);
-      if (!(handler instanceof Optional) || ((Optional<?>) handler).isPresent()) {
-        // Stock SparkCryptoHandler retains a per-thread high-water buffer and creates additional
-        // encrypted copies. It has no bounded-workspace contract. Reject before encoding or raw
-        // submission; never remove the handler or downgrade the shared client's encryption.
-        throw new UnsupportedOperationException(
-            "Encrypted native Celeborn shuffle is not supported by bounded push admission; "
-                + "use ordinary Spark shuffle with encryption enabled");
-      }
-    } catch (IllegalAccessException failure) {
-      throw new IllegalStateException(
-          "Cannot inspect the Celeborn client's encryption state", failure);
-    }
-  }
-
   @Override
   public void reservePartitionData(int maxLength) throws IOException {
-    requireUnencryptedClient();
+    encryption.requireUnencrypted();
     if (maxLength <= 0 || maxLength > maxReservationBytes) {
       throw new IOException("Celeborn native frame reservation exceeds its byte limit");
     }
@@ -505,7 +468,7 @@ public final class CelebornShufflePartitionPusher implements ShufflePartitionPus
   /** Sends exactly one complete, already-compressed Comet shuffle frame to Celeborn. */
   @Override
   public void pushPartitionData(int partitionId, byte[] data, int length) throws IOException {
-    requireUnencryptedClient();
+    encryption.requireUnencrypted();
     validateFrame(partitionId, data, length);
     beginPush();
     PushReservation reservation;
