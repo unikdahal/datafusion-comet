@@ -31,6 +31,7 @@ import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleBlockResolver, Shuffl
 import org.apache.spark.sql.comet.{NativeScanPlanDataInjector, PlanDataInjector}
 
 import org.apache.comet.serde.OperatorOuterClass
+import org.apache.comet.shuffle.RecordingCelebornRawPushClient
 
 class CometCelebornShuffleManagerSuite extends AnyFunSuite {
 
@@ -568,6 +569,13 @@ class CometCelebornShuffleManagerSuite extends AnyFunSuite {
     assert(composite.nativeShuffleFallbackReason(4).nonEmpty)
     assert(loads == 1)
     assert(composite.registerShuffle[Any, Any, Any](31, null) eq backend.returnedHandle)
+  }
+
+  test("native planning admits clients that push caller-owned buffers") {
+    assert(
+      CometCelebornShuffleManager
+        .nativePushUnavailableReason(classOf[RecordingCelebornRawPushClient])
+        .isEmpty)
   }
 
   test("native planning uses client compatibility without a scheduler-version gate") {
