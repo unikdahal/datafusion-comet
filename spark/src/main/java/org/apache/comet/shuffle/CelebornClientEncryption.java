@@ -39,7 +39,8 @@ final class CelebornClientEncryption {
       try {
         Field field = current.getDeclaredField("cryptoHandler");
         if (Modifier.isStatic(field.getModifiers()) || field.getType() != Optional.class) {
-          throw new IllegalArgumentException("Cannot inspect the Celeborn client's encryption state");
+          throw new IllegalArgumentException(
+              "Cannot inspect the Celeborn client's encryption state");
         }
         field.setAccessible(true);
         return field;
