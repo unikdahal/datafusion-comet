@@ -19,17 +19,14 @@
 
 package org.apache.comet;
 
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.channels.Channels;
-import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.util.EnumSet;
 
 /** Owns a bundled native library until it is loaded or discarded. */
 final class NativeLibrary implements AutoCloseable {
@@ -72,15 +69,17 @@ final class NativeLibrary implements AutoCloseable {
   }
 
   static void copy(InputStream resource, Path library) throws IOException {
-    // CREATE_NEW refuses existing entries, including symbolic links. Both directory and file
+    // createFile refuses existing entries, including symbolic links. Both directory and file
     // permissions are set at creation, before any library bytes are written.
-    try (SeekableByteChannel channel =
-            Files.newByteChannel(
-                library,
-                EnumSet.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE),
-                PosixFilePermissions.asFileAttribute(
-                    PosixFilePermissions.fromString("rw-------")));
-        OutputStream output = Channels.newOutputStream(channel)) {
+    Files.createFile(
+        library,
+        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+    // Write through a stream rather than a channel: a channel closes when its thread is
+    // interrupted. The library is unpacked by the first task that needs it, from a static
+    // initializer that runs once, so cancelling that task while it unpacks would leave Comet
+    // without its native library for the rest of the executor's life. The file was just created
+    // in a directory only this user can access, so reopening it by path is safe.
+    try (OutputStream output = new FileOutputStream(library.toFile())) {
       resource.transferTo(output);
     }
     Files.setPosixFilePermissions(library, PosixFilePermissions.fromString("r--------"));
