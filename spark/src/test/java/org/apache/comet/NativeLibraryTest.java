@@ -210,4 +210,18 @@ public class NativeLibraryTest {
       assertEquals(0, entries.count());
     }
   }
+
+  @Test
+  public void extractionSurvivesAnInterruptedThread() throws Exception {
+    // Spark interrupts a task's thread to cancel it. The first task to need the library unpacks
+    // it, and a failure there disables Comet for the rest of the executor's life.
+    Thread.currentThread().interrupt();
+    try (NativeLibrary extracted =
+        NativeLibrary.extract(resource(), NAME, temp.getRoot().toPath())) {
+      assertArrayEquals(CONTENT, Files.readAllBytes(extracted.path()));
+      assertTrue("the interrupt must be left for the task to act on", Thread.interrupted());
+    } finally {
+      Thread.interrupted();
+    }
+  }
 }
